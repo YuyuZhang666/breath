@@ -33,6 +33,21 @@ def certificate(*, station_health: int, secured: bool):
 
 
 class StrategyFeatureTests(unittest.TestCase):
+    def test_robot_threat_uses_canonical_power_and_one_turn_range(self) -> None:
+        observed = observation(
+            our_units=(unit(10, 5, 5, 'station', health=1000, level=1),),
+            robots=(
+                robot(20, 8, 8, role_type='smallRobot'),
+                robot(21, 12, 12, role_type='middleRobot'),
+                robot(22, 14, 14, role_type='largeRobot'),
+            ),
+        )
+
+        features = extract_features(observed)
+
+        self.assertEqual(features.targeted_robot_attack_power, 35)
+        self.assertEqual(features.targeted_robot_one_turn_attack_power, 5)
+
     def test_extracts_station_delta_and_visible_targeted_threat(self) -> None:
         previous = observation(
             round_no=70,

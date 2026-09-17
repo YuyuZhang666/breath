@@ -198,6 +198,39 @@ class DayJobTests(unittest.TestCase):
         purchase = next(job for job in jobs[10010] if job.kind is JobKind.BUY)
         self.assertEqual((purchase.name, purchase.quantity), ('Medicine', 1))
 
+    def test_medicine_stock_target_caps_concurrent_purchase_jobs(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 1, 2, 'worker'),
+                unit(10011, 2, 1, 'worker'),
+            ),
+            zones=(Zone(Position(2, 2), 'weaponShop'),),
+            weapon_shop=(ShopItem('Medicine', 10),),
+            gold=40,
+        )
+        world = WorldGrid.from_observation(observed)
+        intent = StrategicIntent(
+            item_policy=ItemPolicy(
+                medicine_health_threshold=60,
+                medicine_stock=1,
+            ),
+        )
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world),
+            intent,
+        )
+
+        purchases = [
+            job
+            for role_jobs in jobs.values()
+            for job in role_jobs
+            if job.kind is JobKind.BUY and job.name == 'Medicine'
+        ]
+        self.assertEqual(len(purchases), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

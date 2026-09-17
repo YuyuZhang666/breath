@@ -10,15 +10,14 @@ from .simulation.certificate import (
     RobotWaveSafetyCertificate,
     WaveClassification,
 )
+from .simulation.config import ROBOT_SPECS, RobotSpec
 
 
 _PERSONAL_ROLES = frozenset({"worker", "pioneer"})
 _WEAPON_ROLES = frozenset({"gatling", "railgun", "rocket"})
-_ROBOT_ATTACK_POWER = {
-    "smallrobot": 10,
-    "mediumrobot": 20,
-    "largerobot": 30,
-    "bossrobot": 40,
+_ROBOT_SPECS_BY_NORMALIZED_NAME = {
+    name.replace('_', '').replace('-', '').lower(): spec
+    for name, spec in ROBOT_SPECS.items()
 }
 
 
@@ -38,6 +37,7 @@ class StrategyFeatures:
     living_wall_count: int
     targeted_robot_count: int
     targeted_robot_attack_power: int
+    targeted_robot_one_turn_attack_power: int
     nearest_targeted_robot_distance: int | None
     defense_complete: bool
     wave_classification: WaveClassification
@@ -77,14 +77,25 @@ def extract_features(
         for robot in observation.robots
         if robot.health > 0 and robot.target_team == observation.our.team_type
     )
-    attack_power = sum(_robot_attack_power(robot.role_type) for robot in targeted)
     nearest_distance = None
+    one_turn_attack_power = 0
     if station is not None and targeted:
         station_cells = station_footprint(station.position, DEFAULT_RULES)
-        nearest_distance = min(
-            robot.position.chebyshev_distance(cell)
+        distances = tuple(
+            (
+                robot,
+                min(
+                    robot.position.chebyshev_distance(cell)
+                    for cell in station_cells
+                ),
+            )
             for robot in targeted
-            for cell in station_cells
+        )
+        nearest_distance = min(distance for _, distance in distances)
+        one_turn_attack_power = sum(
+            _robot_spec(robot.role_type).attack_power
+            for robot, distance in distances
+            if distance <= _robot_spec(robot.role_type).attack_range
         )
 
     return StrategyFeatures(
@@ -105,7 +116,10 @@ def extract_features(
         living_weapon_count=sum(unit.role_type in _WEAPON_ROLES for unit in living),
         living_wall_count=sum(unit.role_type == "wall" for unit in living),
         targeted_robot_count=len(targeted),
-        targeted_robot_attack_power=attack_power,
+        targeted_robot_attack_power=sum(
+            _robot_spec(robot.role_type).attack_power for robot in targeted
+        ),
+        targeted_robot_one_turn_attack_power=one_turn_attack_power,
         nearest_targeted_robot_distance=nearest_distance,
         defense_complete=defense_complete,
         wave_classification=(
@@ -128,6 +142,9 @@ def _station(units: tuple[UnitState, ...]) -> UnitState | None:
     )
 
 
-def _robot_attack_power(role_type: str) -> int:
-    normalized = role_type.replace("_", "").replace("-", "").lower()
-    return _ROBOT_ATTACK_POWER.get(normalized, 0)
+def _robot_spec(role_type: str) -> RobotSpec:
+    normalized = role_type.replace('_', '').replace('-', '').lower()
+    return _ROBOT_SPECS_BY_NORMALIZED_NAME.get(
+        normalized,
+        RobotSpec(0, 0, 0, 0),
+    )

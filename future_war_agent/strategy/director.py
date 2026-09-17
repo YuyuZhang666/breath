@@ -163,6 +163,8 @@ class StrategicDirector:
                 current.targeted_robot_count != before.targeted_robot_count,
                 current.targeted_robot_attack_power
                 != before.targeted_robot_attack_power,
+                current.targeted_robot_one_turn_attack_power
+                != before.targeted_robot_one_turn_attack_power,
                 current.wave_classification is not before.wave_classification,
                 current.wave_secured != before.wave_secured,
                 current.enemy_station_health != before.enemy_station_health,
@@ -177,7 +179,7 @@ class StrategicDirector:
         fatal_visible_threat = (
             station_health is not None
             and station_health <= self._config.desperation_station_health
-            and features.targeted_robot_attack_power >= station_health
+            and features.targeted_robot_one_turn_attack_power >= station_health
         )
         if fatal_visible_threat:
             return StrategyProfile.DESPERATION, "visible fatal station threat"

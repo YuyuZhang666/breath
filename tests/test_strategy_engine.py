@@ -244,6 +244,50 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertIs(phase2.intents[0], DEFAULT_STRATEGIC_INTENT)
         self.assertEqual(search.calls, [])
 
+    def test_director_failure_atomically_skips_phase3_on_eligible_night(self) -> None:
+        director = DirectorSpy(RuntimeError('director failed'))
+        engine, phase2, search = self.make_engine(director=director)
+        engine.plan(self.day)
+
+        decision = engine.plan(self.night)
+
+        self.assertIs(decision, phase2.decisions[-1])
+        self.assertIs(phase2.intents[-1], DEFAULT_STRATEGIC_INTENT)
+        self.assertEqual(search.calls, [])
+
+    def test_latest_phase3_certificate_survives_non_search_turn(self) -> None:
+        engine, _, search = self.make_engine()
+        engine.plan(self.day)
+        engine.plan(self.night)
+        injured_id = next(
+            role.unit_id
+            for role in self.night.our.units
+            if role.role_type in {'worker', 'pioneer'}
+        )
+        emergency_revision = replace(
+            self.night,
+            our=replace(
+                self.night.our,
+                gold=self.night.our.gold + 1,
+                units=tuple(
+                    replace(
+                        role,
+                        health=50,
+                        backpack=role.backpack + ('Medicine',),
+                    )
+                    if role.unit_id == injured_id
+                    else role
+                    for role in self.night.our.units
+                ),
+            ),
+        )
+
+        engine.plan(emergency_revision)
+
+        session = engine._sessions.get(self.night.our.team_id)
+        self.assertIs(session.certificate, search.result.certificate)
+        self.assertEqual(len(search.calls), 1)
+
     def test_emergency_medicine_bypasses_phase3_search(self) -> None:
         injured_id = next(
             role.unit_id

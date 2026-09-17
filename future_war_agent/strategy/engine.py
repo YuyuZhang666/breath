@@ -98,6 +98,7 @@ class StrategyEngine:
             and continuity is not SessionContinuity.DISCONTINUITY
             else None
         )
+        director_failed = False
         try:
             director_decision = self._director.select(
                 observation,
@@ -121,6 +122,7 @@ class StrategyEngine:
             features = director_decision.features
             director_state = director_decision.state
         except Exception:
+            director_failed = True
             LOGGER.exception(
                 'Phase 4 director failed; using default intent for team %s round %s',
                 team_id,
@@ -134,10 +136,15 @@ class StrategyEngine:
                 LOGGER.exception('Phase 4 fallback feature extraction failed')
                 features = None
         simulation_action = None
-        certificate = None
+        certificate = (
+            previous_for_director.certificate
+            if previous_for_director is not None
+            else None
+        )
 
         phase3_eligible = (
-            observation.time.phase is Phase.NIGHT
+            not director_failed
+            and observation.time.phase is Phase.NIGHT
             and previous is not None
             and (
                 continuity is SessionContinuity.CONSECUTIVE

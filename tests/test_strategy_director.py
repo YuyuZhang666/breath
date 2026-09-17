@@ -73,6 +73,16 @@ class StrategicDirectorTests(unittest.TestCase):
 
         self.assertEqual(decision.intent.profile, StrategyProfile.DESPERATION)
 
+    def test_fatal_power_outside_one_turn_range_only_selects_survive(self) -> None:
+        observed = defended_observation(
+            station_health=40,
+            robots=(robot(20, 14, 14, role_type='bossRobot'),),
+        )
+
+        decision = StrategicDirector().select(observed)
+
+        self.assertEqual(decision.intent.profile, StrategyProfile.SURVIVE)
+
     def test_pressure_requires_explicit_flag_and_visible_weakness(self) -> None:
         observed = defended_observation(enemy_station_health=100)
         disabled = StrategicDirector().select(observed)

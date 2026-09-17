@@ -66,6 +66,12 @@ def generate_day_jobs(
     workers = tuple(role for role in roles if role.role_type == "worker")
     pioneers = tuple(role for role in roles if role.role_type == "pioneer")
     result: dict[int, list[Job]] = {role.unit_id: [] for role in roles}
+    medicine_buyer_ids = _medicine_buyer_ids(
+        workers,
+        observation,
+        world,
+        intent,
+    )
 
     existing_weapon_sites = {
         (weapon.position, weapon.role_type) for weapon in world.weapons
@@ -158,13 +164,14 @@ def generate_day_jobs(
                 world,
                 priority=priorities.sell,
             )
-        _add_medicine_purchase_jobs(
-            result[worker.unit_id],
-            worker,
-            observation,
-            world,
-            intent,
-        )
+        if worker.unit_id in medicine_buyer_ids:
+            _add_medicine_purchase_jobs(
+                result[worker.unit_id],
+                worker,
+                observation,
+                world,
+                intent,
+            )
         if not full and intent.allow_mining:
             _add_mining_jobs(
                 result[worker.unit_id],
@@ -270,6 +277,44 @@ def _add_sell_jobs(
                     quantity=quantity,
                 )
             )
+
+
+def _medicine_buyer_ids(
+    workers: tuple[UnitState, ...],
+    observation: Observation,
+    world: WorldGrid,
+    intent: StrategicIntent,
+) -> frozenset[int]:
+    policy = intent.item_policy
+    current_stock = sum(
+        role.backpack.count(policy.medicine_name)
+        for role in world.friendly_roles
+    )
+    shortage = max(0, policy.medicine_stock - current_stock)
+    prices = {item.name: item.price for item in observation.weapon_shop}
+    price = prices.get(policy.medicine_name)
+    if shortage == 0 or price is None or price <= 0:
+        return frozenset()
+    affordable = max(0, observation.our.gold - intent.gold_reserve) // price
+    purchase_count = min(shortage, affordable)
+    if purchase_count == 0:
+        return frozenset()
+
+    shops = world.positions_for_zone('weaponShop')
+    candidates: list[tuple[int, int]] = []
+    for worker in workers:
+        costs = tuple(
+            path.cost
+            for shop in shops
+            if (path := path_to_interaction(world, worker.position, shop))
+            is not None
+        )
+        if costs:
+            candidates.append((min(costs), worker.unit_id))
+    candidates.sort()
+    return frozenset(
+        worker_id for _, worker_id in candidates[:purchase_count]
+    )
 
 
 def _add_medicine_purchase_jobs(
