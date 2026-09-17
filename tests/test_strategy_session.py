@@ -141,16 +141,21 @@ class StrategySessionTests(unittest.TestCase):
 
     def test_session_is_frozen_and_retains_internal_certificate(self) -> None:
         outcome = ScenarioOutcome(
-            Fraction(1),
-            100,
-            0,
-            0,
-            100,
-            50,
-            1,
-            0,
-            0,
-            True,
+            weight=Fraction(1),
+            station_health=100,
+            surviving_controlled_role_count=1,
+            surviving_controller_count=1,
+            controller_losses=0,
+            surviving_key_weapon_count=1,
+            key_weapon_losses=0,
+            wall_losses=0,
+            weapon_losses=0,
+            minimum_controlled_role_health=100,
+            surviving_wall_non_key_weapon_value=50,
+            owned_kill_score=1,
+            remaining_threat=0,
+            remaining_one_turn_damage=0,
+            ended_with_night=True,
         )
         certificate = build_certificate((outcome,), NightObjective())
         session = replace(

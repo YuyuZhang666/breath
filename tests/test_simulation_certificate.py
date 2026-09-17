@@ -19,10 +19,15 @@ class SimulationCertificateTests(unittest.TestCase):
             ScenarioOutcome(
                 weight=Fraction(1, 4),
                 station_health=health,
+                surviving_controlled_role_count=3,
+                surviving_controller_count=2,
                 controller_losses=0,
+                surviving_key_weapon_count=2,
                 key_weapon_losses=0,
-                minimum_role_health=50,
-                surviving_asset_health=200,
+                wall_losses=0,
+                weapon_losses=0,
+                minimum_controlled_role_health=50,
+                surviving_wall_non_key_weapon_value=200,
                 owned_kill_score=score,
                 remaining_threat=threat,
                 remaining_one_turn_damage=10,
@@ -51,9 +56,19 @@ class SimulationCertificateTests(unittest.TestCase):
         self.assertEqual(certificate.worst_station_health, 40)
         self.assertEqual(certificate.worst_controller_losses, 0)
         self.assertEqual(certificate.worst_key_weapon_losses, 0)
-        self.assertEqual(certificate.worst_minimum_role_health, 50)
+        self.assertEqual(certificate.worst_surviving_controlled_role_count, 3)
+        self.assertEqual(certificate.worst_surviving_controller_count, 2)
+        self.assertEqual(certificate.worst_surviving_key_weapon_count, 2)
+        self.assertEqual(certificate.worst_wall_losses, 0)
+        self.assertEqual(certificate.worst_weapon_losses, 0)
+        self.assertEqual(certificate.worst_minimum_controlled_role_health, 50)
+        self.assertEqual(
+            certificate.worst_surviving_wall_non_key_weapon_value,
+            200,
+        )
         self.assertEqual(certificate.expected_owned_kill_score, Fraction(5, 2))
         self.assertEqual(certificate.expected_remaining_threat, Fraction(5, 2))
+        self.assertEqual(certificate.maximum_remaining_one_turn_damage, 10)
 
     def test_weighted_p10_accumulates_exact_fraction_mass(self) -> None:
         outcomes = (
@@ -67,9 +82,13 @@ class SimulationCertificateTests(unittest.TestCase):
 
         self.assertEqual(certificate.p10_station_health, 10)
 
-    def test_score_band_is_unavailable_when_one_controller_dies(self) -> None:
+    def test_controller_loss_blocks_score_band_but_wave_remains_safe(self) -> None:
         outcomes = (
-            replace(self.safe_outcomes[0], controller_losses=1),
+            replace(
+                self.safe_outcomes[0],
+                surviving_controller_count=1,
+                controller_losses=1,
+            ),
             *self.safe_outcomes[1:],
         )
 
@@ -78,10 +97,10 @@ class SimulationCertificateTests(unittest.TestCase):
         self.assertFalse(certificate.secured)
         self.assertIs(
             certificate.classification,
-            WaveClassification.WAVE_MARGINAL,
+            WaveClassification.WAVE_SAFE,
         )
 
-    def test_station_loss_classifies_wave_unsafe(self) -> None:
+    def test_one_station_loss_classifies_wave_marginal(self) -> None:
         outcomes = (
             replace(self.safe_outcomes[0], station_health=0),
             *self.safe_outcomes[1:],
@@ -92,9 +111,27 @@ class SimulationCertificateTests(unittest.TestCase):
         self.assertFalse(certificate.secured)
         self.assertIs(
             certificate.classification,
-            WaveClassification.WAVE_UNSAFE,
+            WaveClassification.WAVE_MARGINAL,
         )
         self.assertEqual(certificate.station_survival_probability, Fraction(3, 4))
+
+    def test_all_station_losses_classify_wave_unsafe(self) -> None:
+        outcomes = tuple(
+            replace(outcome, station_health=0)
+            for outcome in self.safe_outcomes
+        )
+
+        certificate = build_certificate(outcomes, self.objective)
+
+        self.assertFalse(certificate.secured)
+        self.assertIs(
+            certificate.classification,
+            WaveClassification.WAVE_UNSAFE,
+        )
+        self.assertEqual(
+            certificate.station_survival_probability,
+            Fraction(0),
+        )
 
     def test_night_end_does_not_require_post_horizon_buffer(self) -> None:
         outcomes = tuple(
@@ -143,6 +180,40 @@ class SimulationCertificateTests(unittest.TestCase):
         self.assertLess(
             survival_rank_key(safer, ("safe",)),
             survival_rank_key(greedier, ("greedy",)),
+        )
+
+    def test_survival_rank_prefers_more_surviving_controllers(self) -> None:
+        intact = build_certificate(self.safe_outcomes, self.objective)
+        controller_loss = build_certificate(
+            (
+                replace(
+                    self.safe_outcomes[0],
+                    surviving_controller_count=1,
+                    controller_losses=1,
+                ),
+                *self.safe_outcomes[1:],
+            ),
+            self.objective,
+        )
+
+        self.assertLess(
+            survival_rank_key(intact, ("intact",)),
+            survival_rank_key(controller_loss, ("loss",)),
+        )
+
+    def test_score_rank_uses_wall_and_non_key_weapon_value(self) -> None:
+        low_value = build_certificate(self.safe_outcomes, self.objective)
+        high_value = build_certificate(
+            tuple(
+                replace(outcome, surviving_wall_non_key_weapon_value=300)
+                for outcome in self.safe_outcomes
+            ),
+            self.objective,
+        )
+
+        self.assertLess(
+            score_rank_key(high_value, ("high",)),
+            score_rank_key(low_value, ("low",)),
         )
 
     def test_score_rank_prefers_kills_only_between_secured_roots(self) -> None:

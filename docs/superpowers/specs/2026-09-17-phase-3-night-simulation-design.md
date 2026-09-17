@@ -1,8 +1,10 @@
 # Phase 3 Night Simulation Design
 
-**Date:** 2026-09-17  
-**Status:** Approved design, pending implementation plan  
-**Target runtime:** Python 3.11  
+**Date:** 2026-09-17
+
+**Status:** Approved design, pending implementation plan
+
+**Target runtime:** Python 3.11
 **Dependency policy:** Standard library only unless a later requirement makes one of the approved runtime packages necessary
 
 ## 1. Purpose

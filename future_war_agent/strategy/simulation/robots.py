@@ -1,6 +1,7 @@
 from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
+from fractions import Fraction
 
 from future_war_agent.protocol.models import Position
 
@@ -53,6 +54,8 @@ def choose_robot_intents(
     state: SimState,
     policy: RobotPolicy,
 ) -> tuple[RobotIntent, ...]:
+    if state.station.health <= 0:
+        return ()
     targets = _attack_targets(state)
     return tuple(
         _choose_robot_intent(state, robot, targets, policy)
@@ -80,6 +83,8 @@ def _choose_robot_intent(
         <= robot.attack_range
         and bool(target.cells & candidate_route_cells)
     )
+    if legal_targets and policy is RobotPolicy.MAXIMUM_STATION_PROGRESS:
+        return _maximum_progress_intent(state, robot, legal_targets)
     if legal_targets:
         route = _ideal_station_route(state, robot)
         route_index = {
@@ -118,6 +123,76 @@ def _choose_robot_intent(
 
     move_target = _best_move(state, robot)
     return RobotIntent(robot.robot_id, move_target=move_target)
+
+
+def _maximum_progress_intent(
+    state: SimState,
+    robot: SimRobot,
+    targets: tuple[_AttackTarget, ...],
+) -> RobotIntent:
+    baseline = _station_distance(state, robot.position, robot, None)
+    candidates: list[tuple[tuple[object, ...], RobotIntent]] = []
+
+    for target in targets:
+        path_impact = _path_impact(state, robot, target, baseline)
+        damage_fraction = Fraction(
+            min(robot.attack_power, target.health),
+            target.health,
+        )
+        expected_progress = path_impact * damage_fraction
+        stable = (
+            target.kind,
+            target.target_id,
+            target.stable_position.x,
+            target.stable_position.y,
+        )
+        candidates.append(
+            (
+                (-expected_progress, "attack", stable),
+                RobotIntent(
+                    robot_id=robot.robot_id,
+                    attack_target_kind=target.kind,
+                    attack_target_id=target.target_id,
+                ),
+            )
+        )
+
+    unreachable = state.width * state.height
+    for target in _legal_moves(state, robot):
+        after = _station_distance(state, target, robot, None)
+        if after is None:
+            progress = -unreachable
+        elif baseline is None:
+            progress = unreachable - after
+        else:
+            progress = baseline - after
+        candidates.append(
+            (
+                (-progress, "move", target.x, target.y),
+                RobotIntent(robot.robot_id, move_target=target),
+            )
+        )
+
+    if not candidates:
+        return RobotIntent(robot.robot_id)
+    return min(candidates, key=lambda item: item[0])[1]
+
+
+def _legal_moves(state: SimState, robot: SimRobot) -> tuple[Position, ...]:
+    occupied = _dynamic_occupied(state) - {robot.position}
+    moves: list[Position] = []
+    for delta_x, delta_y in _DIRECTIONS:
+        target = Position(
+            robot.position.x + delta_x,
+            robot.position.y + delta_y,
+        )
+        if (
+            _in_bounds(state, target)
+            and target not in state.static_blocked
+            and target not in occupied
+        ):
+            moves.append(target)
+    return tuple(sorted(moves, key=lambda item: (item.x, item.y)))
 
 
 def _attack_targets(state: SimState) -> tuple[_AttackTarget, ...]:
@@ -168,19 +243,8 @@ def _attack_targets(state: SimState) -> tuple[_AttackTarget, ...]:
 
 
 def _best_move(state: SimState, robot: SimRobot) -> Position | None:
-    occupied = _dynamic_occupied(state) - {robot.position}
     options: list[tuple[int, int, int, int, Position]] = []
-    for direction_index, (delta_x, delta_y) in enumerate(_DIRECTIONS):
-        target = Position(
-            robot.position.x + delta_x,
-            robot.position.y + delta_y,
-        )
-        if (
-            not _in_bounds(state, target)
-            or target in state.static_blocked
-            or target in occupied
-        ):
-            continue
+    for target in _legal_moves(state, robot):
         distance = _station_distance(state, target, robot, None)
         fallback = min(
             target.chebyshev_distance(cell)

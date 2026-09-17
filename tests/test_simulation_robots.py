@@ -17,7 +17,12 @@ from future_war_agent.strategy.simulation.state import (
 
 class SimulationRobotPolicyTests(unittest.TestCase):
     def test_each_policy_attacks_each_supported_blocker_within_range(self) -> None:
-        for policy in ALL_ROBOT_POLICIES:
+        attack_first_policies = (
+            RobotPolicy.STATION_SHORTEST_PATH,
+            RobotPolicy.MAIN_PATH_BLOCKER,
+            RobotPolicy.LOW_HEALTH_BLOCKER,
+        )
+        for policy in attack_first_policies:
             for target_kind in ("role", "wall", "weapon", "station"):
                 with self.subTest(policy=policy, target_kind=target_kind):
                     state, target_id = self._blocked_state(target_kind, distance=2)
@@ -71,6 +76,33 @@ class SimulationRobotPolicyTests(unittest.TestCase):
 
         self.assertEqual(intent.attack_target_kind, "role")
         self.assertEqual(intent.attack_target_id, 2)
+
+    def test_maximum_progress_compares_move_against_blocker_attack(self) -> None:
+        state, target_id = self._blocked_state("role", distance=2)
+
+        blocker_intent = choose_robot_intents(
+            state,
+            RobotPolicy.MAIN_PATH_BLOCKER,
+        )[0]
+        progress_intent = choose_robot_intents(
+            state,
+            RobotPolicy.MAXIMUM_STATION_PROGRESS,
+        )[0]
+
+        self.assertEqual(blocker_intent.attack_target_id, target_id)
+        self.assertIsNone(progress_intent.attack_target_id)
+        self.assertIsNotNone(progress_intent.move_target)
+
+    def test_maximum_progress_can_select_station_attack(self) -> None:
+        state, target_id = self._blocked_state("station", distance=2)
+
+        intent = choose_robot_intents(
+            state,
+            RobotPolicy.MAXIMUM_STATION_PROGRESS,
+        )[0]
+
+        self.assertEqual(intent.attack_target_kind, "station")
+        self.assertEqual(intent.attack_target_id, target_id)
 
     def test_stable_ties_choose_the_same_target_repeatedly(self) -> None:
         state, _ = self._blocked_state("role", distance=2)

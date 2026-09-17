@@ -72,12 +72,22 @@ def search_night(
         raise UnsupportedSimulation("no legal Phase 3 root actions")
 
     horizon = min(config.max_horizon, state.remaining_night_turns)
+    initial_controlled_role_ids = frozenset(
+        role.unit_id for role in state.roles
+    )
     initial_controller_ids = frozenset(
         role.unit_id
         for role in state.roles
         if role.assigned_weapon_id is not None
     )
+    initial_key_weapon_ids = frozenset(
+        role.assigned_weapon_id
+        for role in state.roles
+        if role.assigned_weapon_id is not None
+    )
+    initial_wall_ids = frozenset(wall.unit_id for wall in state.walls)
     initial_weapon_ids = frozenset(weapon.unit_id for weapon in state.weapons)
+    non_key_weapon_ids = initial_weapon_ids - initial_key_weapon_ids
     evaluated: list[tuple[RootAction, RobotWaveSafetyCertificate]] = []
 
     for root in roots:
@@ -99,12 +109,18 @@ def search_night(
                     policy,
                     config,
                 )
+                if simulated.station.health <= 0:
+                    break
             outcomes.append(
                 _scenario_outcome(
                     simulated,
                     weight,
-                    initial_controller_ids,
-                    initial_weapon_ids,
+                    initial_controlled_role_ids=initial_controlled_role_ids,
+                    initial_controller_ids=initial_controller_ids,
+                    initial_key_weapon_ids=initial_key_weapon_ids,
+                    initial_wall_ids=initial_wall_ids,
+                    initial_weapon_ids=initial_weapon_ids,
+                    non_key_weapon_ids=non_key_weapon_ids,
                 )
             )
         evaluated.append(
@@ -146,23 +162,48 @@ def search_night(
 def _scenario_outcome(
     state: SimState,
     weight: Fraction,
+    *,
+    initial_controlled_role_ids: frozenset[int],
     initial_controller_ids: frozenset[int],
+    initial_key_weapon_ids: frozenset[int],
+    initial_wall_ids: frozenset[int],
     initial_weapon_ids: frozenset[int],
+    non_key_weapon_ids: frozenset[int],
 ) -> ScenarioOutcome:
     surviving_role_ids = frozenset(role.unit_id for role in state.roles)
+    surviving_wall_ids = frozenset(wall.unit_id for wall in state.walls)
     surviving_weapon_ids = frozenset(weapon.unit_id for weapon in state.weapons)
     return ScenarioOutcome(
         weight=weight,
         station_health=state.station.health,
+        surviving_controlled_role_count=len(
+            initial_controlled_role_ids & surviving_role_ids
+        ),
+        surviving_controller_count=len(
+            initial_controller_ids & surviving_role_ids
+        ),
         controller_losses=len(initial_controller_ids - surviving_role_ids),
-        key_weapon_losses=len(initial_weapon_ids - surviving_weapon_ids),
-        minimum_role_health=min(
-            (role.health for role in state.roles),
+        surviving_key_weapon_count=len(
+            initial_key_weapon_ids & surviving_weapon_ids
+        ),
+        key_weapon_losses=len(initial_key_weapon_ids - surviving_weapon_ids),
+        wall_losses=len(initial_wall_ids - surviving_wall_ids),
+        weapon_losses=len(initial_weapon_ids - surviving_weapon_ids),
+        minimum_controlled_role_health=min(
+            (
+                role.health
+                for role in state.roles
+                if role.unit_id in initial_controlled_role_ids
+            ),
             default=0,
         ),
-        surviving_asset_health=(
+        surviving_wall_non_key_weapon_value=(
             sum(wall.health for wall in state.walls)
-            + sum(weapon.health for weapon in state.weapons)
+            + sum(
+                weapon.health
+                for weapon in state.weapons
+                if weapon.unit_id in non_key_weapon_ids
+            )
         ),
         owned_kill_score=state.owned_kill_score,
         remaining_threat=sum(

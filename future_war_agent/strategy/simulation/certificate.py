@@ -16,10 +16,15 @@ class WaveClassification(StrEnum):
 class ScenarioOutcome:
     weight: Fraction
     station_health: int
+    surviving_controlled_role_count: int
+    surviving_controller_count: int
     controller_losses: int
+    surviving_key_weapon_count: int
     key_weapon_losses: int
-    minimum_role_health: int
-    surviving_asset_health: int
+    wall_losses: int
+    weapon_losses: int
+    minimum_controlled_role_health: int
+    surviving_wall_non_key_weapon_value: int
     owned_kill_score: int
     remaining_threat: int
     remaining_one_turn_damage: int
@@ -34,11 +39,18 @@ class RobotWaveSafetyCertificate:
     expected_station_health: Fraction
     p10_station_health: int
     worst_station_health: int
+    worst_surviving_controlled_role_count: int
+    worst_surviving_controller_count: int
     worst_controller_losses: int
+    worst_surviving_key_weapon_count: int
     worst_key_weapon_losses: int
-    worst_minimum_role_health: int
+    worst_wall_losses: int
+    worst_weapon_losses: int
+    worst_minimum_controlled_role_health: int
+    worst_surviving_wall_non_key_weapon_value: int
     expected_owned_kill_score: Fraction
     expected_remaining_threat: Fraction
+    maximum_remaining_one_turn_damage: int
     outcomes: tuple[ScenarioOutcome, ...]
 
 
@@ -74,9 +86,9 @@ def build_certificate(
         Fraction(),
     )
     secured = all(_outcome_is_secured(outcome, objective) for outcome in outcomes)
-    if secured:
+    if station_survival_probability == 1:
         classification = WaveClassification.WAVE_SAFE
-    elif station_survival_probability == 1:
+    elif station_survival_probability > 0:
         classification = WaveClassification.WAVE_MARGINAL
     else:
         classification = WaveClassification.WAVE_UNSAFE
@@ -88,17 +100,35 @@ def build_certificate(
         expected_station_health=expected_station_health,
         p10_station_health=_weighted_p10(outcomes),
         worst_station_health=min(outcome.station_health for outcome in outcomes),
+        worst_surviving_controlled_role_count=min(
+            outcome.surviving_controlled_role_count for outcome in outcomes
+        ),
+        worst_surviving_controller_count=min(
+            outcome.surviving_controller_count for outcome in outcomes
+        ),
         worst_controller_losses=max(
             outcome.controller_losses for outcome in outcomes
+        ),
+        worst_surviving_key_weapon_count=min(
+            outcome.surviving_key_weapon_count for outcome in outcomes
         ),
         worst_key_weapon_losses=max(
             outcome.key_weapon_losses for outcome in outcomes
         ),
-        worst_minimum_role_health=min(
-            outcome.minimum_role_health for outcome in outcomes
+        worst_wall_losses=max(outcome.wall_losses for outcome in outcomes),
+        worst_weapon_losses=max(outcome.weapon_losses for outcome in outcomes),
+        worst_minimum_controlled_role_health=min(
+            outcome.minimum_controlled_role_health for outcome in outcomes
+        ),
+        worst_surviving_wall_non_key_weapon_value=min(
+            outcome.surviving_wall_non_key_weapon_value
+            for outcome in outcomes
         ),
         expected_owned_kill_score=expected_owned_kill_score,
         expected_remaining_threat=expected_remaining_threat,
+        maximum_remaining_one_turn_damage=max(
+            outcome.remaining_one_turn_damage for outcome in outcomes
+        ),
         outcomes=outcomes,
     )
 
@@ -111,9 +141,9 @@ def survival_rank_key(
         -certificate.station_survival_probability,
         -certificate.p10_station_health,
         -certificate.worst_station_health,
-        certificate.worst_controller_losses,
-        certificate.worst_key_weapon_losses,
-        -certificate.worst_minimum_role_health,
+        -certificate.worst_surviving_controller_count,
+        -certificate.worst_surviving_key_weapon_count,
+        -certificate.worst_minimum_controlled_role_health,
         -certificate.expected_station_health,
         certificate.expected_remaining_threat,
         -certificate.expected_owned_kill_score,
@@ -125,15 +155,12 @@ def score_rank_key(
     certificate: RobotWaveSafetyCertificate,
     root_stable_key: tuple[object, ...],
 ) -> tuple[object, ...]:
-    worst_surviving_asset_health = min(
-        outcome.surviving_asset_health for outcome in certificate.outcomes
-    )
     return (
         -certificate.expected_owned_kill_score,
         certificate.expected_remaining_threat,
         -certificate.worst_station_health,
-        -certificate.worst_minimum_role_health,
-        -worst_surviving_asset_health,
+        -certificate.worst_minimum_controlled_role_health,
+        -certificate.worst_surviving_wall_non_key_weapon_value,
         root_stable_key,
     )
 
@@ -164,8 +191,8 @@ def _weighted_p10(outcomes: tuple[ScenarioOutcome, ...]) -> int:
         outcomes,
         key=lambda item: (
             item.station_health,
-            item.controller_losses,
-            item.key_weapon_losses,
+            -item.surviving_controller_count,
+            -item.surviving_key_weapon_count,
             item.remaining_threat,
         ),
     ):
