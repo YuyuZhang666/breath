@@ -4,10 +4,11 @@ from future_war_agent.decision.actions import Action
 from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.joint import (
     TacticalCandidate,
+    candidates_for_jobs,
     is_valid_joint,
     solve_joint,
 )
-from future_war_agent.strategy.jobs import JobKind
+from future_war_agent.strategy.jobs import Job, JobKind
 from future_war_agent.strategy.world import WorldGrid
 from tests.strategy_helpers import observation, unit
 
@@ -130,6 +131,23 @@ class JointSolverTests(unittest.TestCase):
             solve_joint(self.observed, self.world, choices),
             solve_joint(self.observed, self.world, choices),
         )
+
+    def test_completed_preposition_does_not_move_away(self) -> None:
+        role = self.world.unit_by_id(10010)
+        jobs = (
+            Job(
+                role_id=10010,
+                kind=JobKind.PREPOSITION,
+                target=Position(1, 1),
+                priority=100,
+                value=0,
+            ),
+        )
+
+        choices = candidates_for_jobs(self.observed, self.world, role, jobs)
+
+        self.assertEqual(len(choices), 1)
+        self.assertIsNone(choices[0].action)
 
 
 if __name__ == "__main__":

@@ -280,6 +280,8 @@ def _move_candidates(
     interaction: bool,
 ) -> list[TacticalCandidate]:
     goals = world.interaction_cells(job.target) if interaction else (job.target,)
+    if role.position in goals:
+        return []
     return [
         TacticalCandidate(
             role_id=role.unit_id,
