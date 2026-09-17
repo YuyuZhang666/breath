@@ -90,6 +90,22 @@ class TaskAgentTests(unittest.TestCase):
         self.assertEqual(result.decision, base)
         self.assertEqual(result.state.active_task_type, '')
 
+    def test_task_never_overrides_twilight_recall_move(self) -> None:
+        base = Decision(commands={2: Action.move(Position(2, 2))})
+        observed = observation(
+            round_no=70,
+            our_units=(
+                unit(2, 1, 1, 'pioneer'),
+                unit(11, 5, 5, 'gatling', level=1),
+            ),
+            tasks=(task('math', 2, 1),),
+        )
+
+        result = TaskAgent().apply(observed, base, SCORE_INTENT)
+
+        self.assertEqual(result.decision, base)
+        self.assertEqual(result.state.active_task_type, '')
+
     def test_task_move_never_conflicts_with_base_build_target(self) -> None:
         base = Decision(commands={1: Action.build('wall', Position(2, 0))})
         observed = observation(
@@ -267,6 +283,55 @@ class TaskAgentTests(unittest.TestCase):
         self.assertEqual(result.decision.commands[2].task_answer, 'partial-42')
         self.assertTrue(result.state.last_prompt_fingerprint)
 
+    def test_missing_feedback_keeps_best_answer_for_deadline_retry(self) -> None:
+        state = TaskAgentState(
+            active_task_type='math',
+            accepted_round=1,
+            deadline_round=3,
+            best_answer='42',
+            pending_task_type='math',
+            pending_answer='42',
+            pending_pioneer_id=2,
+            pending_round=2,
+        )
+        observed = observation(
+            round_no=3,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            phase_task='Return the sum of 20 and 22.',
+        )
+
+        result = TaskAgent().apply(
+            observed,
+            Decision(),
+            SCORE_INTENT,
+            previous_state=state,
+        )
+
+        self.assertEqual(result.decision.commands[2].task_answer, '42')
+
+    def test_missing_phase_task_releases_failed_acceptance_next_round(self) -> None:
+        state = TaskAgentState(
+            active_task_type='old',
+            selected_task_position=Position(2, 2),
+            accepted_round=1,
+            deadline_round=10,
+        )
+        observed = observation(
+            round_no=2,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            tasks=(task('new', 2, 2),),
+        )
+
+        result = TaskAgent().apply(
+            observed,
+            Decision(),
+            SCORE_INTENT,
+            previous_state=state,
+        )
+
+        self.assertEqual(result.state.active_task_type, 'new')
+        self.assertEqual(result.decision.commands[2].kind, ActionKind.ACCEPT_TASK)
+
     def test_task_type_and_sop_fields_are_bounded(self) -> None:
         long_type = 'x' * (MAX_TASK_TYPE_LENGTH + 50)
         observed = observation(
@@ -279,6 +344,26 @@ class TaskAgentTests(unittest.TestCase):
         self.assertEqual(len(result.state.active_task_type), MAX_TASK_TYPE_LENGTH)
         with self.assertRaises(ValueError):
             TaskSop(long_type, 'answer')
+
+    def test_long_task_types_with_same_prefix_keep_distinct_identity(self) -> None:
+        prefix = 'x' * (MAX_TASK_TYPE_LENGTH + 20)
+        first = observation(
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            tasks=(task(prefix + 'A', 2, 2),),
+        )
+        second = observation(
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            tasks=(task(prefix + 'B', 2, 2),),
+        )
+
+        first_state = TaskAgent().apply(first, Decision(), SCORE_INTENT).state
+        second_state = TaskAgent().apply(second, Decision(), SCORE_INTENT).state
+
+        self.assertNotEqual(
+            first_state.active_task_type,
+            second_state.active_task_type,
+        )
+        self.assertEqual(len(first_state.active_task_type), MAX_TASK_TYPE_LENGTH)
 
     def test_failed_submission_is_not_learned_and_treasure_is_never_emitted(self) -> None:
         state = TaskAgentState(

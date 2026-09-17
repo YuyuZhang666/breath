@@ -9,6 +9,7 @@ from future_war_agent.protocol.models import (
     TaskPointState,
     UnitState,
 )
+from future_war_agent.protocol.time import Phase
 
 from .pathfinding import PathResult, path_to_interaction
 from .policy import StrategicIntent
@@ -118,6 +119,8 @@ class TaskAgent:
             return TaskAgentResult(base_decision, state)
         if _has_emergency_item_action(base_decision, pioneer.unit_id):
             return TaskAgentResult(base_decision, state)
+        if _has_twilight_recall(observation, base_decision, pioneer):
+            return TaskAgentResult(base_decision, state)
 
         task_text = observation.phase_task.strip()
         if task_text:
@@ -129,6 +132,11 @@ class TaskAgent:
                 task_text,
             )
 
+        if (
+            state.accepted_round is not None
+            and observation.time.round_no > state.accepted_round
+        ):
+            state = _clear_task_lifecycle(state)
         if state.accepted_round is not None:
             return TaskAgentResult(base_decision, state)
         selected = _continue_selected_task(observation, pioneer, state)
@@ -248,6 +256,28 @@ def _has_emergency_item_action(
     return action is not None and action.kind is ActionKind.USE
 
 
+def _has_twilight_recall(
+    observation: Observation,
+    decision: Decision,
+    pioneer: UnitState,
+) -> bool:
+    action = decision.commands.get(pioneer.unit_id)
+    if (
+        observation.time.phase is not Phase.DAY
+        or action is None
+        or action.kind is not ActionKind.MOVE
+    ):
+        return False
+    world = WorldGrid.from_observation(observation)
+    rounds_left = 71 - observation.time.round_in_phase
+    return any(
+        path is not None
+        and rounds_left <= path.cost + world.rules.twilight_safety_margin
+        for weapon in world.weapons
+        for path in (path_to_interaction(world, pioneer.position, weapon.position),)
+    )
+
+
 def _continue_selected_task(
     observation: Observation,
     pioneer: UnitState,
@@ -363,6 +393,20 @@ def _reconcile_feedback(
             learned,
             *(sop for sop in sops if sop.task_type != learned.task_type),
         )[:MAX_SOPS]
+        return replace(
+            _clear_task_lifecycle(state),
+            sops=sops,
+        )
+    return replace(
+        state,
+        pending_task_type='',
+        pending_answer='',
+        pending_pioneer_id=None,
+        pending_round=None,
+    )
+
+
+def _clear_task_lifecycle(state: TaskAgentState) -> TaskAgentState:
     return replace(
         state,
         active_task_type='',
@@ -370,12 +414,12 @@ def _reconcile_feedback(
         accepted_round=None,
         timeout_rounds=None,
         deadline_round=None,
+        last_prompt_fingerprint='',
         best_answer='',
         pending_task_type='',
         pending_answer='',
         pending_pioneer_id=None,
         pending_round=None,
-        sops=sops,
     )
 
 
@@ -388,7 +432,12 @@ def _task_key(task_text: str) -> str:
 
 
 def _normalize_task_type(task_type: str) -> str:
-    return task_type.replace('\x00', '').strip()[:MAX_TASK_TYPE_LENGTH]
+    normalized = task_type.replace('\x00', '').strip()
+    if len(normalized) <= MAX_TASK_TYPE_LENGTH:
+        return normalized
+    digest = sha256(normalized.encode('utf-8')).hexdigest()[:16]
+    prefix_length = MAX_TASK_TYPE_LENGTH - len(digest) - 1
+    return normalized[:prefix_length] + ':' + digest
 
 
 def _build_prompt(task_type: str, task_text: str) -> str:
