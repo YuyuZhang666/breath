@@ -1,0 +1,114 @@
+{
+  "roundNo": 70,
+  "mapInfo": {
+    "width": 15,
+    "height": 15,
+    "zones": [
+      {"neutralType": "stone", "pos": {"x": 1, "y": 1}},
+      {"neutralType": "iron", "pos": {"x": 13, "y": 1}},
+      {"neutralType": "vendor", "pos": {"x": 1, "y": 13}},
+      {"neutralType": "weaponShop", "pos": {"x": 13, "y": 13}}
+    ]
+  },
+  "teamOur": {
+    "type": "challenger",
+    "teamId": "phase3-team",
+    "teamName": "Phase 3",
+    "goldNum": 75,
+    "totalScore": 0,
+    "playerTasks": [],
+    "roles": [
+      {
+        "id": 101,
+        "pos": {"x": 2, "y": 4},
+        "roleType": "worker",
+        "health": 100,
+        "backPackCapability": 100,
+        "backpack": []
+      },
+      {
+        "id": 102,
+        "pos": {"x": 10, "y": 4},
+        "roleType": "worker",
+        "health": 100,
+        "backPackCapability": 100,
+        "backpack": []
+      },
+      {
+        "id": 103,
+        "pos": {"x": 6, "y": 11},
+        "roleType": "pioneer",
+        "health": 100,
+        "backPackCapability": 100,
+        "backpack": []
+      },
+      {
+        "id": 200,
+        "pos": {"x": 7, "y": 7},
+        "roleType": "station",
+        "health": 1000,
+        "level": 1
+      },
+      {
+        "id": 300,
+        "pos": {"x": 3, "y": 4},
+        "roleType": "gatling",
+        "health": 1000,
+        "attackPower": 10,
+        "attackRange": 8,
+        "level": 2,
+        "cooldown": 0
+      },
+      {
+        "id": 301,
+        "pos": {"x": 11, "y": 4},
+        "roleType": "railgun",
+        "health": 1000,
+        "attackPower": 40,
+        "attackRange": 8,
+        "level": 1,
+        "cooldown": 0
+      },
+      {
+        "id": 302,
+        "pos": {"x": 7, "y": 11},
+        "roleType": "rocket",
+        "health": 1000,
+        "attackPower": 20,
+        "attackRange": 8,
+        "level": 1,
+        "cooldown": 0
+      },
+      {
+        "id": 400,
+        "pos": {"x": 6, "y": 6},
+        "roleType": "wall",
+        "health": 500
+      },
+      {
+        "id": 401,
+        "pos": {"x": 9, "y": 7},
+        "roleType": "wall",
+        "health": 500
+      }
+    ]
+  },
+  "teamEnemy": {"roles": []},
+  "robot": {"roles": []},
+  "phaseTask": "",
+  "lastRoundRoleActionResults": {},
+  "lastSummonTreasureResult": 0,
+  "llmResp": "",
+  "worldNews": {"officialNews": "", "folkLegends": ""},
+  "lastCmdResult": "",
+  "vendorShopList": [
+    {"name": "stone", "price": 1},
+    {"name": "iron", "price": 4}
+  ],
+  "weaponShopList": [
+    {"name": "gatling", "price": 20},
+    {"name": "railgun", "price": 40},
+    {"name": "rocket", "price": 30}
+  ],
+  "errors": []
+}

@@ -6,8 +6,8 @@ from future_war_agent.decision.serializer import decision_to_payload
 from future_war_agent.decision.validator import validate_decision
 from future_war_agent.fallback import safe_payload
 from future_war_agent.protocol.models import Observation
-from future_war_agent.strategy.planner import plan_turn
 from future_war_agent.protocol.parser import parse_observation
+from future_war_agent.strategy.engine import StrategyEngine
 
 
 LOGGER = logging.getLogger(__name__)
@@ -15,9 +15,11 @@ LOGGER.addHandler(logging.NullHandler())
 
 Planner = Callable[[Observation], Decision]
 
+DEFAULT_STRATEGY_ENGINE = StrategyEngine()
+
 
 def default_planner(observation: Observation) -> Decision:
-    return plan_turn(observation)
+    return DEFAULT_STRATEGY_ENGINE.plan(observation)
 
 
 def handle_payload(
