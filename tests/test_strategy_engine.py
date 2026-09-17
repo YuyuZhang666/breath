@@ -14,6 +14,12 @@ from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.protocol.time import TurnTime
 from future_war_agent.strategy.engine import StrategyEngine
+from future_war_agent.strategy.director import StrategicDirector
+from future_war_agent.strategy.policy import (
+    DEFAULT_STRATEGIC_INTENT,
+    ItemPolicy,
+    StrategicIntent,
+)
 from future_war_agent.strategy.simulation.candidates import SimJointAction
 from future_war_agent.strategy.simulation.certificate import (
     ScenarioOutcome,
@@ -88,12 +94,32 @@ class Phase2Spy:
     def __init__(self) -> None:
         self.observations: list[Observation] = []
         self.decisions: list[Decision] = []
+        self.intents: list[StrategicIntent] = []
 
-    def __call__(self, observation: Observation) -> Decision:
+    def __call__(
+        self,
+        observation: Observation,
+        *,
+        intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
+    ) -> Decision:
         self.observations.append(observation)
+        self.intents.append(intent)
         decision = Decision(prompt=f"phase2-{len(self.observations)}")
         self.decisions.append(decision)
         return decision
+
+
+class DirectorSpy:
+    def __init__(self, failure: Exception | None = None) -> None:
+        self.failure = failure
+        self.calls: list[Observation] = []
+        self.delegate = StrategicDirector()
+
+    def select(self, observation: Observation, **kwargs):
+        self.calls.append(observation)
+        if self.failure is not None:
+            raise self.failure
+        return self.delegate.select(observation, **kwargs)
 
 
 class SearchSpy:
@@ -134,6 +160,7 @@ class StrategyEngineTests(unittest.TestCase):
         failure: Exception | None = None,
         objective_provider=None,
         reconciler=None,
+        director=None,
     ) -> tuple[StrategyEngine, Phase2Spy, SearchSpy]:
         phase2 = Phase2Spy()
         search = SearchSpy(failure)
@@ -142,6 +169,8 @@ class StrategyEngineTests(unittest.TestCase):
             kwargs["objective_provider"] = objective_provider
         if reconciler is not None:
             kwargs["scenario_reconciler"] = reconciler
+        if director is not None:
+            kwargs['director'] = director
         engine = StrategyEngine(
             config=Phase3Config(watchdog_seconds=0.8),
             phase2_planner=phase2,
@@ -193,6 +222,61 @@ class StrategyEngineTests(unittest.TestCase):
 
         self.assertIs(second, first)
         self.assertEqual(len(search.calls), 1)
+
+    def test_duplicate_request_runs_director_once(self) -> None:
+        director = DirectorSpy()
+        engine, phase2, _ = self.make_engine(director=director)
+
+        first = engine.plan(self.day)
+        duplicate = engine.plan(self.day)
+
+        self.assertIs(duplicate, first)
+        self.assertEqual(len(director.calls), 1)
+        self.assertEqual(len(phase2.intents), 1)
+
+    def test_director_failure_uses_default_phase2_intent(self) -> None:
+        director = DirectorSpy(RuntimeError('director failed'))
+        engine, phase2, search = self.make_engine(director=director)
+
+        decision = engine.plan(self.day)
+
+        self.assertIs(decision, phase2.decisions[0])
+        self.assertIs(phase2.intents[0], DEFAULT_STRATEGIC_INTENT)
+        self.assertEqual(search.calls, [])
+
+    def test_emergency_medicine_bypasses_phase3_search(self) -> None:
+        injured_id = next(
+            role.unit_id
+            for role in self.night.our.units
+            if role.role_type in {'worker', 'pioneer'}
+        )
+        injured_night = replace(
+            self.night,
+            our=replace(
+                self.night.our,
+                units=tuple(
+                    replace(
+                        role,
+                        health=50,
+                        backpack=role.backpack + ('Medicine',),
+                    )
+                    if role.unit_id == injured_id
+                    else role
+                    for role in self.night.our.units
+                ),
+            ),
+        )
+        engine, phase2, search = self.make_engine()
+
+        engine.plan(self.day)
+        decision = engine.plan(injured_night)
+
+        self.assertIs(decision, phase2.decisions[-1])
+        self.assertEqual(search.calls, [])
+        self.assertGreater(
+            phase2.intents[-1].item_policy.medicine_health_threshold,
+            0,
+        )
 
     def test_same_round_revision_replans_without_reconciliation(self) -> None:
         reconciled = (
@@ -324,7 +408,12 @@ class StrategyEngineTests(unittest.TestCase):
                 self.assertEqual(len(search.calls), 1)
 
     def test_phase_2_exception_is_not_swallowed(self) -> None:
-        def broken(_: Observation) -> Decision:
+        def broken(
+            _: Observation,
+            *,
+            intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
+        ) -> Decision:
+            del intent
             raise ValueError("phase 2 failure")
 
         engine = StrategyEngine(phase2_planner=broken)

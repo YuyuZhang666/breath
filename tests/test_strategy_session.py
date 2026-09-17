@@ -13,6 +13,7 @@ from future_war_agent.strategy.session import (
     observation_fingerprint,
     static_signature,
 )
+from future_war_agent.strategy.policy import DEFAULT_STRATEGIC_INTENT
 from future_war_agent.strategy.simulation.candidates import SimJointAction
 from future_war_agent.strategy.simulation.certificate import (
     ScenarioOutcome,
@@ -167,6 +168,13 @@ class StrategySessionTests(unittest.TestCase):
         self.assertIs(session.certificate, certificate)
         with self.assertRaises(FrozenInstanceError):
             session.last_round = 99
+
+    def test_session_defaults_preserve_phase4_fallback_state(self) -> None:
+        session = self._session(self._observation(), team_id='alpha')
+
+        self.assertIs(session.intent, DEFAULT_STRATEGIC_INTENT)
+        self.assertIsNone(session.features)
+        self.assertIsNone(session.director_state)
 
     @staticmethod
     def _observation(*, round_no: int = 71):

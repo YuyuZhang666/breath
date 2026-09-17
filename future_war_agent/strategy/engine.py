@@ -7,7 +7,10 @@ from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation
 from future_war_agent.protocol.time import Phase
 
+from .director import StrategicDirector
+from .features import extract_features
 from .planner import plan_turn
+from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .reconcile import reconcile_scenario_weights, uniform_scenario_weights
 from .session import (
     SessionContinuity,
@@ -30,14 +33,10 @@ from .simulation.search import (
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
 
-Phase2Planner = Callable[[Observation], Decision]
+Phase2Planner = Callable[..., Decision]
 NightSearcher = Callable[..., SearchResult]
 ObjectiveProvider = Callable[[Observation], NightObjective]
 ScenarioReconciler = Callable[..., ScenarioWeights]
-
-
-def _default_objective(_: Observation) -> NightObjective:
-    return DEFAULT_NIGHT_OBJECTIVE
 
 
 class StrategyEngine:
@@ -47,7 +46,8 @@ class StrategyEngine:
         config: Phase3Config = DEFAULT_PHASE3_CONFIG,
         phase2_planner: Phase2Planner = plan_turn,
         night_searcher: NightSearcher = search_night,
-        objective_provider: ObjectiveProvider = _default_objective,
+        objective_provider: ObjectiveProvider | None = None,
+        director: StrategicDirector | None = None,
         clock: Callable[[], float] = monotonic,
         session_store: SessionStore | None = None,
         scenario_reconciler: ScenarioReconciler = reconcile_scenario_weights,
@@ -56,6 +56,7 @@ class StrategyEngine:
         self._phase2_planner = phase2_planner
         self._night_searcher = night_searcher
         self._objective_provider = objective_provider
+        self._director = director if director is not None else StrategicDirector()
         self._clock = clock
         self._sessions = session_store if session_store is not None else SessionStore()
         self._scenario_reconciler = scenario_reconciler
@@ -89,6 +90,47 @@ class StrategyEngine:
             and continuity is not SessionContinuity.DISCONTINUITY
             else uniform_scenario_weights()
         )
+        previous_for_director = (
+            previous
+            if previous is not None
+            and continuity is not SessionContinuity.DISCONTINUITY
+            else None
+        )
+        try:
+            director_decision = self._director.select(
+                observation,
+                previous_state=(
+                    previous_for_director.director_state
+                    if previous_for_director is not None
+                    else None
+                ),
+                previous_observation=(
+                    previous_for_director.observation
+                    if previous_for_director is not None
+                    else None
+                ),
+                certificate=(
+                    previous_for_director.certificate
+                    if previous_for_director is not None
+                    else None
+                ),
+            )
+            intent = director_decision.intent
+            features = director_decision.features
+            director_state = director_decision.state
+        except Exception:
+            LOGGER.exception(
+                'Phase 4 director failed; using default intent for team %s round %s',
+                team_id,
+                observation.time.round_no,
+            )
+            intent = DEFAULT_STRATEGIC_INTENT
+            director_state = None
+            try:
+                features = extract_features(observation)
+            except Exception:
+                LOGGER.exception('Phase 4 fallback feature extraction failed')
+                features = None
         simulation_action = None
         certificate = None
 
@@ -102,6 +144,7 @@ class StrategyEngine:
                     and previous.simulation_action is not None
                 )
             )
+            and not _requires_emergency_medicine(observation, intent)
         )
 
         if phase3_eligible:
@@ -113,7 +156,11 @@ class StrategyEngine:
                         config=self._config,
                     )
                 deadline = self._clock() + self._config.watchdog_seconds
-                objective = self._objective_provider(observation)
+                objective = (
+                    self._objective_provider(observation)
+                    if self._objective_provider is not None
+                    else intent.night_objective
+                )
                 result = self._night_searcher(
                     observation,
                     weights,
@@ -132,16 +179,16 @@ class StrategyEngine:
                     observation.time.round_no,
                     exc_info=True,
                 )
-                decision = self._phase2_planner(observation)
+                decision = self._phase2_planner(observation, intent=intent)
             except Exception:
                 LOGGER.exception(
                     "Phase 3 failed; using Phase 2 for team %s round %s",
                     team_id,
                     observation.time.round_no,
                 )
-                decision = self._phase2_planner(observation)
+                decision = self._phase2_planner(observation, intent=intent)
         else:
-            decision = self._phase2_planner(observation)
+            decision = self._phase2_planner(observation, intent=intent)
 
         self._sessions.put(
             StrategySession(
@@ -154,6 +201,25 @@ class StrategyEngine:
                 simulation_action=simulation_action,
                 certificate=certificate,
                 scenario_weights=weights,
+                features=features,
+                director_state=director_state,
+                intent=intent,
             )
         )
         return decision
+
+
+def _requires_emergency_medicine(
+    observation: Observation,
+    intent: StrategicIntent,
+) -> bool:
+    policy = intent.item_policy
+    if policy.medicine_health_threshold <= 0:
+        return False
+    return any(
+        role.health > 0
+        and role.role_type in {'worker', 'pioneer'}
+        and role.health <= policy.medicine_health_threshold
+        and policy.medicine_name in role.backpack
+        for role in observation.our.units
+    )

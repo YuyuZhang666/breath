@@ -5,6 +5,9 @@ from hashlib import sha256
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation, Position, UnitState
 
+from .director import DirectorState
+from .features import StrategyFeatures
+from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .simulation.candidates import SimJointAction
 from .simulation.certificate import RobotWaveSafetyCertificate
 from .simulation.search import ScenarioWeights
@@ -28,6 +31,9 @@ class StrategySession:
     simulation_action: SimJointAction | None
     certificate: RobotWaveSafetyCertificate | None
     scenario_weights: ScenarioWeights
+    features: StrategyFeatures | None = None
+    director_state: DirectorState | None = None
+    intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT
 
 
 class SessionStore:
