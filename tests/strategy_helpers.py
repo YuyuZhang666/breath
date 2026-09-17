@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 from future_war_agent.protocol.models import (
     EnemyTeamState,
@@ -7,7 +7,9 @@ from future_war_agent.protocol.models import (
     Position,
     RobotState,
     ShopItem,
+    TaskPointState,
     UnitState,
+    WorldNews,
     Zone,
 )
 from future_war_agent.protocol.time import TurnTime
@@ -75,6 +77,12 @@ def observation(
     gold: int = 75,
     vendor_shop: Iterable[ShopItem] = (),
     weapon_shop: Iterable[ShopItem] = (),
+    tasks: Iterable[TaskPointState] = (),
+    phase_task: str = '',
+    llm_response: str = '',
+    last_action_results: Mapping[int, bool] | None = None,
+    total_score: int = 0,
+    world_news: WorldNews = WorldNews(),
 ) -> Observation:
     return Observation(
         time=TurnTime.from_round(round_no),
@@ -85,11 +93,18 @@ def observation(
             team_type="challenger",
             team_id="team",
             gold=gold,
+            total_score=total_score,
+            tasks=tuple(tasks),
             units=tuple(our_units),
         ),
         enemy=EnemyTeamState(units=tuple(enemy_units)),
         robots=tuple(robots),
-        phase_task="",
+        phase_task=phase_task,
+        llm_response=llm_response,
+        last_action_results=(
+            {} if last_action_results is None else last_action_results
+        ),
+        world_news=world_news,
         vendor_shop=tuple(vendor_shop),
         weapon_shop=tuple(weapon_shop),
     )
