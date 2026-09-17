@@ -1,8 +1,14 @@
 from dataclasses import dataclass, replace
+from hashlib import sha256
 
 from future_war_agent.decision.actions import Action, ActionKind
 from future_war_agent.decision.decision import Decision
-from future_war_agent.protocol.models import Observation, TaskPointState, UnitState
+from future_war_agent.protocol.models import (
+    Observation,
+    Position,
+    TaskPointState,
+    UnitState,
+)
 
 from .pathfinding import PathResult, path_to_interaction
 from .policy import StrategicIntent
@@ -13,6 +19,7 @@ MAX_ANSWER_LENGTH = 2048
 MAX_PROMPT_LENGTH = 2048
 MAX_NEWS_LENGTH = 512
 MAX_SOPS = 16
+MAX_TASK_TYPE_LENGTH = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,16 +30,25 @@ class TaskSop:
     def __post_init__(self) -> None:
         if not self.task_type.strip() or not self.answer.strip():
             raise ValueError('task SOP fields must be nonblank')
+        if len(self.task_type) > MAX_TASK_TYPE_LENGTH:
+            raise ValueError('task SOP type is too long')
+        if len(self.answer) > MAX_ANSWER_LENGTH:
+            raise ValueError('task SOP answer is too long')
 
 
 @dataclass(frozen=True, slots=True)
 class TaskAgentState:
     active_task_type: str = ''
+    selected_task_position: Position | None = None
     accepted_round: int | None = None
     timeout_rounds: int | None = None
+    deadline_round: int | None = None
+    last_prompt_fingerprint: str = ''
+    best_answer: str = ''
     pending_task_type: str = ''
     pending_answer: str = ''
     pending_pioneer_id: int | None = None
+    pending_round: int | None = None
     sops: tuple[TaskSop, ...] = ()
     official_news: str = ''
     folk_legends: str = ''
@@ -40,6 +56,12 @@ class TaskAgentState:
     def __post_init__(self) -> None:
         if len(self.sops) > MAX_SOPS:
             raise ValueError('task SOP capacity exceeded')
+        for value in (self.active_task_type, self.pending_task_type):
+            if len(value) > MAX_TASK_TYPE_LENGTH:
+                raise ValueError('task state type is too long')
+        for value in (self.best_answer, self.pending_answer):
+            if len(value) > MAX_ANSWER_LENGTH:
+                raise ValueError('task state answer is too long')
         if len(self.official_news) > MAX_NEWS_LENGTH:
             raise ValueError('official news capacity exceeded')
         if len(self.folk_legends) > MAX_NEWS_LENGTH:
@@ -94,6 +116,8 @@ class TaskAgent:
         pioneer = _living_pioneer(observation)
         if pioneer is None:
             return TaskAgentResult(base_decision, state)
+        if _has_emergency_item_action(base_decision, pioneer.unit_id):
+            return TaskAgentResult(base_decision, state)
 
         task_text = observation.phase_task.strip()
         if task_text:
@@ -105,16 +129,31 @@ class TaskAgent:
                 task_text,
             )
 
-        selected = _select_task(observation, pioneer)
+        if state.accepted_round is not None:
+            return TaskAgentResult(base_decision, state)
+        selected = _continue_selected_task(observation, pioneer, state)
+        if selected is None:
+            selected = _select_task(observation, pioneer)
         if selected is None:
             return TaskAgentResult(base_decision, state)
+        task_type = _normalize_task_type(selected.task.task_type)
         state = replace(
             state,
-            active_task_type=selected.task.task_type,
-            accepted_round=observation.time.round_no,
+            active_task_type=task_type,
+            selected_task_position=selected.task.position,
             timeout_rounds=selected.task.timeout_rounds,
         )
         if pioneer.position.chebyshev_distance(selected.task.position) <= 1:
+            deadline_round = (
+                observation.time.round_no + selected.task.timeout_rounds
+                if selected.task.timeout_rounds is not None
+                else None
+            )
+            state = replace(
+                state,
+                accepted_round=observation.time.round_no,
+                deadline_round=deadline_round,
+            )
             decision = _overlay(
                 observation,
                 base_decision,
@@ -141,14 +180,19 @@ class TaskAgent:
         task_text: str,
     ) -> TaskAgentResult:
         task_type = state.active_task_type or _task_key(task_text)
+        fingerprint = sha256(task_text.encode('utf-8')).hexdigest()
         sop_answer = next(
             (sop.answer for sop in state.sops if sop.task_type == task_type),
             '',
         )
-        answer = sop_answer or _bounded(
-            observation.llm_response,
-            MAX_ANSWER_LENGTH,
+        response_answer = _bounded(observation.llm_response, MAX_ANSWER_LENGTH)
+        deadline_answer = (
+            state.best_answer
+            if state.deadline_round is not None
+            and observation.time.round_no >= state.deadline_round
+            else ''
         )
+        answer = sop_answer or response_answer or deadline_answer
         if answer:
             decision = _overlay(
                 observation,
@@ -159,9 +203,12 @@ class TaskAgent:
             next_state = replace(
                 state,
                 active_task_type=task_type,
+                last_prompt_fingerprint=fingerprint,
+                best_answer=answer,
                 pending_task_type=task_type,
                 pending_answer=answer,
                 pending_pioneer_id=pioneer.unit_id,
+                pending_round=observation.time.round_no,
             )
             return TaskAgentResult(decision, next_state)
 
@@ -174,7 +221,11 @@ class TaskAgent:
         decision = Decision(commands=commands, prompt=prompt, execute_command='')
         return TaskAgentResult(
             decision,
-            replace(state, active_task_type=task_type),
+            replace(
+                state,
+                active_task_type=task_type,
+                last_prompt_fingerprint=fingerprint,
+            ),
         )
 
 
@@ -189,6 +240,31 @@ def _living_pioneer(observation: Observation) -> UnitState | None:
     )
 
 
+def _has_emergency_item_action(
+    decision: Decision,
+    pioneer_id: int,
+) -> bool:
+    action = decision.commands.get(pioneer_id)
+    return action is not None and action.kind is ActionKind.USE
+
+
+def _continue_selected_task(
+    observation: Observation,
+    pioneer: UnitState,
+    state: TaskAgentState,
+) -> _TaskCandidate | None:
+    if not state.active_task_type or state.selected_task_position is None:
+        return None
+    world = WorldGrid.from_observation(observation)
+    for task in observation.our.tasks:
+        if (
+            _normalize_task_type(task.task_type) == state.active_task_type
+            and task.position == state.selected_task_position
+        ):
+            return _candidate_for_task(task, world, pioneer)
+    return None
+
+
 def _select_task(
     observation: Observation,
     pioneer: UnitState,
@@ -196,25 +272,35 @@ def _select_task(
     world = WorldGrid.from_observation(observation)
     candidates: list[_TaskCandidate] = []
     for task in observation.our.tasks:
-        if (
-            not task.is_valid
-            or task.cooldown_rounds != 0
-            or task.score_reward + task.gold_reward <= 0
-        ):
-            continue
-        path = path_to_interaction(world, pioneer.position, task.position)
-        if path is None:
-            continue
-        timeout = task.timeout_rounds if task.timeout_rounds is not None else 1000
-        urgency = max(0, 100 - min(timeout, 100))
-        value = (
-            task.score_reward * 10_000
-            + task.gold_reward * 100
-            + urgency
-            - path.cost * 10
-        )
-        candidates.append(_TaskCandidate(task, path, value))
+        candidate = _candidate_for_task(task, world, pioneer)
+        if candidate is not None:
+            candidates.append(candidate)
     return min(candidates, key=lambda item: item.sort_key) if candidates else None
+
+
+def _candidate_for_task(
+    task: TaskPointState,
+    world: WorldGrid,
+    pioneer: UnitState,
+) -> _TaskCandidate | None:
+    if (
+        not task.is_valid
+        or task.cooldown_rounds != 0
+        or task.score_reward + task.gold_reward <= 0
+    ):
+        return None
+    path = path_to_interaction(world, pioneer.position, task.position)
+    if path is None:
+        return None
+    timeout = task.timeout_rounds if task.timeout_rounds is not None else 1000
+    urgency = max(0, 100 - min(timeout, 100))
+    value = (
+        task.score_reward * 10_000
+        + task.gold_reward * 100
+        + urgency
+        - path.cost * 10
+    )
+    return _TaskCandidate(task, path, value)
 
 
 def _overlay(
@@ -239,7 +325,8 @@ def _overlay(
         reserved = {
             retained.target_positions[0]
             for retained in commands.values()
-            if retained.kind is ActionKind.MOVE and retained.target_positions
+            if retained.kind in {ActionKind.MOVE, ActionKind.BUILD}
+            and retained.target_positions
         }
         if target in occupied or target in reserved:
             return base_decision
@@ -256,10 +343,21 @@ def _reconcile_feedback(
     state: TaskAgentState,
 ) -> TaskAgentState:
     pioneer_id = state.pending_pioneer_id
-    if pioneer_id is None or pioneer_id not in observation.last_action_results:
+    if pioneer_id is None:
         return state
+    expected_round = (
+        state.pending_round + 1
+        if state.pending_round is not None
+        else observation.time.round_no
+    )
+    if observation.time.round_no < expected_round:
+        return state
+    has_immediate_result = (
+        observation.time.round_no == expected_round
+        and pioneer_id in observation.last_action_results
+    )
     sops = state.sops
-    if observation.last_action_results[pioneer_id]:
+    if has_immediate_result and observation.last_action_results[pioneer_id]:
         learned = TaskSop(state.pending_task_type, state.pending_answer)
         sops = (
             learned,
@@ -268,11 +366,15 @@ def _reconcile_feedback(
     return replace(
         state,
         active_task_type='',
+        selected_task_position=None,
         accepted_round=None,
         timeout_rounds=None,
+        deadline_round=None,
+        best_answer='',
         pending_task_type='',
         pending_answer='',
         pending_pioneer_id=None,
+        pending_round=None,
         sops=sops,
     )
 
@@ -282,7 +384,11 @@ def _bounded(value: str, limit: int) -> str:
 
 
 def _task_key(task_text: str) -> str:
-    return 'text:' + task_text.strip()[:128]
+    return _normalize_task_type('text:' + task_text)
+
+
+def _normalize_task_type(task_type: str) -> str:
+    return task_type.replace('\x00', '').strip()[:MAX_TASK_TYPE_LENGTH]
 
 
 def _build_prompt(task_type: str, task_text: str) -> str:

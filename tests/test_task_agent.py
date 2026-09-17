@@ -5,7 +5,12 @@ from future_war_agent.decision.actions import Action, ActionKind
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Position, TaskPointState, WorldNews
 from future_war_agent.strategy.policy import StrategyProfile, intent_for_profile
-from future_war_agent.strategy.task_agent import TaskAgent, TaskAgentState
+from future_war_agent.strategy.task_agent import (
+    MAX_TASK_TYPE_LENGTH,
+    TaskAgent,
+    TaskAgentState,
+    TaskSop,
+)
 from tests.strategy_helpers import observation, unit
 
 
@@ -68,6 +73,34 @@ class TaskAgentTests(unittest.TestCase):
         )
 
         result = TaskAgent().apply(observed, base, SURVIVE_INTENT)
+
+        self.assertEqual(result.decision, base)
+
+    def test_task_never_overrides_emergency_item_use(self) -> None:
+        base = Decision(commands={2: Action.use('Medicine')})
+        observed = observation(
+            our_units=(
+                unit(2, 1, 1, 'pioneer', health=20, backpack=('Medicine',)),
+            ),
+            tasks=(task('math', 2, 2),),
+        )
+
+        result = TaskAgent().apply(observed, base, SCORE_INTENT)
+
+        self.assertEqual(result.decision, base)
+        self.assertEqual(result.state.active_task_type, '')
+
+    def test_task_move_never_conflicts_with_base_build_target(self) -> None:
+        base = Decision(commands={1: Action.build('wall', Position(2, 0))})
+        observed = observation(
+            our_units=(
+                unit(1, 3, 0, 'worker', backpack=('stone',)),
+                unit(2, 1, 1, 'pioneer'),
+            ),
+            tasks=(task('math', 4, 1),),
+        )
+
+        result = TaskAgent().apply(observed, base, SCORE_INTENT)
 
         self.assertEqual(result.decision, base)
 
@@ -147,6 +180,105 @@ class TaskAgentTests(unittest.TestCase):
         )
         self.assertEqual(repeated.decision.prompt, '')
         self.assertEqual(repeated.decision.commands[2].task_answer, '42')
+
+    def test_missing_immediate_feedback_expires_pending_submission(self) -> None:
+        pending = TaskAgentState(
+            active_task_type='math',
+            pending_task_type='math',
+            pending_answer='42',
+            pending_pioneer_id=2,
+            pending_round=1,
+        )
+        missing = observation(
+            round_no=2,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+        )
+        late_success = observation(
+            round_no=3,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            last_action_results={2: True},
+        )
+
+        expired = TaskAgent().apply(
+            missing,
+            Decision(),
+            SCORE_INTENT,
+            previous_state=pending,
+        )
+        result = TaskAgent().apply(
+            late_success,
+            Decision(),
+            SCORE_INTENT,
+            previous_state=expired.state,
+        )
+
+        self.assertEqual(result.state.sops, ())
+        self.assertIsNone(result.state.pending_pioneer_id)
+
+    def test_selected_task_is_sticky_until_acceptance(self) -> None:
+        agent = TaskAgent()
+        first = observation(
+            round_no=1,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            tasks=(task('chosen', 6, 1),),
+        )
+        selected = agent.apply(first, Decision(), SCORE_INTENT)
+        moved_pioneer = unit(2, 2, 0, 'pioneer')
+        second = observation(
+            round_no=2,
+            our_units=(moved_pioneer,),
+            tasks=(
+                task('chosen', 6, 1),
+                task('new-high-value', 3, 1, score=1000),
+            ),
+        )
+
+        continued = agent.apply(
+            second,
+            Decision(),
+            SCORE_INTENT,
+            previous_state=selected.state,
+        )
+
+        self.assertEqual(continued.state.active_task_type, 'chosen')
+        self.assertEqual(continued.state.selected_task_position, Position(6, 1))
+        self.assertIsNone(continued.state.accepted_round)
+
+    def test_deadline_submits_bounded_best_answer_and_tracks_prompt(self) -> None:
+        agent = TaskAgent()
+        state = TaskAgentState(
+            active_task_type='math',
+            deadline_round=2,
+            best_answer='partial-42',
+        )
+        observed = observation(
+            round_no=2,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            phase_task='Return the sum of 20 and 22.',
+        )
+
+        result = agent.apply(
+            observed,
+            Decision(),
+            SCORE_INTENT,
+            previous_state=state,
+        )
+
+        self.assertEqual(result.decision.commands[2].task_answer, 'partial-42')
+        self.assertTrue(result.state.last_prompt_fingerprint)
+
+    def test_task_type_and_sop_fields_are_bounded(self) -> None:
+        long_type = 'x' * (MAX_TASK_TYPE_LENGTH + 50)
+        observed = observation(
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            tasks=(task(long_type, 2, 2),),
+        )
+
+        result = TaskAgent().apply(observed, Decision(), SCORE_INTENT)
+
+        self.assertEqual(len(result.state.active_task_type), MAX_TASK_TYPE_LENGTH)
+        with self.assertRaises(ValueError):
+            TaskSop(long_type, 'answer')
 
     def test_failed_submission_is_not_learned_and_treasure_is_never_emitted(self) -> None:
         state = TaskAgentState(
