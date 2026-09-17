@@ -70,6 +70,42 @@ class MatchMemoryTests(unittest.TestCase):
 
         self.assertIs(first, duplicate)
 
+    def test_round_rollback_starts_new_epoch_and_decays_hidden_tracks(self) -> None:
+        store = MatchMemoryStore()
+        store.observe(
+            observation(
+                round_no=100,
+                enemy_units=(unit(90, 4, 4, 'worker'),),
+            )
+        )
+
+        memory = store.observe(observation(round_no=1))
+
+        self.assertEqual(memory.epoch, 1)
+        self.assertEqual(memory.last_round, 1)
+        self.assertEqual(memory.belief.tracks[0].confidence, 90)
+
+    def test_same_raw_round_certificate_is_retained_across_epochs(self) -> None:
+        store = MatchMemoryStore()
+        certificate = search_result().certificate
+        store.observe(observation(round_no=100), certificate=certificate)
+        store.observe(observation(round_no=130))
+
+        memory = store.observe(
+            observation(round_no=100),
+            certificate=certificate,
+        )
+
+        same_round = [
+            summary
+            for summary in memory.wave_summaries
+            if summary.round_no == 100
+        ]
+        self.assertEqual([(item.epoch, item.round_no) for item in same_round], [
+            (0, 100),
+            (1, 100),
+        ])
+
     def test_wave_summaries_are_bounded(self) -> None:
         store = MatchMemoryStore()
         certificate = search_result().certificate

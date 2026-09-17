@@ -26,6 +26,7 @@ class OpponentTrack:
     position: Position
     health: int
     last_seen_round: int
+    last_updated_tick: int
     confidence: int
 
     def __post_init__(self) -> None:
@@ -46,17 +47,19 @@ def update_opponent_belief(
     observation: Observation,
     *,
     normalize: PositionNormalizer | None = None,
+    tick: int | None = None,
     config: BeliefConfig = DEFAULT_BELIEF_CONFIG,
 ) -> OpponentBelief:
     normalizer = normalize if normalize is not None else _identity
     current_round = observation.time.round_no
+    current_tick = current_round if tick is None else tick
     visible_by_id = {unit.unit_id: unit for unit in observation.enemy.units}
     tracks: dict[int, OpponentTrack] = {}
 
     for track in previous.tracks:
         if track.unit_id in visible_by_id:
             continue
-        elapsed = max(0, current_round - track.last_seen_round)
+        elapsed = max(0, current_tick - track.last_updated_tick)
         confidence = max(0, track.confidence - elapsed * config.decay_per_round)
         if confidence > 0:
             tracks[track.unit_id] = OpponentTrack(
@@ -65,6 +68,7 @@ def update_opponent_belief(
                 position=track.position,
                 health=track.health,
                 last_seen_round=track.last_seen_round,
+                last_updated_tick=current_tick,
                 confidence=confidence,
             )
 
@@ -77,6 +81,7 @@ def update_opponent_belief(
             position=normalizer(unit.position),
             health=max(0, unit.health),
             last_seen_round=current_round,
+            last_updated_tick=current_tick,
             confidence=100,
         )
 

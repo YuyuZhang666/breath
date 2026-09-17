@@ -23,6 +23,7 @@ class NormalizedZone:
 
 @dataclass(frozen=True, slots=True)
 class WaveSummary:
+    epoch: int
     round_no: int
     classification: WaveClassification
     secured: bool
@@ -33,6 +34,8 @@ class WaveSummary:
 @dataclass(frozen=True, slots=True)
 class MatchMemory:
     team_id: str
+    epoch: int = 0
+    observation_tick: int = 0
     last_round: int = 0
     last_fingerprint: str = ''
     belief: OpponentBelief = OpponentBelief()
@@ -110,6 +113,23 @@ def update_match_memory(
     prior = previous if previous is not None else MatchMemory(team_id=team_id)
     fingerprint = observation_fingerprint(observation)
     same_observation = prior.last_fingerprint == fingerprint
+    rollback = (
+        previous is not None
+        and not same_observation
+        and observation.time.round_no < prior.last_round
+    )
+    epoch = prior.epoch + (1 if rollback else 0)
+    if previous is None:
+        observation_tick = observation.time.round_no
+    elif same_observation:
+        observation_tick = prior.observation_tick
+    elif rollback:
+        observation_tick = prior.observation_tick + 1
+    else:
+        observation_tick = prior.observation_tick + max(
+            0,
+            observation.time.round_no - prior.last_round,
+        )
     belief = prior.belief
     zones = prior.zones
     if not same_observation:
@@ -117,6 +137,7 @@ def update_match_memory(
             prior.belief,
             observation,
             normalize=lambda position: canonical_position(observation, position),
+            tick=observation_tick,
         )
         normalized_zones = {
             NormalizedZone(
@@ -139,6 +160,7 @@ def update_match_memory(
     summaries = prior.wave_summaries
     if certificate is not None:
         summary = WaveSummary(
+            epoch=epoch,
             round_no=observation.time.round_no,
             classification=certificate.classification,
             secured=certificate.secured,
@@ -148,13 +170,20 @@ def update_match_memory(
             worst_station_health=certificate.worst_station_health,
         )
         summaries = (
-            *(item for item in summaries if item.round_no != summary.round_no),
+            *(
+                item
+                for item in summaries
+                if (item.epoch, item.round_no)
+                != (summary.epoch, summary.round_no)
+            ),
             summary,
         )[-MAX_WAVE_SUMMARIES:]
 
     return MatchMemory(
         team_id=team_id,
-        last_round=max(prior.last_round, observation.time.round_no),
+        epoch=epoch,
+        observation_tick=observation_tick,
+        last_round=observation.time.round_no,
         last_fingerprint=fingerprint,
         belief=belief,
         zones=zones,

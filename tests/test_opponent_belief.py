@@ -25,10 +25,16 @@ class OpponentBeliefTests(unittest.TestCase):
         )
         self.assertEqual(decayed.tracks[0].confidence, 90)
 
-        contradicted = update_opponent_belief(
+        decayed_again = update_opponent_belief(
             decayed,
+            observation(round_no=3),
+        )
+        self.assertEqual(decayed_again.tracks[0].confidence, 80)
+
+        contradicted = update_opponent_belief(
+            decayed_again,
             observation(
-                round_no=3,
+                round_no=4,
                 enemy_units=(unit(90, 4, 4, 'pioneer', health=50),),
             ),
         )

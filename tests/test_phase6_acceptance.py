@@ -32,6 +32,28 @@ class Phase6AcceptanceTests(unittest.TestCase):
         self.assertEqual(memory.belief.tracks[0].position, Position(2, 2))
         self.assertEqual(memory.belief.tracks[0].last_seen_round, 200)
 
+    def test_engine_memory_survives_true_round_rollback(self) -> None:
+        engine = StrategyEngine()
+        engine.plan(
+            observation(
+                round_no=100,
+                our_units=(unit(10, 2, 2, 'station', level=1),),
+                enemy_units=(unit(90, 12, 12, 'worker'),),
+            )
+        )
+
+        engine.plan(
+            observation(
+                round_no=1,
+                our_units=(unit(10, 12, 12, 'station', level=1),),
+            )
+        )
+
+        memory = engine._memory.get('team')
+        self.assertEqual(memory.epoch, 1)
+        self.assertEqual(memory.last_round, 1)
+        self.assertEqual(memory.belief.tracks[0].confidence, 90)
+
     def test_fresh_phase3_certificate_is_recorded_once(self) -> None:
         engine = StrategyEngine()
         day = load_observation(DAY_FIXTURE)
