@@ -138,6 +138,14 @@ class StrategicDirector:
         previous: DirectorState,
         current: StrategyFeatures,
     ) -> bool:
+        previous_intent = intent_for_profile(
+            previous.profile,
+            previous.reason,
+            feature_flags=self._feature_flags,
+        )
+        hold_expires = previous.since_round + previous_intent.minimum_hold_rounds
+        if previous.last_evaluated_round < hold_expires <= current.round_no:
+            return True
         if current.round_no - previous.last_evaluated_round >= (
             self._config.evaluation_interval
         ):

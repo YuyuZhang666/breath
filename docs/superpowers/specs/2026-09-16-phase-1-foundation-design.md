@@ -154,6 +154,11 @@ Failure policy:
 
 Phase 1 state is request-local. No mutable observation data is shared between concurrent requests.
 
+In the complete agent, this statement applies to the Phase 1 protocol and HTTP
+boundary. Later strategy phases may keep process-local state above that
+boundary. Such state is owned by the locked `StrategyEngine`; Phase 1 remains
+strategy-agnostic and continues to validate and serialize every final decision.
+
 ## Controller Behavior
 
 The Phase 1 controller deliberately returns an empty `Decision`. Its responsibility is to prove the integration path:

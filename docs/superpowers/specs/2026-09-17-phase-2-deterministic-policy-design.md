@@ -437,3 +437,8 @@ optimized multi-level weapon attacks, item use, tasks, news and treasure
 reasoning, enemy beliefs, summons, cross-half memory, and PSRO. These systems
 must reuse the Phase 2 world, pathfinding, job, and joint-action boundaries
 rather than bypass them.
+
+Phase 4 parameterizes the weapon loadout, day priorities, resource reserve, and
+confirmed medicine policy through an immutable `StrategicIntent`. Calling
+`plan_turn` with its default intent preserves this Phase 2 design exactly, so
+the policy remains the deterministic fallback for every later phase.

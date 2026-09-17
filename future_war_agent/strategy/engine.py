@@ -1,5 +1,6 @@
 import logging
 from collections.abc import Callable
+from inspect import Parameter, signature
 from threading import RLock
 from time import monotonic
 
@@ -22,7 +23,7 @@ from .session import (
 )
 from .simulation.config import DEFAULT_PHASE3_CONFIG, Phase3Config
 from .simulation.errors import DeadlineExceeded, UnsupportedSimulation
-from .simulation.objective import DEFAULT_NIGHT_OBJECTIVE, NightObjective
+from .simulation.objective import NightObjective
 from .simulation.search import (
     ScenarioWeights,
     SearchResult,
@@ -54,6 +55,7 @@ class StrategyEngine:
     ) -> None:
         self._config = config
         self._phase2_planner = phase2_planner
+        self._phase2_accepts_intent = _accepts_intent(phase2_planner)
         self._night_searcher = night_searcher
         self._objective_provider = objective_provider
         self._director = director if director is not None else StrategicDirector()
@@ -69,7 +71,7 @@ class StrategyEngine:
     def _plan_locked(self, observation: Observation) -> Decision:
         team_id = observation.our.team_id
         if not team_id.strip():
-            return self._phase2_planner(observation)
+            return self._plan_phase2(observation, DEFAULT_STRATEGIC_INTENT)
 
         fingerprint = observation_fingerprint(observation)
         signature = static_signature(observation)
@@ -179,16 +181,16 @@ class StrategyEngine:
                     observation.time.round_no,
                     exc_info=True,
                 )
-                decision = self._phase2_planner(observation, intent=intent)
+                decision = self._plan_phase2(observation, intent)
             except Exception:
                 LOGGER.exception(
                     "Phase 3 failed; using Phase 2 for team %s round %s",
                     team_id,
                     observation.time.round_no,
                 )
-                decision = self._phase2_planner(observation, intent=intent)
+                decision = self._plan_phase2(observation, intent)
         else:
-            decision = self._phase2_planner(observation, intent=intent)
+            decision = self._plan_phase2(observation, intent)
 
         self._sessions.put(
             StrategySession(
@@ -207,6 +209,27 @@ class StrategyEngine:
             )
         )
         return decision
+
+    def _plan_phase2(
+        self,
+        observation: Observation,
+        intent: StrategicIntent,
+    ) -> Decision:
+        if self._phase2_accepts_intent:
+            return self._phase2_planner(observation, intent=intent)
+        return self._phase2_planner(observation)
+
+
+def _accepts_intent(planner: Phase2Planner) -> bool:
+    try:
+        parameters = signature(planner).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == 'intent'
+        or parameter.kind is Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )
 
 
 def _requires_emergency_medicine(
