@@ -1,10 +1,15 @@
 import unittest
-from dataclasses import FrozenInstanceError, replace
+from dataclasses import FrozenInstanceError, fields, replace
 
 from future_war_agent.protocol.models import Position, Zone
 from future_war_agent.protocol.time import TurnTime
 from future_war_agent.strategy.simulation.errors import UnsupportedSimulation
-from future_war_agent.strategy.simulation.state import AssignedStand, build_sim_state
+from future_war_agent.strategy.simulation.state import (
+    AssignedStand,
+    SimRole,
+    SimState,
+    build_sim_state,
+)
 from tests.strategy_helpers import observation, robot, unit
 
 
@@ -79,6 +84,47 @@ class SimulationStateTests(unittest.TestCase):
         self.assertEqual(state.roles[0].assigned_stand, Position(4, 5))
         with self.assertRaises(FrozenInstanceError):
             state.roles[0].health = 1
+
+    def test_state_excludes_enemy_fire_items_and_future_summons(self) -> None:
+        worker_with_items = replace(
+            self.worker,
+            backpack=("stone", "Medicine"),
+        )
+        enemy_weapon = unit(
+            202,
+            13,
+            10,
+            "gatling",
+            health=180,
+            attack_power=10,
+            attack_range=6,
+            level=1,
+            cooldown=0,
+            provided_fields=EXPLICIT_WEAPON_FIELDS,
+        )
+        observed = replace(
+            self.observed,
+            our=replace(
+                self.observed.our,
+                units=(
+                    worker_with_items,
+                    *self.observed.our.units[1:],
+                ),
+            ),
+            enemy=replace(
+                self.observed.enemy,
+                units=(*self.observed.enemy.units, enemy_weapon),
+            ),
+        )
+
+        state = build_sim_state(observed, self.assignments)
+
+        self.assertNotIn(202, {weapon.unit_id for weapon in state.weapons})
+        self.assertNotIn("backpack", {item.name for item in fields(SimRole)})
+        state_fields = {item.name for item in fields(SimState)}
+        self.assertFalse(
+            {"enemy_attacks", "items", "future_summons"} & state_fields
+        )
 
     def test_robot_spec_supplies_range_three_kill_score_and_dizzy_wait(self) -> None:
         state = build_sim_state(self.observed, self.assignments)

@@ -4,7 +4,9 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from fractions import Fraction
+from math import ceil
 from pathlib import Path
+from statistics import median
 
 from future_war_agent.decision.actions import Action
 from future_war_agent.decision.decision import Decision
@@ -335,6 +337,58 @@ class StrategyEngineTests(unittest.TestCase):
 
         self.assertEqual(len(search.calls), 1)
         self.assertTrue(all(item is decisions[0] for item in decisions))
+
+    def test_supported_night_latency_stays_below_external_limit(self) -> None:
+        fresh_samples: list[float] = []
+        for _ in range(20):
+            engine = StrategyEngine()
+            engine.plan(self.day)
+            started = time.perf_counter()
+            engine.plan(self.night)
+            fresh_samples.append(time.perf_counter() - started)
+            session = engine._sessions.get(self.night.our.team_id)
+            self.assertIsNotNone(session)
+            self.assertIsNotNone(
+                session.simulation_action if session is not None else None
+            )
+
+        cached_engine = StrategyEngine()
+        cached_engine.plan(self.day)
+        cached_engine.plan(self.night)
+        cached_session = cached_engine._sessions.get(self.night.our.team_id)
+        self.assertIsNotNone(cached_session)
+        self.assertIsNotNone(
+            cached_session.simulation_action
+            if cached_session is not None
+            else None
+        )
+        cached_samples: list[float] = []
+        for _ in range(100):
+            started = time.perf_counter()
+            cached_engine.plan(self.night)
+            cached_samples.append(time.perf_counter() - started)
+
+        self.assertTrue(
+            all(sample < 5.0 for sample in fresh_samples),
+            max(fresh_samples),
+        )
+        self.assertTrue(
+            all(sample < 5.0 for sample in cached_samples),
+            max(cached_samples),
+        )
+        fresh_p99 = sorted(fresh_samples)[
+            ceil(len(fresh_samples) * 0.99) - 1
+        ]
+        cached_p99 = sorted(cached_samples)[
+            ceil(len(cached_samples) * 0.99) - 1
+        ]
+        print(
+            "Phase 3 latency: "
+            f"fresh median={median(fresh_samples) * 1000:.2f}ms "
+            f"p99={fresh_p99 * 1000:.2f}ms; "
+            f"cached median={median(cached_samples) * 1000:.3f}ms "
+            f"p99={cached_p99 * 1000:.3f}ms"
+        )
 
 
 if __name__ == "__main__":

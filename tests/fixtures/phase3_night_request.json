@@ -77,7 +77,7 @@
         "attackPower": 20,
         "attackRange": 8,
         "level": 1,
-        "cooldown": 0
+        "cooldown": 1
       },
       {
         "id": 400,
