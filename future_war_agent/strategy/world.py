@@ -151,3 +151,18 @@ class WorldGrid:
 
     def our_station(self) -> UnitState | None:
         return self.stations[0] if self.stations else None
+
+    def is_geographic_land(self, position: Position) -> bool:
+        if not self.in_bounds(position) or position in self.neutral_cells:
+            return False
+        station_cells = (
+            frozenset().union(
+                *(
+                    station_footprint(station.position, self.rules)
+                    for station in self.stations
+                )
+            )
+            if self.stations
+            else frozenset()
+        )
+        return position not in station_cells
