@@ -160,7 +160,7 @@ def _assigned_candidates(
                     role_id=role.unit_id,
                     start=role.position,
                     weapon_id=weapon.unit_id,
-                    target=target.position,
+                    targets=(target.position,),
                     priority=500,
                 )
             )

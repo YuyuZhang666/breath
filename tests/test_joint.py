@@ -1,10 +1,13 @@
 import unittest
 
 from future_war_agent.decision.actions import Action
+from future_war_agent.decision.serializer import decision_to_payload
 from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.joint import (
     TacticalCandidate,
     candidates_for_jobs,
+    decision_for_joint,
+    enumerate_legal_joints,
     is_valid_joint,
     solve_joint,
 )
@@ -110,11 +113,107 @@ class JointSolverTests(unittest.TestCase):
             role_id=10011,
             start=Position(2, 1),
             weapon_id=10020,
-            target=Position(6, 6),
+            targets=(Position(6, 6),),
             priority=500,
         )
         move = candidate(10011, Position(2, 1), Position(2, 2))
         self.assertFalse(is_valid_joint(self.observed, self.world, (attack, move)))
+
+    def test_one_target_attack_preserves_phase_2_payload(self) -> None:
+        target = Position(6, 6)
+        attack = TacticalCandidate.attack(
+            role_id=10011,
+            start=Position(2, 1),
+            weapon_id=10020,
+            targets=(target,),
+            priority=500,
+        )
+
+        payload = decision_to_payload(decision_for_joint((attack,)))
+
+        self.assertEqual(
+            payload["roleCommandMap"],
+            {
+                "10020": {
+                    "action": "attack",
+                    "controllerId": "10011",
+                    "targetPos": [{"x": 6, "y": 6}],
+                }
+            },
+        )
+
+    def test_multi_target_attack_preserves_every_target(self) -> None:
+        targets = (Position(6, 6), Position(7, 6))
+
+        attack = TacticalCandidate.attack(
+            role_id=10011,
+            start=Position(2, 1),
+            weapon_id=10020,
+            targets=targets,
+            priority=500,
+        )
+
+        self.assertEqual(attack.action.target_positions, targets)
+
+    def test_multi_target_attack_requires_injected_validator(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(1, 1, 2, "worker"),
+                unit(2, 2, 2, "gatling", attack_range=8, level=2),
+            ),
+        )
+        world = WorldGrid.from_observation(observed)
+        attack = TacticalCandidate.attack(
+            role_id=1,
+            start=Position(1, 2),
+            weapon_id=2,
+            targets=(Position(5, 2), Position(5, 3)),
+            priority=500,
+        )
+        choices = {1: (attack,)}
+
+        self.assertFalse(is_valid_joint(observed, world, (attack,)))
+        self.assertEqual(enumerate_legal_joints(observed, world, choices), ())
+        accepted = enumerate_legal_joints(
+            observed,
+            world,
+            choices,
+            attack_validator=lambda role, weapon, action: (
+                role.unit_id == action.controller_id
+                and weapon.unit_id == 2
+                and len(action.target_positions) == 2
+            ),
+        )
+        self.assertEqual(accepted, ((attack,),))
+
+    def test_legal_enumeration_is_deterministic_and_honors_limit(self) -> None:
+        choices = {
+            10010: (
+                candidate(10010, Position(1, 1), Position(1, 2)),
+                candidate(10010, Position(1, 1), None),
+            ),
+            10011: (
+                candidate(10011, Position(2, 1), Position(2, 2)),
+                candidate(10011, Position(2, 1), None),
+            ),
+        }
+
+        first = enumerate_legal_joints(
+            self.observed,
+            self.world,
+            choices,
+            limit=2,
+        )
+        second = enumerate_legal_joints(
+            self.observed,
+            self.world,
+            choices,
+            limit=2,
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 2)
 
     def test_solver_is_deterministic(self) -> None:
         choices = {

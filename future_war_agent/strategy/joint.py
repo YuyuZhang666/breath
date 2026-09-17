@@ -1,4 +1,5 @@
 from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import product
 from typing import Mapping
@@ -70,19 +71,23 @@ class TacticalCandidate:
         role_id: int,
         start: Position,
         weapon_id: int,
-        target: Position,
+        targets: Iterable[Position],
         priority: int,
     ) -> "TacticalCandidate":
         return cls(
             role_id=role_id,
             command_actor_id=weapon_id,
-            action=Action.attack(role_id, (target,)),
+            action=Action.attack(role_id, tuple(targets)),
             job_kind=JobKind.ATTACK,
             start=start,
             priority=priority,
             completes_job=True,
             progress=1,
         )
+
+
+AttackValidator = Callable[[UnitState, UnitState, Action], bool]
+Joint = tuple[TacticalCandidate, ...]
 
 
 def candidates_for_jobs(
@@ -165,6 +170,8 @@ def is_valid_joint(
     observation: Observation,
     world: WorldGrid,
     joint: tuple[TacticalCandidate, ...],
+    *,
+    attack_validator: AttackValidator | None = None,
 ) -> bool:
     role_ids = [item.role_id for item in joint]
     actor_ids = [item.command_actor_id for item in joint]
@@ -224,9 +231,56 @@ def is_valid_joint(
                 return False
             if Counter(role.backpack)[world.rules.wall_material] < item.stone_cost:
                 return False
-        if not _direct_action_is_legal(observation, world, item):
+        if not _direct_action_is_legal(
+            observation,
+            world,
+            item,
+            attack_validator=attack_validator,
+        ):
             return False
     return True
+
+
+def enumerate_legal_joints(
+    observation: Observation,
+    world: WorldGrid,
+    choices: Mapping[int, tuple[TacticalCandidate, ...]],
+    *,
+    limit: int | None = None,
+    attack_validator: AttackValidator | None = None,
+) -> tuple[Joint, ...]:
+    role_ids = tuple(sorted(choices))
+    if (
+        not role_ids
+        or any(not choices[role_id] for role_id in role_ids)
+        or (limit is not None and limit <= 0)
+    ):
+        return ()
+
+    legal: list[Joint] = []
+    for combination in product(*(choices[role_id] for role_id in role_ids)):
+        joint = tuple(combination)
+        if not is_valid_joint(
+            observation,
+            world,
+            joint,
+            attack_validator=attack_validator,
+        ):
+            continue
+        legal.append(joint)
+        if limit is not None and len(legal) >= limit:
+            break
+    return tuple(legal)
+
+
+def decision_for_joint(joint: Joint) -> Decision:
+    return Decision(
+        commands={
+            item.command_actor_id: item.action
+            for item in joint
+            if item.action is not None
+        }
+    )
 
 
 def solve_joint(
@@ -238,12 +292,9 @@ def solve_joint(
     if not role_ids or any(not choices[role_id] for role_id in role_ids):
         return Decision()
 
-    winner: tuple[TacticalCandidate, ...] | None = None
+    winner: Joint | None = None
     winner_score: tuple[object, ...] | None = None
-    for combination in product(*(choices[role_id] for role_id in role_ids)):
-        joint = tuple(combination)
-        if not is_valid_joint(observation, world, joint):
-            continue
+    for joint in enumerate_legal_joints(observation, world, choices):
         score: tuple[object, ...] = (
             sum(item.priority for item in joint),
             sum(item.completes_job for item in joint),
@@ -263,13 +314,7 @@ def solve_joint(
 
     if winner is None:
         return Decision()
-    return Decision(
-        commands={
-            item.command_actor_id: item.action
-            for item in winner
-            if item.action is not None
-        }
-    )
+    return decision_for_joint(winner)
 
 
 def _move_candidates(
@@ -314,6 +359,8 @@ def _direct_action_is_legal(
     observation: Observation,
     world: WorldGrid,
     item: TacticalCandidate,
+    *,
+    attack_validator: AttackValidator | None = None,
 ) -> bool:
     action = item.action
     if action is None or action.kind is ActionKind.MOVE:
@@ -351,10 +398,12 @@ def _direct_action_is_legal(
         )
     if action.kind is ActionKind.ATTACK:
         weapon = world.unit_by_id(item.command_actor_id)
+        if observation.time.phase is not Phase.NIGHT or weapon is None:
+            return False
+        if attack_validator is not None:
+            return attack_validator(role, weapon, action)
         return (
-            observation.time.phase is Phase.NIGHT
-            and weapon is not None
-            and role.position.chebyshev_distance(weapon.position) == 1
+            role.position.chebyshev_distance(weapon.position) == 1
             and action.controller_id == role.unit_id
             and len(action.target_positions) == 1
             and weapon.position.chebyshev_distance(action.target_positions[0])
