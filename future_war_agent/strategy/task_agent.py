@@ -227,6 +227,7 @@ def _overlay(
         actor_id: retained
         for actor_id, retained in base_decision.commands.items()
         if actor_id != pioneer.unit_id
+        and retained.controller_id != pioneer.unit_id
     }
     if action.kind is ActionKind.MOVE:
         target = action.target_positions[0]

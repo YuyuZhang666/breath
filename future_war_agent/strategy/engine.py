@@ -29,6 +29,7 @@ from .simulation.search import (
     SearchResult,
     search_night,
 )
+from .task_agent import EMPTY_TASK_STATE, TaskAgent
 
 
 LOGGER = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class StrategyEngine:
         night_searcher: NightSearcher = search_night,
         objective_provider: ObjectiveProvider | None = None,
         director: StrategicDirector | None = None,
+        task_agent: TaskAgent | None = None,
         clock: Callable[[], float] = monotonic,
         session_store: SessionStore | None = None,
         scenario_reconciler: ScenarioReconciler = reconcile_scenario_weights,
@@ -59,6 +61,7 @@ class StrategyEngine:
         self._night_searcher = night_searcher
         self._objective_provider = objective_provider
         self._director = director if director is not None else StrategicDirector()
+        self._task_agent = task_agent if task_agent is not None else TaskAgent()
         self._clock = clock
         self._sessions = session_store if session_store is not None else SessionStore()
         self._scenario_reconciler = scenario_reconciler
@@ -199,6 +202,28 @@ class StrategyEngine:
         else:
             decision = self._plan_phase2(observation, intent)
 
+        task_state = (
+            previous_for_director.task_state
+            if previous_for_director is not None
+            else EMPTY_TASK_STATE
+        )
+        try:
+            task_result = self._task_agent.apply(
+                observation,
+                decision,
+                intent,
+                previous_state=task_state,
+            )
+            decision = task_result.decision
+            task_state = task_result.state
+        except Exception:
+            LOGGER.exception(
+                'Phase 5 task agent failed; using base decision for team %s round %s',
+                team_id,
+                observation.time.round_no,
+            )
+            task_state = EMPTY_TASK_STATE
+
         self._sessions.put(
             StrategySession(
                 team_id=team_id,
@@ -213,6 +238,7 @@ class StrategyEngine:
                 features=features,
                 director_state=director_state,
                 intent=intent,
+                task_state=task_state,
             )
         )
         return decision

@@ -11,6 +11,7 @@ from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .simulation.candidates import SimJointAction
 from .simulation.certificate import RobotWaveSafetyCertificate
 from .simulation.search import ScenarioWeights
+from .task_agent import EMPTY_TASK_STATE, TaskAgentState
 
 
 class SessionContinuity(StrEnum):
@@ -34,6 +35,7 @@ class StrategySession:
     features: StrategyFeatures | None = None
     director_state: DirectorState | None = None
     intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT
+    task_state: TaskAgentState = EMPTY_TASK_STATE
 
 
 class SessionStore:
