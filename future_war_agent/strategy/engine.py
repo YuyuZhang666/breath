@@ -10,6 +10,7 @@ from future_war_agent.protocol.time import Phase
 
 from .director import StrategicDirector
 from .features import extract_features
+from .memory import MatchMemoryStore
 from .planner import plan_turn
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .reconcile import reconcile_scenario_weights, uniform_scenario_weights
@@ -51,6 +52,7 @@ class StrategyEngine:
         objective_provider: ObjectiveProvider | None = None,
         director: StrategicDirector | None = None,
         task_agent: TaskAgent | None = None,
+        memory_store: MatchMemoryStore | None = None,
         clock: Callable[[], float] = monotonic,
         session_store: SessionStore | None = None,
         scenario_reconciler: ScenarioReconciler = reconcile_scenario_weights,
@@ -62,6 +64,9 @@ class StrategyEngine:
         self._objective_provider = objective_provider
         self._director = director if director is not None else StrategicDirector()
         self._task_agent = task_agent if task_agent is not None else TaskAgent()
+        self._memory = (
+            memory_store if memory_store is not None else MatchMemoryStore()
+        )
         self._clock = clock
         self._sessions = session_store if session_store is not None else SessionStore()
         self._scenario_reconciler = scenario_reconciler
@@ -88,6 +93,15 @@ class StrategyEngine:
             if previous is None:
                 raise AssertionError("duplicate continuity requires a session")
             return previous.decision
+
+        try:
+            self._memory.observe(observation)
+        except Exception:
+            LOGGER.exception(
+                'Phase 6 memory update failed for team %s round %s',
+                team_id,
+                observation.time.round_no,
+            )
 
         weights = (
             previous.scenario_weights
@@ -139,6 +153,7 @@ class StrategyEngine:
                 LOGGER.exception('Phase 4 fallback feature extraction failed')
                 features = None
         simulation_action = None
+        fresh_certificate = None
         certificate = (
             previous_for_director.certificate
             if previous_for_director is not None
@@ -184,6 +199,7 @@ class StrategyEngine:
                 decision = result.decision
                 simulation_action = result.simulation_action
                 certificate = result.certificate
+                fresh_certificate = result.certificate
             except (UnsupportedSimulation, DeadlineExceeded):
                 LOGGER.warning(
                     "Phase 3 unavailable; using Phase 2 for team %s round %s",
@@ -223,6 +239,19 @@ class StrategyEngine:
                 observation.time.round_no,
             )
             task_state = EMPTY_TASK_STATE
+
+        if fresh_certificate is not None:
+            try:
+                self._memory.observe(
+                    observation,
+                    certificate=fresh_certificate,
+                )
+            except Exception:
+                LOGGER.exception(
+                    'Phase 6 certificate memory update failed for team %s round %s',
+                    team_id,
+                    observation.time.round_no,
+                )
 
         self._sessions.put(
             StrategySession(
