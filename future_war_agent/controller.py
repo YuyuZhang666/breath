@@ -4,8 +4,9 @@ from collections.abc import Callable
 from future_war_agent.decision.decision import Decision
 from future_war_agent.decision.serializer import decision_to_payload
 from future_war_agent.decision.validator import validate_decision
-from future_war_agent.fallback import safe_decision, safe_payload
+from future_war_agent.fallback import safe_payload
 from future_war_agent.protocol.models import Observation
+from future_war_agent.strategy.planner import plan_turn
 from future_war_agent.protocol.parser import parse_observation
 
 
@@ -15,8 +16,8 @@ LOGGER.addHandler(logging.NullHandler())
 Planner = Callable[[Observation], Decision]
 
 
-def default_planner(_: Observation) -> Decision:
-    return safe_decision()
+def default_planner(observation: Observation) -> Decision:
+    return plan_turn(observation)
 
 
 def handle_payload(

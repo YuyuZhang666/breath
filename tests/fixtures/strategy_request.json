@@ -1,0 +1,65 @@
+{
+  "roundNo": 1,
+  "mapInfo": {
+    "width": 15,
+    "height": 15,
+    "zones": [
+      {"neutralType": "stone", "pos": {"x": 3, "y": 2}},
+      {"neutralType": "iron", "pos": {"x": 4, "y": 4}},
+      {"neutralType": "vendor", "pos": {"x": 1, "y": 1}}
+    ]
+  },
+  "teamOur": {
+    "type": "challenger",
+    "teamId": "team",
+    "teamName": "Phase 2",
+    "goldNum": 75,
+    "totalScore": 0,
+    "playerTasks": [],
+    "roles": [
+      {
+        "id": 10010,
+        "pos": {"x": 2, "y": 2},
+        "roleType": "worker",
+        "health": 100,
+        "backPackCapability": 100,
+        "backpack": []
+      },
+      {
+        "id": 10012,
+        "pos": {"x": 2, "y": 3},
+        "roleType": "worker",
+        "health": 100,
+        "backPackCapability": 100,
+        "backpack": []
+      },
+      {
+        "id": 10011,
+        "pos": {"x": 6, "y": 7},
+        "roleType": "pioneer",
+        "health": 100
+      },
+      {
+        "id": 10013,
+        "pos": {"x": 7, "y": 7},
+        "roleType": "station",
+        "health": 1000,
+        "level": 1
+      }
+    ]
+  },
+  "teamEnemy": {"roles": []},
+  "robot": {"roles": []},
+  "phaseTask": "",
+  "lastRoundRoleActionResults": {},
+  "lastSummonTreasureResult": 0,
+  "llmResp": "",
+  "worldNews": {"officialNews": "", "folkLegends": ""},
+  "lastCmdResult": "",
+  "vendorShopList": [
+    {"name": "stone", "price": 1},
+    {"name": "iron", "price": 4}
+  ],
+  "weaponShopList": [],
+  "errors": []
+}

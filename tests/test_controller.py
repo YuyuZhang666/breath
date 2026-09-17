@@ -9,6 +9,7 @@ from future_war_agent.fallback import safe_payload
 from future_war_agent.protocol.models import Observation, Position
 
 
+STRATEGY_FIXTURE = Path(__file__).parent / "fixtures" / "strategy_request.json"
 FIXTURE = Path(__file__).parent / "fixtures" / "request.json"
 
 
@@ -16,8 +17,14 @@ class ControllerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
 
-    def test_default_controller_returns_safe_payload(self) -> None:
-        self.assertEqual(handle_payload(self.payload), safe_payload())
+    def test_default_controller_runs_phase_2_strategy(self) -> None:
+        strategy_payload = json.loads(STRATEGY_FIXTURE.read_text(encoding="utf-8"))
+
+        response = handle_payload(strategy_payload)
+
+        self.assertTrue(response["roleCommandMap"])
+        self.assertEqual(response["prompt"], "")
+        self.assertEqual(response["executeCmd"], "")
 
     def test_injected_planner_flows_through_validation(self) -> None:
         def planner(observed: Observation) -> Decision:
