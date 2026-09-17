@@ -32,6 +32,7 @@ class UnitState:
     backpack: tuple[str, ...] = ()
     level: int | None = None
     cooldown: int = 0
+    provided_fields: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)

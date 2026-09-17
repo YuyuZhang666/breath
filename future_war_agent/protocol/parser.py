@@ -124,6 +124,11 @@ def _parse_unit(raw: object, path: str) -> UnitState:
         ),
         level=_nullable_int(value, "level", path),
         cooldown=_optional_int(value, "cooldown", path),
+        provided_fields=frozenset(
+            name
+            for name in ("attackPower", "attackRange", "level", "cooldown")
+            if name in value and value[name] is not None
+        ),
     )
 
 

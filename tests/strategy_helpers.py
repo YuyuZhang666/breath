@@ -20,22 +20,26 @@ def unit(
     role_type: str,
     *,
     health: int = 100,
+    attack_power: int = 0,
     attack_range: int = 0,
     backpack_capacity: int = 100,
     backpack: Iterable[str] = (),
     level: int | None = None,
     cooldown: int = 0,
+    provided_fields: Iterable[str] = (),
 ) -> UnitState:
     return UnitState(
         unit_id=unit_id,
         position=Position(x, y),
         role_type=role_type,
         health=health,
+        attack_power=attack_power,
         attack_range=attack_range,
         backpack_capacity=backpack_capacity,
         backpack=tuple(backpack),
         level=level,
         cooldown=cooldown,
+        provided_fields=frozenset(provided_fields),
     )
 
 
@@ -47,6 +51,7 @@ def robot(
     role_type: str = "smallRobot",
     health: int = 40,
     target_team: str | None = "challenger",
+    abnormal_state: str = "",
 ) -> RobotState:
     return RobotState(
         robot_id=robot_id,
@@ -54,6 +59,7 @@ def robot(
         role_type=role_type,
         health=health,
         target_team=target_team,
+        abnormal_state=abnormal_state,
     )
 
 

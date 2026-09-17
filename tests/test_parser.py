@@ -68,6 +68,31 @@ class ObservationParserTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             observed.last_action_results[10010] = True
 
+    def test_parser_preserves_explicit_unit_fields(self) -> None:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        weapon = raw["teamOur"]["roles"][1]
+        weapon["attackPower"] = 10
+        weapon["attackRange"] = 4
+        weapon["level"] = 1
+        weapon["cooldown"] = 0
+
+        observed = parse_observation(raw).our.units[1]
+
+        self.assertEqual(
+            observed.provided_fields,
+            frozenset({"attackPower", "attackRange", "level", "cooldown"}),
+        )
+
+    def test_missing_cooldown_is_defaulted_but_not_marked_explicit(self) -> None:
+        raw = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        weapon = raw["teamOur"]["roles"][1]
+        weapon.pop("cooldown", None)
+
+        observed = parse_observation(raw).our.units[1]
+
+        self.assertEqual(observed.cooldown, 0)
+        self.assertNotIn("cooldown", observed.provided_fields)
+
 
 if __name__ == "__main__":
     unittest.main()
