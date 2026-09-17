@@ -1,0 +1,71 @@
+{
+  "roundNo": 85,
+  "mapInfo": {
+    "width": 41,
+    "height": 32,
+    "zones": [
+      {"neutralType": "stone", "pos": {"x": 4, "y": 24}},
+      {"neutralType": "weaponShop", "pos": {"x": 25, "y": 20}}
+    ]
+  },
+  "teamOur": {
+    "type": "challenger",
+    "teamId": "6324",
+    "teamName": "Challenger",
+    "goldNum": 20,
+    "totalScore": 280,
+    "playerTasks": [
+      {
+        "taskType": "自进化类1",
+        "taskPosition": {"x": 14, "y": 14},
+        "coldDownRounds": 0,
+        "scoreReward": 50,
+        "goldReward": 30,
+        "isValid": true
+      }
+    ],
+    "roles": [
+      {
+        "id": 10010,
+        "pos": {"x": 5, "y": 23},
+        "roleType": "worker",
+        "health": 220,
+        "attackPower": 0,
+        "attackRange": 0,
+        "backPackCapability": 100,
+        "backpack": ["stone"]
+      },
+      {
+        "id": 10020,
+        "pos": {"x": 6, "y": 23},
+        "roleType": "gatling",
+        "health": 1000,
+        "attackPower": 10,
+        "attackRange": 4,
+        "level": 1,
+        "cooldown": 0
+      }
+    ]
+  },
+  "teamEnemy": {"roles": []},
+  "robot": {
+    "roles": [
+      {
+        "id": 30001,
+        "pos": {"x": 4, "y": 4},
+        "roleType": "smallRobot",
+        "health": 40,
+        "abnormalState": ""
+      }
+    ]
+  },
+  "phaseTask": "",
+  "lastRoundRoleActionResults": {"10010": true},
+  "lastSummonTreasureResult": 0,
+  "llmResp": "",
+  "worldNews": {"officialNews": "今日无重大新闻", "folkLegends": ""},
+  "lastCmdResult": "",
+  "vendorShopList": [{"name": "stone", "price": 1}],
+  "weaponShopList": [{"name": "Medicine", "price": 10}],
+  "errors": []
+}
