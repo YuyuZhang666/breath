@@ -74,6 +74,7 @@ def observation(
     zones: Iterable[Zone] = (),
     gold: int = 75,
     vendor_shop: Iterable[ShopItem] = (),
+    weapon_shop: Iterable[ShopItem] = (),
 ) -> Observation:
     return Observation(
         time=TurnTime.from_round(round_no),
@@ -90,4 +91,5 @@ def observation(
         robots=tuple(robots),
         phase_task="",
         vendor_shop=tuple(vendor_shop),
+        weapon_shop=tuple(weapon_shop),
     )

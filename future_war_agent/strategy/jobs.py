@@ -8,10 +8,13 @@ from future_war_agent.protocol.models import Observation, Position, UnitState
 
 from .layout import DefensiveLayout
 from .pathfinding import path_to_interaction
+from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .world import WorldGrid
 
 
 class JobKind(StrEnum):
+    BUY = 'buy'
+    USE_ITEM = 'use_item'
     RECALL = "recall"
     BUILD_WEAPON = "build_weapon"
     BUILD_WALL = "build_wall"
@@ -56,7 +59,9 @@ def generate_day_jobs(
     observation: Observation,
     world: WorldGrid,
     layout: DefensiveLayout,
+    intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
 ) -> Mapping[int, tuple[Job, ...]]:
+    priorities = intent.day_priorities
     roles = tuple(sorted(world.friendly_roles, key=lambda value: value.unit_id))
     workers = tuple(role for role in roles if role.role_type == "worker")
     pioneers = tuple(role for role in roles if role.role_type == "pioneer")
@@ -69,18 +74,43 @@ def generate_day_jobs(
         site
         for site in layout.weapon_sites
         if (site.position, site.weapon_type) not in existing_weapon_sites
-    )
+    ) if intent.build_plan.build_weapons else ()
     occupied_weapon_sites = not missing_weapon_sites and bool(layout.weapon_sites)
     existing_wall_positions = {wall.position for wall in world.walls}
     missing_wall_sites = tuple(
         position
         for position in layout.wall_sites
         if position not in existing_wall_positions
-    )
+    ) if intent.build_plan.build_walls else ()
+
+    for role in roles:
+        policy = intent.item_policy
+        if (
+            policy.medicine_health_threshold > 0
+            and role.health <= policy.medicine_health_threshold
+            and policy.medicine_name in role.backpack
+        ):
+            result[role.unit_id].append(
+                Job(
+                    role_id=role.unit_id,
+                    kind=JobKind.USE_ITEM,
+                    target=role.position,
+                    priority=priorities.emergency_item,
+                    value=float(policy.medicine_health_threshold - role.health),
+                    name=policy.medicine_name,
+                )
+            )
 
     for worker in workers:
-        _add_recall_jobs(result[worker.unit_id], worker, observation, world)
-        if observation.our.gold >= world.rules.weapon_build_cost:
+        _add_recall_jobs(
+            result[worker.unit_id],
+            worker,
+            observation,
+            world,
+            priority=priorities.recall,
+        )
+        spendable_gold = max(0, observation.our.gold - intent.gold_reserve)
+        if spendable_gold >= world.rules.weapon_build_cost:
             for site in missing_weapon_sites:
                 path = path_to_interaction(world, worker.position, site.position)
                 if path is not None:
@@ -89,7 +119,7 @@ def generate_day_jobs(
                             role_id=worker.unit_id,
                             kind=JobKind.BUILD_WEAPON,
                             target=site.position,
-                            priority=BUILD_WEAPON_PRIORITY,
+                            priority=priorities.build_weapon,
                             value=-float(path.cost),
                             name=site.weapon_type,
                         )
@@ -105,7 +135,7 @@ def generate_day_jobs(
                             role_id=worker.unit_id,
                             kind=JobKind.BUILD_WALL,
                             target=position,
-                            priority=BUILD_WALL_PRIORITY,
+                            priority=priorities.build_wall,
                             value=-float(path.cost),
                             name="wall",
                             quantity=world.rules.wall_material_cost,
@@ -121,18 +151,38 @@ def generate_day_jobs(
             and observation.our.gold < world.rules.weapon_build_cost
         )
         if sale_needed:
-            _add_sell_jobs(result[worker.unit_id], worker, observation, world)
-        if not full:
+            _add_sell_jobs(
+                result[worker.unit_id],
+                worker,
+                observation,
+                world,
+                priority=priorities.sell,
+            )
+        _add_medicine_purchase_jobs(
+            result[worker.unit_id],
+            worker,
+            observation,
+            world,
+            intent,
+        )
+        if not full and intent.allow_mining:
             _add_mining_jobs(
                 result[worker.unit_id],
                 worker,
                 observation,
                 world,
                 walls_missing=bool(missing_wall_sites),
+                priority=priorities.collect,
             )
 
     for pioneer in pioneers:
-        _add_recall_jobs(result[pioneer.unit_id], pioneer, observation, world)
+        _add_recall_jobs(
+            result[pioneer.unit_id],
+            pioneer,
+            observation,
+            world,
+            priority=priorities.recall,
+        )
         targets = tuple((weapon.position, weapon.unit_id) for weapon in world.weapons)
         if not targets and layout.entrance is not None:
             targets = ((layout.entrance, None),)
@@ -144,7 +194,7 @@ def generate_day_jobs(
                         role_id=pioneer.unit_id,
                         kind=JobKind.PREPOSITION,
                         target=target,
-                        priority=PREPOSITION_PRIORITY,
+                        priority=priorities.preposition,
                         value=-float(path.cost),
                         weapon_id=weapon_id,
                     )
@@ -162,6 +212,8 @@ def _add_recall_jobs(
     role: UnitState,
     observation: Observation,
     world: WorldGrid,
+    *,
+    priority: int,
 ) -> None:
     rounds_left = 71 - observation.time.round_in_phase
     for weapon in world.weapons:
@@ -174,7 +226,7 @@ def _add_recall_jobs(
                     role_id=role.unit_id,
                     kind=JobKind.RECALL,
                     target=weapon.position,
-                    priority=RECALL_PRIORITY,
+                    priority=priority,
                     value=-float(path.cost),
                     weapon_id=weapon.unit_id,
                 )
@@ -186,6 +238,8 @@ def _add_sell_jobs(
     worker: UnitState,
     observation: Observation,
     world: WorldGrid,
+    *,
+    priority: int,
 ) -> None:
     backpack = Counter(worker.backpack)
     prices = {item.name: item.price for item in observation.vendor_shop}
@@ -210,10 +264,46 @@ def _add_sell_jobs(
                     role_id=worker.unit_id,
                     kind=JobKind.SELL,
                     target=vendor,
-                    priority=SELL_PRIORITY,
+                    priority=priority,
                     value=float(total) - path.cost / 1000,
                     name=name,
                     quantity=quantity,
+                )
+            )
+
+
+def _add_medicine_purchase_jobs(
+    jobs: list[Job],
+    worker: UnitState,
+    observation: Observation,
+    world: WorldGrid,
+    intent: StrategicIntent,
+) -> None:
+    policy = intent.item_policy
+    if policy.medicine_stock <= 0:
+        return
+    current_stock = sum(
+        role.backpack.count(policy.medicine_name)
+        for role in world.friendly_roles
+    )
+    if current_stock >= policy.medicine_stock:
+        return
+    prices = {item.name: item.price for item in observation.weapon_shop}
+    price = prices.get(policy.medicine_name)
+    if price is None or observation.our.gold - intent.gold_reserve < price:
+        return
+    for shop in world.positions_for_zone('weaponShop'):
+        path = path_to_interaction(world, worker.position, shop)
+        if path is not None:
+            jobs.append(
+                Job(
+                    role_id=worker.unit_id,
+                    kind=JobKind.BUY,
+                    target=shop,
+                    priority=intent.day_priorities.purchase,
+                    value=float(-path.cost),
+                    name=policy.medicine_name,
+                    quantity=1,
                 )
             )
 
@@ -225,6 +315,7 @@ def _add_mining_jobs(
     world: WorldGrid,
     *,
     walls_missing: bool,
+    priority: int,
 ) -> None:
     prices = {item.name: item.price for item in observation.vendor_shop}
     for zone in observation.zones:
@@ -241,7 +332,7 @@ def _add_mining_jobs(
                 role_id=worker.unit_id,
                 kind=JobKind.COLLECT,
                 target=zone.position,
-                priority=COLLECT_PRIORITY,
+                priority=priority,
                 value=float(score),
                 name=zone.neutral_type,
                 quantity=1,

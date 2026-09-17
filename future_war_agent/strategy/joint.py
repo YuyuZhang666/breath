@@ -85,6 +85,29 @@ class TacticalCandidate:
             progress=1,
         )
 
+    @classmethod
+    def personal_action(
+        cls,
+        role_id: int,
+        start: Position,
+        action: Action,
+        job_kind: JobKind,
+        priority: int,
+        *,
+        gold_cost: int = 0,
+    ) -> 'TacticalCandidate':
+        return cls(
+            role_id=role_id,
+            command_actor_id=role_id,
+            action=action,
+            job_kind=job_kind,
+            start=start,
+            priority=priority,
+            completes_job=True,
+            progress=1,
+            gold_cost=gold_cost,
+        )
+
 
 AttackValidator = Callable[[UnitState, UnitState, Action], bool]
 Joint = tuple[TacticalCandidate, ...]
@@ -144,6 +167,38 @@ def candidates_for_jobs(
             generated.extend(
                 _move_candidates(world, role, job, interaction=interaction)
             )
+        elif job.kind is JobKind.BUY:
+            if role.position.chebyshev_distance(job.target) == 1:
+                if job.name is not None and job.quantity is not None:
+                    prices = {
+                        item.name: item.price for item in observation.weapon_shop
+                    }
+                    price = prices.get(job.name)
+                    if price is not None:
+                        generated.append(
+                            TacticalCandidate.personal_action(
+                                role.unit_id,
+                                role.position,
+                                Action.buy(job.name, job.quantity),
+                                job.kind,
+                                job.priority,
+                                gold_cost=price * job.quantity,
+                            )
+                        )
+            else:
+                generated.extend(
+                    _move_candidates(world, role, job, interaction=True)
+                )
+        elif job.kind is JobKind.USE_ITEM and job.name is not None:
+            generated.append(
+                TacticalCandidate.personal_action(
+                    role.unit_id,
+                    role.position,
+                    Action.use(job.name),
+                    job.kind,
+                    job.priority,
+                )
+            )
 
     unique: dict[tuple[int, Action | None], TacticalCandidate] = {}
     for item in generated:
@@ -172,6 +227,7 @@ def is_valid_joint(
     joint: tuple[TacticalCandidate, ...],
     *,
     attack_validator: AttackValidator | None = None,
+    gold_reserve: int = 0,
 ) -> bool:
     role_ids = [item.role_id for item in joint]
     actor_ids = [item.command_actor_id for item in joint]
@@ -222,7 +278,11 @@ def is_valid_joint(
         return False
     if set(build_targets).intersection(move_targets):
         return False
-    if sum(item.gold_cost for item in joint) > observation.our.gold:
+    if gold_reserve < 0:
+        return False
+    if sum(item.gold_cost for item in joint) > max(
+        0, observation.our.gold - gold_reserve
+    ):
         return False
     for item in joint:
         if item.stone_cost:
@@ -248,6 +308,7 @@ def enumerate_legal_joints(
     *,
     limit: int | None = None,
     attack_validator: AttackValidator | None = None,
+    gold_reserve: int = 0,
 ) -> tuple[Joint, ...]:
     role_ids = tuple(sorted(choices))
     if (
@@ -265,6 +326,7 @@ def enumerate_legal_joints(
             world,
             joint,
             attack_validator=attack_validator,
+            gold_reserve=gold_reserve,
         ):
             continue
         legal.append(joint)
@@ -287,6 +349,8 @@ def solve_joint(
     observation: Observation,
     world: WorldGrid,
     choices: Mapping[int, tuple[TacticalCandidate, ...]],
+    *,
+    gold_reserve: int = 0,
 ) -> Decision:
     role_ids = tuple(sorted(choices))
     if not role_ids or any(not choices[role_id] for role_id in role_ids):
@@ -294,7 +358,12 @@ def solve_joint(
 
     winner: Joint | None = None
     winner_score: tuple[object, ...] | None = None
-    for joint in enumerate_legal_joints(observation, world, choices):
+    for joint in enumerate_legal_joints(
+        observation,
+        world,
+        choices,
+        gold_reserve=gold_reserve,
+    ):
         score: tuple[object, ...] = (
             sum(item.priority for item in joint),
             sum(item.completes_job for item in joint),
@@ -395,6 +464,25 @@ def _direct_action_is_legal(
             and action.quantity is not None
             and action.quantity > 0
             and Counter(role.backpack)[action.name] >= action.quantity
+        )
+    if action.kind is ActionKind.BUY:
+        prices = {item.name: item.price for item in observation.weapon_shop}
+        return (
+            observation.time.phase is Phase.DAY
+            and any(
+                role.position.chebyshev_distance(shop) == 1
+                for shop in world.positions_for_zone('weaponShop')
+            )
+            and action.name in prices
+            and action.quantity is not None
+            and action.quantity > 0
+            and prices[action.name] * action.quantity <= observation.our.gold
+        )
+    if action.kind is ActionKind.USE:
+        return (
+            action.name is not None
+            and action.name in role.backpack
+            and len(action.target_positions) <= 1
         )
     if action.kind is ActionKind.ATTACK:
         weapon = world.unit_by_id(item.command_actor_id)

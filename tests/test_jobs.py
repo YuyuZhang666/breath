@@ -3,6 +3,11 @@ import unittest
 from future_war_agent.protocol.models import Position, ShopItem, Zone
 from future_war_agent.strategy.jobs import JobKind, generate_day_jobs
 from future_war_agent.strategy.layout import build_defensive_layout
+from future_war_agent.strategy.policy import (
+    DayPriorities,
+    ItemPolicy,
+    StrategicIntent,
+)
 from future_war_agent.strategy.world import WorldGrid
 from tests.strategy_helpers import observation, unit
 
@@ -125,6 +130,73 @@ class DayJobTests(unittest.TestCase):
 
         self.assertEqual(jobs[10010][0].target, mine)
         self.assertEqual(jobs[10012][0].target, mine)
+
+    def test_gold_reserve_prevents_weapon_build_job(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 3, 3, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            gold=25,
+        )
+        world = WorldGrid.from_observation(observed)
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world),
+            StrategicIntent(gold_reserve=25),
+        )
+
+        self.assertNotIn(JobKind.BUILD_WEAPON, {job.kind for job in jobs[10010]})
+
+    def test_intent_priorities_flow_into_generated_jobs(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 3, 3, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            gold=25,
+        )
+        world = WorldGrid.from_observation(observed)
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world),
+            StrategicIntent(day_priorities=DayPriorities(build_weapon=777)),
+        )
+
+        weapon_job = next(
+            job for job in jobs[10010] if job.kind is JobKind.BUILD_WEAPON
+        )
+        self.assertEqual(weapon_job.priority, 777)
+
+    def test_medicine_purchase_respects_stock_and_reserve(self) -> None:
+        observed = observation(
+            our_units=(unit(10010, 1, 1, 'worker'),),
+            zones=(Zone(Position(2, 2), 'weaponShop'),),
+            weapon_shop=(ShopItem('Medicine', 10),),
+            gold=40,
+        )
+        world = WorldGrid.from_observation(observed)
+        intent = StrategicIntent(
+            gold_reserve=25,
+            item_policy=ItemPolicy(
+                medicine_health_threshold=60,
+                medicine_stock=1,
+            ),
+        )
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world),
+            intent,
+        )
+
+        purchase = next(job for job in jobs[10010] if job.kind is JobKind.BUY)
+        self.assertEqual((purchase.name, purchase.quantity), ('Medicine', 1))
 
 
 if __name__ == "__main__":

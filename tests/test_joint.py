@@ -231,6 +231,31 @@ class JointSolverTests(unittest.TestCase):
             solve_joint(self.observed, self.world, choices),
         )
 
+    def test_gold_reserve_applies_to_whole_joint(self) -> None:
+        observed = observation(our_units=self.observed.our.units, gold=50)
+        world = WorldGrid.from_observation(observed)
+        joint = (
+            TacticalCandidate.build(
+                10010,
+                Position(1, 1),
+                Position(1, 2),
+                'gatling',
+                priority=400,
+                gold_cost=25,
+            ),
+            TacticalCandidate.build(
+                10012,
+                Position(3, 1),
+                Position(3, 2),
+                'railgun',
+                priority=400,
+                gold_cost=25,
+            ),
+        )
+
+        self.assertTrue(is_valid_joint(observed, world, joint))
+        self.assertFalse(is_valid_joint(observed, world, joint, gold_reserve=25))
+
     def test_completed_preposition_does_not_move_away(self) -> None:
         role = self.world.unit_by_id(10010)
         jobs = (

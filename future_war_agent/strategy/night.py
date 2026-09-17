@@ -3,11 +3,13 @@ from itertools import combinations, permutations, product
 from types import MappingProxyType
 from typing import Mapping
 
+from future_war_agent.decision.actions import Action
 from future_war_agent.protocol.models import Observation, Position, UnitState
 
 from .jobs import Job, JobKind
 from .joint import TacticalCandidate, candidates_for_jobs
 from .pathfinding import shortest_path
+from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .rules import station_footprint
 from .world import WorldGrid
 
@@ -68,6 +70,7 @@ def assign_controllers(
 def generate_night_candidates(
     observation: Observation,
     world: WorldGrid,
+    intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
 ) -> Mapping[int, tuple[TacticalCandidate, ...]]:
     assignments = {
         item.role_id: item for item in assign_controllers(observation, world)
@@ -77,7 +80,7 @@ def generate_night_candidates(
         assignment = assignments.get(role.unit_id)
         if assignment is not None:
             weapon = world.unit_by_id(assignment.weapon_id)
-            choices[role.unit_id] = _assigned_candidates(
+            role_choices = _assigned_candidates(
                 observation,
                 world,
                 role,
@@ -85,8 +88,32 @@ def generate_night_candidates(
                 assignment,
             )
         else:
-            choices[role.unit_id] = _safe_candidates(observation, world, role)
+            role_choices = _safe_candidates(observation, world, role)
+        medicine = _medicine_candidate(role, intent)
+        choices[role.unit_id] = (
+            (medicine,) + role_choices if medicine is not None else role_choices
+        )
     return MappingProxyType(choices)
+
+
+def _medicine_candidate(
+    role: UnitState,
+    intent: StrategicIntent,
+) -> TacticalCandidate | None:
+    policy = intent.item_policy
+    if (
+        policy.medicine_health_threshold <= 0
+        or role.health > policy.medicine_health_threshold
+        or policy.medicine_name not in role.backpack
+    ):
+        return None
+    return TacticalCandidate.personal_action(
+        role.unit_id,
+        role.position,
+        Action.use(policy.medicine_name),
+        JobKind.USE_ITEM,
+        intent.day_priorities.emergency_item,
+    )
 
 
 def _assignment_options(

@@ -6,6 +6,7 @@ from future_war_agent.strategy.night import (
     assign_controllers,
     generate_night_candidates,
 )
+from future_war_agent.strategy.policy import ItemPolicy, StrategicIntent
 from future_war_agent.strategy.world import WorldGrid
 from tests.strategy_helpers import observation, robot, unit
 
@@ -133,6 +134,37 @@ class NightPolicyTests(unittest.TestCase):
         )
         self.assertIn(10011, choices)
         self.assertGreaterEqual(len(choices[10011]), 1)
+
+    def test_injured_role_with_medicine_gets_emergency_use_candidate(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(
+                    10010,
+                    4,
+                    5,
+                    'worker',
+                    health=50,
+                    backpack=('Medicine',),
+                ),
+                unit(10020, 5, 5, 'gatling', level=1, attack_range=5),
+            ),
+        )
+        intent = StrategicIntent(
+            item_policy=ItemPolicy(
+                medicine_health_threshold=60,
+                medicine_stock=1,
+            )
+        )
+
+        choices = generate_night_candidates(
+            observed,
+            WorldGrid.from_observation(observed),
+            intent,
+        )
+
+        self.assertEqual(choices[10010][0].action.kind, ActionKind.USE)
+        self.assertEqual(choices[10010][0].action.name, 'Medicine')
 
 
 if __name__ == "__main__":

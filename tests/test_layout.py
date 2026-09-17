@@ -1,6 +1,7 @@
 import unittest
 
 from future_war_agent.strategy.layout import build_defensive_layout
+from future_war_agent.strategy.policy import BuildPlan
 from future_war_agent.strategy.world import WorldGrid
 from tests.strategy_helpers import observation, unit
 
@@ -57,6 +58,25 @@ class DefensiveLayoutTests(unittest.TestCase):
         self.assertEqual(layout.weapon_sites, ())
         self.assertEqual(layout.wall_sites, ())
         self.assertIsNone(layout.entrance)
+
+    def test_custom_build_plan_controls_loadout_and_wall_cap(self) -> None:
+        world = WorldGrid.from_observation(
+            observation(our_units=(unit(10013, 5, 5, 'station', level=1),))
+        )
+
+        layout = build_defensive_layout(
+            world,
+            BuildPlan(
+                weapon_loadout=('rocket', 'gatling'),
+                wall_site_limit=2,
+            ),
+        )
+
+        self.assertEqual(
+            tuple(site.weapon_type for site in layout.weapon_sites),
+            ('rocket', 'gatling'),
+        )
+        self.assertEqual(len(layout.wall_sites), 2)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,7 @@ from math import atan2
 
 from future_war_agent.protocol.models import Position
 
+from .policy import DEFAULT_BUILD_PLAN, BuildPlan
 from .rules import station_footprint
 from .world import WorldGrid
 
@@ -20,7 +21,10 @@ class DefensiveLayout:
     entrance: Position | None = None
 
 
-def build_defensive_layout(world: WorldGrid) -> DefensiveLayout:
+def build_defensive_layout(
+    world: WorldGrid,
+    build_plan: BuildPlan = DEFAULT_BUILD_PLAN,
+) -> DefensiveLayout:
     station = world.our_station()
     if station is None:
         return DefensiveLayout()
@@ -33,9 +37,12 @@ def build_defensive_layout(world: WorldGrid) -> DefensiveLayout:
         (world.observation.height - 1) / 2,
     )
 
+    weapon_loadout = (
+        build_plan.weapon_loadout if build_plan.build_weapons else ()
+    )
     selected: list[Position] = []
     remaining = list(ring_one)
-    if remaining:
+    if remaining and weapon_loadout:
         first = min(
             remaining,
             key=lambda value: (
@@ -46,7 +53,7 @@ def build_defensive_layout(world: WorldGrid) -> DefensiveLayout:
         )
         selected.append(first)
         remaining.remove(first)
-    while remaining and len(selected) < len(world.rules.weapon_loadout):
+    while remaining and len(selected) < len(weapon_loadout):
         choice = min(
             remaining,
             key=lambda value: (
@@ -61,7 +68,7 @@ def build_defensive_layout(world: WorldGrid) -> DefensiveLayout:
 
     weapon_sites = tuple(
         WeaponSite(position=position, weapon_type=weapon_type)
-        for position, weapon_type in zip(selected, world.rules.weapon_loadout)
+        for position, weapon_type in zip(selected, weapon_loadout)
     )
 
     entrance = (
@@ -97,7 +104,9 @@ def build_defensive_layout(world: WorldGrid) -> DefensiveLayout:
                 value.y,
             ),
         )
-    )
+    ) if build_plan.build_walls else ()
+    if build_plan.wall_site_limit is not None:
+        wall_sites = wall_sites[: build_plan.wall_site_limit]
     return DefensiveLayout(
         weapon_sites=weapon_sites,
         wall_sites=wall_sites,

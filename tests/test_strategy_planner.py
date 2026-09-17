@@ -5,6 +5,7 @@ from future_war_agent.decision.serializer import decision_to_payload
 from future_war_agent.decision.validator import validate_decision
 from future_war_agent.protocol.models import Position, ShopItem, Zone
 from future_war_agent.strategy.planner import plan_turn
+from future_war_agent.strategy.policy import DEFAULT_STRATEGIC_INTENT
 from tests.strategy_helpers import observation, robot, unit
 
 
@@ -61,6 +62,20 @@ class StrategyPlannerTests(unittest.TestCase):
         self.assertEqual(
             decision_to_payload(plan_turn(observed)),
             decision_to_payload(plan_turn(observed)),
+        )
+
+    def test_explicit_default_intent_preserves_phase2_decision(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 2, 'worker'),
+                unit(10013, 7, 7, 'station', level=1),
+            ),
+            zones=(Zone(Position(3, 2), 'stone'),),
+        )
+
+        self.assertEqual(
+            plan_turn(observed),
+            plan_turn(observed, intent=DEFAULT_STRATEGIC_INTENT),
         )
 
 
