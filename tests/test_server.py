@@ -97,6 +97,34 @@ class ServerTests(unittest.TestCase):
             server.server_close()
             thread.join(timeout=2)
 
+    def test_oversized_body_is_rejected_before_controller_runs(self) -> None:
+        received: list[object] = []
+
+        def recording_controller(payload: object) -> dict[str, object]:
+            received.append(payload)
+            return {"unexpected": True}
+
+        server = create_server(
+            0,
+            controller=recording_controller,
+            host="127.0.0.1",
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        url = f"http://127.0.0.1:{server.server_port}/"
+        body = b'{"padding":"' + (b"x" * 1_048_576) + b'"}'
+        try:
+            request = Request(url, data=body, method="POST")
+            with urlopen(request, timeout=5) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertEqual(payload, safe_payload())
+        self.assertEqual(received, [])
+
 
 if __name__ == "__main__":
     unittest.main()

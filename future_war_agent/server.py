@@ -12,6 +12,7 @@ LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
 
 Controller = Callable[[object], dict[str, object]]
+MAX_REQUEST_BYTES = 1_048_576
 
 
 def _encode_response(payload: object) -> bytes:
@@ -32,6 +33,9 @@ def _handler_for(controller: Controller) -> type[BaseHTTPRequestHandler]:
                 content_length = int(raw_length)
                 if content_length < 0:
                     raise ValueError("Content-Length cannot be negative")
+                if content_length > MAX_REQUEST_BYTES:
+                    _discard_request_body(self.rfile, content_length)
+                    raise ValueError("request body exceeds size limit")
 
                 request_body = self.rfile.read(content_length)
                 request_payload: Any = json.loads(request_body.decode("utf-8"))
@@ -50,6 +54,15 @@ def _handler_for(controller: Controller) -> type[BaseHTTPRequestHandler]:
             return
 
     return AgentRequestHandler
+
+
+def _discard_request_body(stream: Any, length: int) -> None:
+    remaining = length
+    while remaining:
+        chunk = stream.read(min(remaining, 65_536))
+        if not chunk:
+            return
+        remaining -= len(chunk)
 
 
 def create_server(
