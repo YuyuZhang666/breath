@@ -1,5 +1,7 @@
 import json
+import socket
 import threading
+import time
 import unittest
 from pathlib import Path
 from urllib.request import Request, urlopen
@@ -123,6 +125,44 @@ class ServerTests(unittest.TestCase):
             thread.join(timeout=2)
 
         self.assertEqual(payload, safe_payload())
+        self.assertEqual(received, [])
+
+    def test_oversized_declared_body_returns_without_waiting_for_body(self) -> None:
+        received: list[object] = []
+        server = create_server(
+            0,
+            controller=lambda payload: received.append(payload) or {},
+            host="127.0.0.1",
+        )
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        client = socket.create_connection(
+            ("127.0.0.1", server.server_port), timeout=2
+        )
+        client.settimeout(2)
+        try:
+            started = time.monotonic()
+            client.sendall(
+                b"POST / HTTP/1.0\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Content-Type: application/json\r\n"
+                b"Content-Length: 1048577\r\n"
+                b"\r\n"
+            )
+            chunks: list[bytes] = []
+            while chunk := client.recv(4096):
+                chunks.append(chunk)
+            response = b"".join(chunks)
+            elapsed = time.monotonic() - started
+        finally:
+            client.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+        self.assertIn(b" 200 ", response.partition(b"\r\n")[0])
+        self.assertIn(b'"roleCommandMap":{}', response)
+        self.assertLess(elapsed, 0.5)
         self.assertEqual(received, [])
 
 

@@ -2,6 +2,7 @@ import json
 import logging
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from time import monotonic
 from typing import Any
 
 from future_war_agent.controller import handle_payload
@@ -34,7 +35,12 @@ def _handler_for(controller: Controller) -> type[BaseHTTPRequestHandler]:
                 if content_length < 0:
                     raise ValueError("Content-Length cannot be negative")
                 if content_length > MAX_REQUEST_BYTES:
-                    _discard_request_body(self.rfile, content_length)
+                    self.close_connection = True
+                    _drain_available_request_body(
+                        self.rfile,
+                        self.connection,
+                        content_length,
+                    )
                     raise ValueError("request body exceeds size limit")
 
                 request_body = self.rfile.read(content_length)
@@ -56,13 +62,28 @@ def _handler_for(controller: Controller) -> type[BaseHTTPRequestHandler]:
     return AgentRequestHandler
 
 
-def _discard_request_body(stream: Any, length: int) -> None:
+def _drain_available_request_body(
+    stream: Any,
+    connection: Any,
+    length: int,
+) -> None:
+    deadline = monotonic() + 0.05
+    original_timeout = connection.gettimeout()
     remaining = length
-    while remaining:
-        chunk = stream.read(min(remaining, 65_536))
-        if not chunk:
-            return
-        remaining -= len(chunk)
+    try:
+        while remaining:
+            time_left = deadline - monotonic()
+            if time_left <= 0:
+                return
+            connection.settimeout(time_left)
+            chunk = stream.read(min(remaining, 65_536))
+            if not chunk:
+                return
+            remaining -= len(chunk)
+    except (OSError, TimeoutError):
+        return
+    finally:
+        connection.settimeout(original_timeout)
 
 
 def create_server(
