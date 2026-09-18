@@ -79,3 +79,21 @@ class ReplayResult:
     profile_labels: tuple[str | None, ...]
     elapsed_ns: tuple[int, ...]
     metrics: ReplayMetrics
+
+
+@dataclass(frozen=True, slots=True)
+class VariantAggregate:
+    variant_name: str
+    case_count: int
+    league_points: int
+    surviving_cases: int
+    score_gain: int
+    answer_submit_count: int
+    max_p99_latency_ns: int
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationReport:
+    results: tuple[ReplayResult, ...]
+    aggregates: tuple[VariantAggregate, ...]
+    ranking: tuple[str, ...]
