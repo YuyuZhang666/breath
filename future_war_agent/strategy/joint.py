@@ -10,6 +10,7 @@ from future_war_agent.protocol.models import Observation, Position, UnitState
 from future_war_agent.protocol.time import Phase
 
 from .jobs import Job, JobKind
+from .items import has_item
 from .pathfinding import first_step_options
 from .world import WorldGrid
 
@@ -481,7 +482,7 @@ def _direct_action_is_legal(
     if action.kind is ActionKind.USE:
         return (
             action.name is not None
-            and action.name in role.backpack
+            and has_item(role.backpack, action.name)
             and len(action.target_positions) <= 1
         )
     if action.kind is ActionKind.ATTACK:

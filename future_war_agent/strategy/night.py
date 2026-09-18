@@ -7,6 +7,7 @@ from future_war_agent.decision.actions import Action
 from future_war_agent.protocol.models import Observation, Position, UnitState
 
 from .jobs import Job, JobKind
+from .items import has_item
 from .joint import TacticalCandidate, candidates_for_jobs
 from .pathfinding import shortest_path
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
@@ -104,7 +105,7 @@ def _medicine_candidate(
     if (
         policy.medicine_health_threshold <= 0
         or role.health > policy.medicine_health_threshold
-        or policy.medicine_name not in role.backpack
+        or not has_item(role.backpack, policy.medicine_name)
     ):
         return None
     return TacticalCandidate.personal_action(

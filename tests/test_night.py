@@ -166,6 +166,33 @@ class NightPolicyTests(unittest.TestCase):
         self.assertEqual(choices[10010][0].action.kind, ActionKind.USE)
         self.assertEqual(choices[10010][0].action.name, 'Medicine')
 
+    def test_lowercase_inventory_medicine_emits_official_action_name(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(
+                    10010,
+                    4,
+                    5,
+                    "worker",
+                    health=50,
+                    backpack=("medicine",),
+                ),
+            ),
+        )
+        intent = StrategicIntent(
+            item_policy=ItemPolicy(medicine_health_threshold=60)
+        )
+
+        choices = generate_night_candidates(
+            observed,
+            WorldGrid.from_observation(observed),
+            intent,
+        )
+
+        self.assertEqual(choices[10010][0].action.kind, ActionKind.USE)
+        self.assertEqual(choices[10010][0].action.name, "Medicine")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -322,6 +322,36 @@ class StrategyEngineTests(unittest.TestCase):
             0,
         )
 
+    def test_lowercase_inventory_medicine_bypasses_phase3_search(self) -> None:
+        injured_id = next(
+            role.unit_id
+            for role in self.night.our.units
+            if role.role_type in {"worker", "pioneer"}
+        )
+        injured_night = replace(
+            self.night,
+            our=replace(
+                self.night.our,
+                units=tuple(
+                    replace(
+                        role,
+                        health=50,
+                        backpack=role.backpack + ("medicine",),
+                    )
+                    if role.unit_id == injured_id
+                    else role
+                    for role in self.night.our.units
+                ),
+            ),
+        )
+        engine, phase2, search = self.make_engine()
+
+        engine.plan(self.day)
+        decision = engine.plan(injured_night)
+
+        self.assertIs(decision, phase2.decisions[-1])
+        self.assertEqual(search.calls, [])
+
     def test_same_round_revision_replans_without_reconciliation(self) -> None:
         reconciled = (
             Fraction(1, 10),

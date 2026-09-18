@@ -6,6 +6,7 @@ from typing import Mapping
 
 from future_war_agent.protocol.models import Observation, Position, UnitState
 
+from .items import count_item, has_item
 from .layout import DefensiveLayout
 from .pathfinding import path_to_interaction
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
@@ -94,7 +95,7 @@ def generate_day_jobs(
         if (
             policy.medicine_health_threshold > 0
             and role.health <= policy.medicine_health_threshold
-            and policy.medicine_name in role.backpack
+            and has_item(role.backpack, policy.medicine_name)
         ):
             result[role.unit_id].append(
                 Job(
@@ -287,7 +288,7 @@ def _medicine_buyer_ids(
 ) -> frozenset[int]:
     policy = intent.item_policy
     current_stock = sum(
-        role.backpack.count(policy.medicine_name)
+        count_item(role.backpack, policy.medicine_name)
         for role in world.friendly_roles
     )
     shortage = max(0, policy.medicine_stock - current_stock)
@@ -328,7 +329,7 @@ def _add_medicine_purchase_jobs(
     if policy.medicine_stock <= 0:
         return
     current_stock = sum(
-        role.backpack.count(policy.medicine_name)
+        count_item(role.backpack, policy.medicine_name)
         for role in world.friendly_roles
     )
     if current_stock >= policy.medicine_stock:

@@ -231,6 +231,35 @@ class DayJobTests(unittest.TestCase):
         ]
         self.assertEqual(len(purchases), 1)
 
+    def test_lowercase_inventory_medicine_counts_toward_stock_target(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 1, 1, "worker", backpack=("medicine",)),
+            ),
+            zones=(Zone(Position(2, 2), "weaponShop"),),
+            weapon_shop=(ShopItem("Medicine", 10),),
+            gold=40,
+        )
+        world = WorldGrid.from_observation(observed)
+        intent = StrategicIntent(
+            item_policy=ItemPolicy(
+                medicine_health_threshold=60,
+                medicine_stock=1,
+            ),
+        )
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world),
+            intent,
+        )
+
+        self.assertNotIn(
+            JobKind.BUY,
+            {job.kind for role_jobs in jobs.values() for job in role_jobs},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

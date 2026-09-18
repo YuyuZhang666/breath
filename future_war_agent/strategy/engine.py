@@ -10,6 +10,7 @@ from future_war_agent.protocol.time import Phase
 
 from .director import StrategicDirector
 from .features import extract_features
+from .items import has_item
 from .memory import MatchMemoryStore
 from .planner import plan_turn
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent, StrategyProfile
@@ -310,6 +311,6 @@ def _requires_emergency_medicine(
         role.health > 0
         and role.role_type in {'worker', 'pioneer'}
         and role.health <= policy.medicine_health_threshold
-        and policy.medicine_name in role.backpack
+        and has_item(role.backpack, policy.medicine_name)
         for role in observation.our.units
     )

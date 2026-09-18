@@ -273,6 +273,23 @@ class JointSolverTests(unittest.TestCase):
         self.assertEqual(len(choices), 1)
         self.assertIsNone(choices[0].action)
 
+    def test_use_item_matches_inventory_name_case_insensitively(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 1, 1, "worker", backpack=("medicine",)),
+            ),
+        )
+        world = WorldGrid.from_observation(observed)
+        use = TacticalCandidate.personal_action(
+            10010,
+            Position(1, 1),
+            Action.use("Medicine"),
+            JobKind.USE_ITEM,
+            priority=475,
+        )
+
+        self.assertTrue(is_valid_joint(observed, world, (use,)))
+
 
 if __name__ == "__main__":
     unittest.main()
