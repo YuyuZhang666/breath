@@ -12,17 +12,32 @@ MAX_CASES = 256
 MAX_TURNS_PER_CASE = 1_000
 
 
+class _NonStandardJsonConstant(ValueError):
+    pass
+
+
 def load_replay_file(path: str | Path) -> ReplayCorpus:
     replay_path = Path(path)
     try:
-        raw = json.loads(replay_path.read_text(encoding="utf-8"))
+        raw = json.loads(
+            replay_path.read_text(encoding="utf-8"),
+            parse_constant=_reject_json_constant,
+        )
     except json.JSONDecodeError as error:
         raise ReplayFormatError(
             f"{replay_path.name}: expected valid JSON: {error.msg}"
         ) from error
+    except _NonStandardJsonConstant as error:
+        raise ReplayFormatError(f"{replay_path.name}: {error}") from error
     except (OSError, UnicodeError) as error:
         raise ReplayFormatError(f"{replay_path}: could not read replay: {error}") from error
     return load_replay_data(raw)
+
+
+def _reject_json_constant(value: str) -> object:
+    raise _NonStandardJsonConstant(
+        f"non-standard JSON numeric constant is not allowed: {value}"
+    )
 
 
 def load_replay_data(raw: object) -> ReplayCorpus:

@@ -156,6 +156,34 @@ class ReplayRunnerTests(unittest.TestCase):
 
         self.assertIsInstance(raised.exception.__cause__, ProtocolError)
 
+    def test_wraps_factory_failure_with_variant_and_case_context(self) -> None:
+        def broken_factory():
+            raise RuntimeError("factory failed")
+
+        with self.assertRaisesRegex(
+            ReplayEvaluationError,
+            "variant 'broken'.*case 'match-a'.*planner factory",
+        ) as raised:
+            run_case(ReplayVariant("broken", broken_factory), self.make_case())
+
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+
+    def test_wraps_post_validation_metric_failure_with_turn_context(self) -> None:
+        class InvalidDecisionPlanner:
+            def plan(self, observation):
+                return Decision(prompt=None)
+
+        with self.assertRaisesRegex(
+            ReplayEvaluationError,
+            "variant 'invalid'.*case 'match-a'.*turn 1",
+        ) as raised:
+            run_case(
+                ReplayVariant("invalid", InvalidDecisionPlanner),
+                self.make_case(),
+            )
+
+        self.assertIsInstance(raised.exception.__cause__, AttributeError)
+
 
 if __name__ == "__main__":
     unittest.main()

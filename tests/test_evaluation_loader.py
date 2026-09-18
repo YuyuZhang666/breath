@@ -103,6 +103,22 @@ class ReplayLoaderTests(unittest.TestCase):
             with self.assertRaisesRegex(ReplayFormatError, "cases"):
                 load_replay_file(path)
 
+    def test_rejects_non_standard_non_finite_json_numbers(self) -> None:
+        for constant in ("NaN", "Infinity", "-Infinity"):
+            with self.subTest(constant=constant):
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "non-finite.json"
+                    path.write_text(
+                        '{"cases":[{"name":"match","outcome":"win",'
+                        f'"turns":[{{"value":{constant}}}]}}]}}',
+                        encoding="utf-8",
+                    )
+
+                    with self.assertRaisesRegex(
+                        ReplayFormatError, "non-finite.json.*non-standard"
+                    ):
+                        load_replay_file(path)
+
 
 if __name__ == "__main__":
     unittest.main()

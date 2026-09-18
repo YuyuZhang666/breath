@@ -91,6 +91,23 @@ class EvaluationCliTests(unittest.TestCase):
         self.assertIn("broken.json", stderr.getvalue())
         self.assertIn("valid JSON", stderr.getvalue())
 
+    def test_cli_rejects_non_standard_json_constants(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nan.json"
+            path.write_text(
+                '{"cases":[{"name":"match","outcome":"unknown",'
+                '"turns":[{"roundNo":NaN}]}]}',
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            exit_code = main([str(path)], stdout=stdout, stderr=stderr)
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("non-standard", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

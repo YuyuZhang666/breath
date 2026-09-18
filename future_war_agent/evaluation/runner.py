@@ -26,7 +26,13 @@ def run_case(
     *,
     clock: NanosecondClock = perf_counter_ns,
 ) -> ReplayResult:
-    planner = variant.planner_factory()
+    try:
+        planner = variant.planner_factory()
+    except Exception as error:
+        raise ReplayEvaluationError(
+            f"variant {variant.name!r}, case {case.name!r}, "
+            f"planner factory: {error}"
+        ) from error
     digests: list[str] = []
     profiles: list[str | None] = []
     elapsed_values: list[int] = []
@@ -44,32 +50,39 @@ def run_case(
             decision = _plan(planner, observation)
             validated = validate_decision(observation, decision)
             payload = decision_to_payload(validated)
+            canonical = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            digest = hashlib.sha256(canonical).hexdigest()
             profile = _read_profile(variant, planner, observation)
+            score = observation.our.total_score
+            station_health = _station_health(observation)
+            action_kinds = tuple(
+                action.kind.value for action in validated.commands.values()
+            )
+            has_prompt = bool(validated.prompt.strip())
+            has_execute_command = bool(validated.execute_command.strip())
             elapsed = clock() - started
             if elapsed < 0:
                 raise ValueError("monotonic clock moved backwards")
+
+            digests.append(digest)
+            profiles.append(profile)
+            elapsed_values.append(elapsed)
+            scores.append(score)
+            station_healths.append(station_health)
+            command_count += len(validated.commands)
+            prompt_count += has_prompt
+            execute_command_count += has_execute_command
+            action_counts.update(action_kinds)
         except Exception as error:
             raise ReplayEvaluationError(
                 f"variant {variant.name!r}, case {case.name!r}, "
                 f"turn {turn_index}: {error}"
             ) from error
-
-        canonical = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        digests.append(hashlib.sha256(canonical).hexdigest())
-        profiles.append(profile)
-        elapsed_values.append(elapsed)
-        scores.append(observation.our.total_score)
-        station_healths.append(_station_health(observation))
-
-        command_count += len(validated.commands)
-        prompt_count += bool(validated.prompt.strip())
-        execute_command_count += bool(validated.execute_command.strip())
-        action_counts.update(action.kind.value for action in validated.commands.values())
 
     metrics = ReplayMetrics(
         league_points=case.outcome.league_points,
