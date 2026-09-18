@@ -14,6 +14,7 @@ from .models import (
     VariantAggregate,
 )
 from .runner import run_case
+from .report import report_to_data, report_to_json
 
 __all__ = [
     "EvaluationReport",
@@ -31,4 +32,6 @@ __all__ = [
     "load_replay_file",
     "run_case",
     "rank_aggregates",
+    "report_to_data",
+    "report_to_json",
 ]

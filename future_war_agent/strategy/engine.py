@@ -12,7 +12,7 @@ from .director import StrategicDirector
 from .features import extract_features
 from .memory import MatchMemoryStore
 from .planner import plan_turn
-from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
+from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent, StrategyProfile
 from .reconcile import reconcile_scenario_weights, uniform_scenario_weights
 from .session import (
     SessionContinuity,
@@ -75,6 +75,11 @@ class StrategyEngine:
     def plan(self, observation: Observation) -> Decision:
         with self._lock:
             return self._plan_locked(observation)
+
+    def current_profile(self, team_id: str) -> StrategyProfile | None:
+        with self._lock:
+            session = self._sessions.get(team_id)
+            return session.intent.profile if session is not None else None
 
     def _plan_locked(self, observation: Observation) -> Decision:
         team_id = observation.our.team_id
