@@ -17,6 +17,8 @@ class ComputeGovernorConfig:
     forecast_full_watchdog_seconds: float = 0.750
     night_full_forecast_enabled: bool = False
     emergency_reserve_seconds: float = 0.500
+    emergency_fire_budget_seconds: float = 0.020
+    emergency_postprocess_guard_seconds: float = 0.050
     budget_utilization: float = 0.80
 
     def __post_init__(self) -> None:
@@ -40,6 +42,16 @@ class ComputeGovernorConfig:
             raise ValueError('forecast_full_watchdog_seconds must be positive')
         if not 0 < self.emergency_reserve_seconds < self.total_decision_budget_seconds:
             raise ValueError('emergency reserve must fit inside the decision budget')
+        if self.emergency_fire_budget_seconds <= 0:
+            raise ValueError('emergency fire budget must be positive')
+        if self.emergency_postprocess_guard_seconds <= 0:
+            raise ValueError('emergency postprocess guard must be positive')
+        if (
+            self.emergency_fire_budget_seconds
+            + self.emergency_postprocess_guard_seconds
+            >= self.emergency_reserve_seconds
+        ):
+            raise ValueError('emergency fire and postprocess budgets must fit reserve')
         if not 0 < self.budget_utilization <= 1:
             raise ValueError('budget_utilization must be in (0, 1]')
 

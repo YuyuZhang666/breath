@@ -26,7 +26,12 @@ from .forecast import (
 from .items import has_item
 from .market import EMPTY_MARKET_STATE, MarketMemory, MarketView
 from .memory import MatchMemoryStore
-from .night import ControllerAssignment, ControllerAssignmentCache
+from .night import (
+    ControllerAssignment,
+    ControllerAssignmentCache,
+    EmergencyFirePlan,
+    plan_emergency_night_fire,
+)
 from .planner import plan_turn
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent, StrategyProfile
 from .reconcile import reconcile_scenario_weights, uniform_scenario_weights
@@ -64,6 +69,7 @@ NightSearcher = Callable[..., SearchResult]
 ObjectiveProvider = Callable[[Observation], NightObjective]
 ScenarioReconciler = Callable[..., ScenarioWeights]
 NightForecaster = Callable[..., ForecastRefresh]
+EmergencyPlanner = Callable[..., EmergencyFirePlan]
 
 
 class StrategyEngine:
@@ -86,6 +92,7 @@ class StrategyEngine:
         telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
         compute_governor: ComputeGovernor | None = None,
         market_memory: MarketMemory | None = None,
+        emergency_planner: EmergencyPlanner = plan_emergency_night_fire,
     ) -> None:
         self._config = config
         self._phase2_planner = phase2_planner
@@ -172,6 +179,7 @@ class StrategyEngine:
         self._market = (
             market_memory if market_memory is not None else MarketMemory()
         )
+        self._emergency_planner = emergency_planner
         self._lock = RLock()
 
     def plan(
@@ -202,7 +210,19 @@ class StrategyEngine:
             phase=observation.time.phase.value,
         )
         try:
+            if (
+                observation.time.phase is Phase.NIGHT
+                and request_budget.remaining_compute()
+                <= self._compute_governor.config.emergency_reserve_seconds
+            ):
+                return self._plan_emergency(observation, request_budget)
             with self._lock:
+                if (
+                    observation.time.phase is Phase.NIGHT
+                    and request_budget.remaining_compute()
+                    <= self._compute_governor.config.emergency_reserve_seconds
+                ):
+                    return self._plan_emergency(observation, request_budget)
                 try:
                     return self._plan_locked(
                         observation,
@@ -231,6 +251,54 @@ class StrategyEngine:
         finally:
             self._telemetry.finish(token)
 
+    def _plan_emergency(
+        self,
+        observation: Observation,
+        request_budget: RequestBudget,
+    ) -> Decision:
+        config = self._compute_governor.config
+        self._telemetry.set(
+            safe_action_generated=True,
+            compute_governor_action='emergency_reserve',
+            phase3_level=Phase3Level.NONE.value,
+            forecast_mode='skipped',
+            forecast_reason='deadline_low',
+            fallback_used=True,
+            fallback_reason='deadline_low',
+            timeout_prevented=True,
+            decision_source='safe',
+        )
+        now = request_budget.clock()
+        emergency_deadline = min(
+            request_budget.compute_deadline
+            - config.emergency_postprocess_guard_seconds,
+            now + config.emergency_fire_budget_seconds,
+        )
+        if now >= emergency_deadline:
+            return Decision()
+        try:
+            with self._telemetry.measure('emergency_fire_ms'):
+                plan = self._emergency_planner(
+                    observation,
+                    clock=request_budget.clock,
+                    deadline=emergency_deadline,
+                )
+        except Exception:
+            LOGGER.exception(
+                'Emergency fire failed for team %s round %s',
+                observation.our.team_id,
+                observation.time.round_no,
+            )
+            return Decision()
+        action_count = len(plan.decision.commands)
+        self._telemetry.set(
+            emergency_fire_action_count=action_count,
+            emergency_fire_deadline_hit=plan.deadline_hit,
+            decision_source=('emergency_fire' if action_count else 'safe'),
+            response_action_count=action_count,
+        )
+        return plan.decision
+
     def current_profile(self, team_id: str) -> StrategyProfile | None:
         with self._lock:
             session = self._sessions.get(team_id)
@@ -250,6 +318,8 @@ class StrategyEngine:
             safe_action_generated=True,
             decision_source='safe',
         )
+        if governor_emergency and observation.time.phase is Phase.NIGHT:
+            return self._plan_emergency(observation, request_budget)
         if not team_id.strip():
             if governor_emergency:
                 self._telemetry.set(
@@ -679,15 +749,7 @@ class StrategyEngine:
             self._telemetry.current('phase2_5_ms', 0.0)
         )
         if governor_emergency:
-            decision = Decision()
-            self._telemetry.set(
-                compute_governor_action='emergency_reserve',
-                phase3_level=Phase3Level.NONE.value,
-                fallback_used=True,
-                fallback_reason='deadline_low',
-                timeout_prevented=True,
-                decision_source='safe',
-            )
+            decision = self._plan_emergency(observation, request_budget)
         else:
             decision = self._plan_phase2(
                 observation,

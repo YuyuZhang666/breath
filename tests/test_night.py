@@ -2,11 +2,13 @@ import unittest
 from dataclasses import replace
 
 from future_war_agent.decision.actions import ActionKind
+from future_war_agent.decision.validator import validate_decision
 from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.night import (
     ControllerAssignmentCache,
     assign_controllers,
     generate_night_candidates,
+    plan_emergency_night_fire,
 )
 from future_war_agent.strategy.policy import ItemPolicy, StrategicIntent
 from future_war_agent.strategy.world import WorldGrid
@@ -14,6 +16,96 @@ from tests.strategy_helpers import observation, robot, unit
 
 
 class NightPolicyTests(unittest.TestCase):
+    def test_emergency_fire_uses_only_ready_adjacent_weapons(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 4, 5, 'worker'),
+                unit(10011, 8, 5, 'pioneer'),
+                unit(10013, 1, 1, 'station', level=1),
+                unit(
+                    10020,
+                    5,
+                    5,
+                    'gatling',
+                    level=1,
+                    attack_range=5,
+                ),
+                unit(
+                    10021,
+                    9,
+                    5,
+                    'railgun',
+                    level=1,
+                    attack_range=6,
+                ),
+                unit(
+                    10022,
+                    5,
+                    8,
+                    'rocket',
+                    level=1,
+                    attack_range=6,
+                    cooldown=1,
+                ),
+            ),
+            robots=(robot(30001, 6, 5), robot(30002, 7, 5)),
+        )
+
+        plan = plan_emergency_night_fire(
+            observed,
+            clock=lambda: 0.0,
+            deadline=0.02,
+        )
+
+        self.assertFalse(plan.deadline_hit)
+        self.assertEqual(set(plan.decision.commands), {10020, 10021})
+        self.assertTrue(
+            all(
+                action.kind is ActionKind.ATTACK
+                for action in plan.decision.commands.values()
+            )
+        )
+        self.assertEqual(validate_decision(observed, plan.decision), plan.decision)
+
+    def test_emergency_fire_never_targets_other_team_robots(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 4, 5, 'worker'),
+                unit(10013, 1, 1, 'station', level=1),
+                unit(
+                    10020,
+                    5,
+                    5,
+                    'railgun',
+                    level=1,
+                    attack_range=6,
+                ),
+            ),
+            robots=(robot(30001, 6, 5, target_team='opponent'),),
+        )
+
+        plan = plan_emergency_night_fire(
+            observed,
+            clock=lambda: 0.0,
+            deadline=0.02,
+        )
+
+        self.assertEqual(plan.decision.commands, {})
+
+    def test_emergency_fire_honors_an_expired_micro_deadline(self) -> None:
+        observed = observation(round_no=71)
+
+        plan = plan_emergency_night_fire(
+            observed,
+            clock=lambda: 1.0,
+            deadline=1.0,
+        )
+
+        self.assertTrue(plan.deadline_hit)
+        self.assertEqual(plan.decision.commands, {})
+
     def test_assignment_minimizes_total_distance(self) -> None:
         observed = observation(
             round_no=71,

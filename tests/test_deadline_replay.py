@@ -32,6 +32,39 @@ def load_observation(path: Path) -> Observation:
     return parse_observation(json.loads(path.read_text(encoding='utf-8')))
 
 
+def make_35_robot_night_payload() -> dict[str, object]:
+    payload = json.loads(NIGHT_FIXTURE.read_text(encoding='utf-8'))
+    positions = tuple(
+        (x, y)
+        for y in range(1, 6)
+        for x in range(4, 11)
+    )
+    robot_types = (
+        ('smallRobot', 40),
+    ) * 24 + (
+        ('middleRobot', 60),
+    ) * 7 + (
+        ('largeRobot', 100),
+    ) * 3 + (('bossRobot', 200),)
+    payload['robot']['roles'] = [
+        {
+            'id': 5000 + index,
+            'pos': {'x': position[0], 'y': position[1]},
+            'roleType': robot_type,
+            'health': health,
+            'abnormalState': '',
+            'targetTeam': payload['teamOur']['type'],
+        }
+        for index, (position, (robot_type, health)) in enumerate(
+            zip(positions, robot_types, strict=True)
+        )
+    ]
+    for role in payload['teamOur']['roles']:
+        if role['id'] == 302:
+            role['cooldown'] = 0
+    return payload
+
+
 class FakeClock:
     def __init__(self, now: float = 0.0) -> None:
         self.now = now
@@ -213,13 +246,109 @@ class DeadlineNightReplayTests(unittest.TestCase):
         self.assertEqual(search_calls, 0)
         self.assertEqual(phase2.calls, normal_phase2_calls)
         self.assertEqual(task_agent.apply_calls, normal_task_calls)
-        self.assertEqual(payload['roleCommandMap'], {})
+        self.assertTrue(payload['roleCommandMap'])
+        self.assertTrue(
+            all(
+                command['action'] == 'attack'
+                for command in payload['roleCommandMap'].values()
+            )
+        )
         self.assertEqual(set(payload), {'roleCommandMap', 'prompt', 'executeCmd'})
         sample = telemetry.snapshot()[-1]
         self.assertEqual(sample.compute_governor_action, 'emergency_reserve')
         self.assertEqual(sample.fallback_reason, 'deadline_low')
-        self.assertEqual(sample.decision_source, 'safe')
+        self.assertEqual(sample.decision_source, 'emergency_fire')
+        self.assertEqual(
+            sample.emergency_fire_action_count,
+            len(payload['roleCommandMap']),
+        )
+        self.assertFalse(sample.emergency_fire_deadline_hit)
         self.assertTrue(sample.timeout_prevented)
+
+    def test_emergency_reserve_fires_legally_under_35_robot_load(self) -> None:
+        raw = make_35_robot_night_payload()
+        observed = parse_observation(raw)
+        clock = FakeClock(2.6)
+        budget = RequestBudget.start(
+            started_at=0.0,
+            response_budget_seconds=3.5,
+            compute_budget_seconds=3.0,
+            clock=clock,
+        )
+        telemetry = TelemetryRecorder()
+        engine = StrategyEngine(clock=clock, telemetry=telemetry)
+
+        decision = engine.plan(observed, request_budget=budget)
+        payload = decision_to_payload(decision)
+
+        self.assertEqual(len(observed.robots), 35)
+        self.assertEqual(len(payload['roleCommandMap']), 3)
+        self.assertTrue(
+            all(
+                command['action'] == 'attack'
+                for command in payload['roleCommandMap'].values()
+            )
+        )
+        sample = telemetry.snapshot()[-1]
+        self.assertEqual(sample.decision_source, 'emergency_fire')
+        self.assertEqual(sample.emergency_fire_action_count, 3)
+        self.assertLessEqual(sample.emergency_fire_ms, 20.0)
+
+    def test_round_71_to_130_35_robot_controller_stress(self) -> None:
+        night_payload = make_35_robot_night_payload()
+        telemetry = TelemetryRecorder()
+        engine = StrategyEngine(telemetry=telemetry)
+        elapsed_seconds: list[float] = []
+
+        for round_no in range(71, 131):
+            payload = copy.deepcopy(night_payload)
+            payload['roundNo'] = round_no
+            started = perf_counter()
+            response = handle_payload(
+                payload,
+                planner=engine.plan,
+                telemetry=telemetry,
+            )
+            elapsed_seconds.append(perf_counter() - started)
+
+            self.assertEqual(
+                set(response),
+                {'roleCommandMap', 'prompt', 'executeCmd'},
+            )
+            self.assertTrue(response['roleCommandMap'])
+            self.assertTrue(
+                any(
+                    command['action'] == 'attack'
+                    for command in response['roleCommandMap'].values()
+                )
+            )
+
+        samples = telemetry.snapshot()
+        ordered = sorted(elapsed_seconds)
+        p99 = ordered[ceil(0.99 * len(ordered)) - 1]
+        self.assertEqual(len(samples), 60)
+        self.assertEqual(
+            tuple(sample.round_no for sample in samples),
+            tuple(range(71, 131)),
+        )
+        self.assertTrue(
+            all(sample.opponent_hostile_robot_count == 35 for sample in samples)
+        )
+        self.assertNotIn(
+            'deadline_low',
+            {sample.fallback_reason for sample in samples},
+        )
+        self.assertNotIn(
+            'emergency_reserve',
+            {sample.compute_governor_action for sample in samples},
+        )
+        for sample in samples:
+            if sample.fallback_reason == 'phase3_timeout':
+                self.assertTrue(sample.watchdog_hit)
+                self.assertTrue(sample.timeout_prevented)
+        self.assertLess(max(elapsed_seconds), 5.0)
+        self.assertLess(p99, 3.0)
+
 
     def test_round_71_to_130_replay_never_requests_synchronous_full(self) -> None:
         allow_full_values: list[bool] = []
