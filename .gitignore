@@ -4,3 +4,5 @@ __pycache__/
 venv/
 .coverage
 htmlcov/
+/log_secret.key
+/log_secret.*.key

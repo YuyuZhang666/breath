@@ -9,12 +9,60 @@ import logging
 import sys
 from base64 import b64decode, b64encode
 from collections.abc import Iterable
+from pathlib import Path
 from typing import TextIO
 
 
-DEFAULT_KEY = "future-war-agent-log-key-v1"
+KEY_FILE_NAME = "log_secret.key"
+MIN_KEY_BYTES = 32
+MAX_KEY_FILE_BYTES = 4096
 MARKER = "ENC1:"
 IV = b"future-war-iv"
+
+
+class KeyFileError(ValueError):
+    """Raised when a log encryption key file cannot be used safely."""
+
+
+def load_key_file(
+    path: str | Path,
+    *,
+    minimum_bytes: int = MIN_KEY_BYTES,
+) -> str:
+    """Read and validate a UTF-8 key without exposing it in diagnostics."""
+
+    key_path = Path(path)
+    try:
+        raw = key_path.read_bytes()
+    except FileNotFoundError:
+        raise KeyFileError(
+            f"log encryption key file not found: {key_path}"
+        ) from None
+    except OSError as error:
+        raise KeyFileError(
+            f"cannot read log encryption key file: {key_path}"
+        ) from error
+
+    if len(raw) > MAX_KEY_FILE_BYTES:
+        raise KeyFileError(
+            f"log encryption key file is too large: {key_path}"
+        )
+    try:
+        key = raw.decode("utf-8").rstrip("\r\n")
+    except UnicodeDecodeError as error:
+        raise KeyFileError(
+            f"log encryption key file must be UTF-8: {key_path}"
+        ) from error
+    if "\r" in key or "\n" in key:
+        raise KeyFileError(
+            f"log encryption key file must contain one line: {key_path}"
+        )
+    if len(key.encode("utf-8")) < minimum_bytes:
+        raise KeyFileError(
+            "log encryption key must contain at least "
+            f"{minimum_bytes} UTF-8 bytes: {key_path}"
+        )
+    return key
 
 
 def _keystream(key: bytes, length: int) -> bytes:
@@ -32,7 +80,7 @@ def _keystream(key: bytes, length: int) -> bytes:
     return bytes(output[:length])
 
 
-def encrypt(plaintext: str, key: str = DEFAULT_KEY) -> str:
+def encrypt(plaintext: str, key: str) -> str:
     """Encrypt one UTF-8 log entry and return its line-safe representation."""
 
     data = plaintext.encode("utf-8")
@@ -41,7 +89,7 @@ def encrypt(plaintext: str, key: str = DEFAULT_KEY) -> str:
     return MARKER + b64encode(cipher).decode("ascii")
 
 
-def decrypt(payload: str, key: str = DEFAULT_KEY) -> str:
+def decrypt(payload: str, key: str) -> str:
     """Decrypt an ``ENC1`` entry, passing plaintext entries through unchanged."""
 
     if not is_encrypted(payload):
@@ -72,10 +120,12 @@ class EncryptingHandler(logging.Handler):
 
     def __init__(
         self,
-        stream: TextIO | None = None,
-        key: str = DEFAULT_KEY,
+        stream: TextIO | None,
+        key: str,
     ) -> None:
         super().__init__()
+        if not key:
+            raise ValueError("an explicit log encryption key is required")
         self.stream = stream if stream is not None else sys.stdout
         self.key = key
 
@@ -106,11 +156,16 @@ class EncryptingHandler(logging.Handler):
 
 def configure(
     level: int = logging.INFO,
-    key: str = DEFAULT_KEY,
+    key: str | None = None,
     stream: TextIO | None = None,
+    *,
+    key_file: str | Path = KEY_FILE_NAME,
 ) -> None:
     """Configure root logging with encrypted routine logs and plaintext errors."""
 
+    active_key = load_key_file(key_file) if key is None else key
+    if not active_key:
+        raise ValueError("an explicit log encryption key is required")
     target = stream if stream is not None else sys.stdout
     root = logging.getLogger()
     root.setLevel(level)
@@ -121,7 +176,7 @@ def configure(
         "%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
 
-    encrypted = EncryptingHandler(target, key)
+    encrypted = EncryptingHandler(target, active_key)
     encrypted.setLevel(logging.DEBUG)
     encrypted.addFilter(_MaximumLevelFilter(logging.WARNING))
     encrypted.setFormatter(formatter)
@@ -135,7 +190,7 @@ def configure(
 
 def decrypt_lines(
     lines: Iterable[str],
-    key: str = DEFAULT_KEY,
+    key: str,
 ) -> str:
     """Decrypt a mixed encrypted/plaintext log stream line by line."""
 

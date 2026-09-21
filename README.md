@@ -5,6 +5,13 @@ uses only the Python standard library.
 
 ## Start the match server
 
+Create the local log key before the first run. The generated
+`log_secret.key` is ignored by Git:
+
+```powershell
+python -m future_war_agent.logtool generate-key
+```
+
 ```powershell
 python main.py 18080
 ```
@@ -55,10 +62,22 @@ Routine logs at `DEBUG`, `INFO`, and `WARNING` use the line-oriented `ENC1`
 shared-key format. `ERROR` and `CRITICAL` records remain plaintext so startup
 and runtime failures can still be diagnosed without the decryption tool.
 
-Decrypt a captured log with the project default key:
+There is no key embedded in the source code. The server refuses to start if
+`log_secret.key` is missing, empty, or shorter than 32 UTF-8 bytes. Rotate it
+before a new match or submission with:
 
 ```powershell
-python -m future_war_agent.logtool decrypt path/to/agent.log
+python -m future_war_agent.logtool generate-key --force
+```
+
+Save the previous key separately before rotation if old logs may still need
+to be decrypted.
+
+Decrypt a captured log with its matching key file:
+
+```powershell
+python -m future_war_agent.logtool decrypt path/to/agent.log `
+  --key-file path/to/log_secret.key
 ```
 
 The two portable files `future_war_agent/seclog.py` and
@@ -66,10 +85,20 @@ The two portable files `future_war_agent/seclog.py` and
 directly:
 
 ```powershell
-python logtool.py decrypt path/to/agent.log
+python logtool.py decrypt path/to/agent.log `
+  --key-file path/to/log_secret.key
 ```
 
-See `docs/log-encryption.md` for the exact format and key-sharing procedure.
+Build the competition archive with the same local key:
+
+```powershell
+python tools/build_submission.py dist --key-file .\log_secret.key
+```
+
+The archive contains the key under the fixed runtime name `log_secret.key`.
+Treat the archive as secret and give it only to the competition committee.
+See `docs/log-encryption.md` for the exact format, rotation, and cross-computer
+handoff procedure.
 
 ## Conservative interface fallbacks
 
