@@ -2,6 +2,7 @@ import logging
 import sys
 from collections.abc import Callable, Sequence
 
+from future_war_agent.seclog import configure
 from future_war_agent.server import serve
 
 
@@ -25,11 +26,7 @@ def main(
     runner: Callable[[int], None] = serve,
 ) -> int:
     port = parse_port(sys.argv[1:] if argv is None else argv)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stdout,
-    )
+    configure(level=logging.INFO)
     runner(port)
     return 0
 

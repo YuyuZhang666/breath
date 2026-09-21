@@ -49,6 +49,28 @@ python -m future_war_agent.evaluation path/to/replay.json
 Replay evaluation is offline only and is not called from the match request
 path.
 
+## Encrypted battle logs
+
+Routine logs at `DEBUG`, `INFO`, and `WARNING` use the line-oriented `ENC1`
+shared-key format. `ERROR` and `CRITICAL` records remain plaintext so startup
+and runtime failures can still be diagnosed without the decryption tool.
+
+Decrypt a captured log with the project default key:
+
+```powershell
+python -m future_war_agent.logtool decrypt path/to/agent.log
+```
+
+The two portable files `future_war_agent/seclog.py` and
+`future_war_agent/logtool.py` can also be copied to another computer and run
+directly:
+
+```powershell
+python logtool.py decrypt path/to/agent.log
+```
+
+See `docs/log-encryption.md` for the exact format and key-sharing procedure.
+
 ## Conservative interface fallbacks
 
 - Inventory item matching is case-insensitive, while emitted action names use

@@ -44,14 +44,11 @@ LAUNCHER = dedent(
         os.chdir(root)
         sys.path.insert(0, str(root / "src"))
 
+        from future_war_agent.seclog import configure
         from future_war_agent.server import serve
 
         port = parse_port(sys.argv[1:] if argv is None else argv)
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-            stream=sys.stdout,
-        )
+        configure(level=logging.INFO)
         (serve if runner is None else runner)(port)
         return 0
 

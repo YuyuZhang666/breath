@@ -4,11 +4,14 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+from future_war_agent.seclog import decrypt, is_encrypted
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +33,14 @@ class SubmissionPackageTests(unittest.TestCase):
         self.assertIn(f"{PACKAGE_ROOT}/pyproject.toml", names)
         self.assertIn(
             f"{PACKAGE_ROOT}/src/future_war_agent/__init__.py",
+            names,
+        )
+        self.assertIn(
+            f"{PACKAGE_ROOT}/src/future_war_agent/seclog.py",
+            names,
+        )
+        self.assertIn(
+            f"{PACKAGE_ROOT}/src/future_war_agent/logtool.py",
             names,
         )
         self.assertTrue(
@@ -74,6 +85,13 @@ class SubmissionPackageTests(unittest.TestCase):
                 stderr=subprocess.STDOUT,
                 text=True,
             )
+            output_lines: list[str] = []
+            output_thread = threading.Thread(
+                target=self._collect_output,
+                args=(process, output_lines),
+                daemon=True,
+            )
+            output_thread.start()
             try:
                 payload = self._post_when_ready(port, request_body, process)
             finally:
@@ -83,6 +101,7 @@ class SubmissionPackageTests(unittest.TestCase):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait(timeout=5)
+                output_thread.join(timeout=5)
                 if process.stdout is not None:
                     process.stdout.close()
 
@@ -91,6 +110,19 @@ class SubmissionPackageTests(unittest.TestCase):
             set(payload),
         )
         self.assertIsInstance(payload["roleCommandMap"], dict)
+        encrypted_lines = [
+            line.rstrip("\r\n")
+            for line in output_lines
+            if is_encrypted(line.rstrip("\r\n"))
+        ]
+        self.assertTrue(encrypted_lines, output_lines)
+        self.assertTrue(
+            any(
+                "agent server listening" in decrypt(line)
+                for line in encrypted_lines
+            ),
+            output_lines,
+        )
 
     def _build_archive(self, output_dir: Path) -> Path:
         result = subprocess.run(
@@ -131,8 +163,7 @@ class SubmissionPackageTests(unittest.TestCase):
         last_error: Exception | None = None
         while time.monotonic() < deadline:
             if process.poll() is not None:
-                output = process.stdout.read() if process.stdout else ""
-                self.fail(f"packaged server exited early:\n{output}")
+                self.fail("packaged server exited early")
             try:
                 with urlopen(request, timeout=1) as response:
                     self.assertEqual(200, response.status)
@@ -141,6 +172,15 @@ class SubmissionPackageTests(unittest.TestCase):
                 last_error = error
                 time.sleep(0.05)
         self.fail(f"packaged server did not become ready: {last_error}")
+
+    @staticmethod
+    def _collect_output(
+        process: subprocess.Popen[str],
+        output_lines: list[str],
+    ) -> None:
+        if process.stdout is None:
+            return
+        output_lines.extend(process.stdout)
 
 
 if __name__ == "__main__":
