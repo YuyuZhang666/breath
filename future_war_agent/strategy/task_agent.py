@@ -46,16 +46,19 @@ class CommandResult:
 
 
 def parse_command_result(value: str) -> CommandResult:
-    output = _bounded(value, MAX_COMMAND_RESULT_LENGTH)
-    truncated = '[TRUNCATED]' in output
-    if '[TIMEOUT]' in output:
+    cleaned = value.replace('\x00', '').strip()
+    header = cleaned[:1024]
+    trailer = cleaned[-1024:]
+    output = _bounded_command_result(cleaned)
+    truncated = '[TRUNCATED]' in trailer
+    if '[TIMEOUT]' in header:
         kind = CommandResultKind.TIMEOUT
         exit_code = None
-    elif '[JUDGER_ERROR]' in output:
+    elif '[JUDGER_ERROR]' in header:
         kind = CommandResultKind.JUDGER_ERROR
         exit_code = None
     else:
-        match = re.search(r'\[exitCode:(-?\d+)\]', output)
+        match = re.search(r'\[exitCode:(-?\d+)\]', header)
         exit_code = int(match.group(1)) if match is not None else None
         if exit_code is None:
             kind = CommandResultKind.UNKNOWN
@@ -297,6 +300,7 @@ class TaskAgent:
         intent: StrategicIntent,
         *,
         previous_state: TaskAgentState | None = None,
+        force_survival_interrupt: bool = False,
     ) -> TaskAgentResult:
         state = self.reconcile(observation, previous_state)
         pioneer = _living_pioneer(observation)
@@ -308,6 +312,8 @@ class TaskAgent:
             return TaskAgentResult(base_decision, state)
 
         task_text = observation.phase_task.strip()
+        if task_text and force_survival_interrupt:
+            return TaskAgentResult(base_decision, state)
         if not intent.allow_tasks and not task_text:
             return TaskAgentResult(base_decision, state)
         if task_text:
@@ -879,8 +885,8 @@ def _reconcile_command_result(
         or observation.time.round_no <= state.pending_command_round
     ):
         return state
-    result = _bounded(observation.last_command_result, MAX_COMMAND_RESULT_LENGTH)
-    parsed = parse_command_result(result if result else '[TIMEOUT] no result')
+    result = observation.last_command_result
+    parsed = parse_command_result(result if result.strip() else '[TIMEOUT] no result')
     fingerprint = _fingerprint(parsed.output)
     if fingerprint in state.consumed_command_results:
         return replace(
@@ -944,6 +950,16 @@ def _clear_task_lifecycle(state: TaskAgentState) -> TaskAgentState:
 
 def _bounded(value: str, limit: int) -> str:
     return value.replace('\x00', '').strip()[:limit]
+
+
+def _bounded_command_result(value: str) -> str:
+    if len(value) <= MAX_COMMAND_RESULT_LENGTH:
+        return value
+    trailer_length = min(1024, MAX_COMMAND_RESULT_LENGTH // 4)
+    return (
+        value[:MAX_COMMAND_RESULT_LENGTH - trailer_length]
+        + value[-trailer_length:]
+    )
 
 
 def _fingerprint(value: str) -> str:

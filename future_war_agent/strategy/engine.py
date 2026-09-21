@@ -16,6 +16,7 @@ from .features import extract_features
 from .forecast import (
     ForecastRefresh,
     NightForecast,
+    RiskLevel,
     forecast_recompute_reason,
     rebase_day_forecast,
     refresh_night_forecast,
@@ -115,6 +116,10 @@ class StrategyEngine:
         self._objective_provider = objective_provider
         self._director = director if director is not None else StrategicDirector()
         self._task_agent = task_agent if task_agent is not None else TaskAgent()
+        self._task_accepts_survival_interrupt = _accepts_keyword(
+            self._task_agent.apply,
+            'force_survival_interrupt',
+        )
         self._treasure_agent = (
             treasure_agent if treasure_agent is not None else TreasureAgent()
         )
@@ -289,6 +294,12 @@ class StrategyEngine:
         )
         controller_assignments: tuple[ControllerAssignment, ...] | None = None
         controller_assignment_mode: str | None = None
+        controller_assignment_exclusions: frozenset[int] | None = None
+        task_controller_exclusions = _active_task_controller_exclusions(
+            observation
+        )
+        task_survival_interrupt = False
+        task_assignment_failed = False
         night_forecast: NightForecast | None = (
             previous_for_director.night_forecast
             if previous_for_director is not None
@@ -318,11 +329,17 @@ class StrategyEngine:
                             observation,
                             WorldGrid.from_observation(observation),
                             mode_key=StrategyProfile.SURVIVE.value,
+                            excluded_role_ids=task_controller_exclusions,
                         )
                     )
                     controller_assignment_mode = StrategyProfile.SURVIVE.value
+                    controller_assignment_exclusions = (
+                        task_controller_exclusions
+                    )
                     self._telemetry.set(controller_cache_hit=cache_hit)
                 except Exception:
+                    if task_controller_exclusions:
+                        task_assignment_failed = True
                     self._telemetry.set(fallback_used=True)
                     LOGGER.exception(
                         'forecast controller assignment failed for team %s round %s',
@@ -383,6 +400,22 @@ class StrategyEngine:
                     team_id,
                     observation.time.round_no,
                 )
+        if observation.time.phase is Phase.NIGHT and task_controller_exclusions:
+            task_survival_interrupt = (
+                task_assignment_failed
+                or night_forecast is None
+                or night_forecast.risk_level
+                in {RiskLevel.CRITICAL, RiskLevel.LETHAL}
+            )
+            self._telemetry.set(
+                task_pioneer_reserved=not task_survival_interrupt,
+                task_survival_interrupted=task_survival_interrupt,
+            )
+        desired_controller_exclusions = (
+            frozenset()
+            if task_survival_interrupt
+            else task_controller_exclusions
+        )
         director_failed = False
         try:
             with self._telemetry.measure('director_ms'):
@@ -451,6 +484,8 @@ class StrategyEngine:
             and (
                 controller_assignments is None
                 or controller_assignment_mode != intent.profile.value
+                or controller_assignment_exclusions
+                != desired_controller_exclusions
             )
         ):
             try:
@@ -459,11 +494,23 @@ class StrategyEngine:
                         observation,
                         WorldGrid.from_observation(observation),
                         mode_key=intent.profile.value,
+                        excluded_role_ids=desired_controller_exclusions,
                     )
                 )
                 controller_assignment_mode = intent.profile.value
+                controller_assignment_exclusions = (
+                    desired_controller_exclusions
+                )
                 self._telemetry.set(controller_cache_hit=cache_hit)
             except Exception:
+                if desired_controller_exclusions:
+                    task_survival_interrupt = True
+                    desired_controller_exclusions = frozenset()
+                    controller_assignments = None
+                    self._telemetry.set(
+                        task_pioneer_reserved=False,
+                        task_survival_interrupted=True,
+                    )
                 self._telemetry.set(fallback_used=True)
                 LOGGER.exception(
                     'controller assignment cache failed for team %s round %s',
@@ -735,11 +782,16 @@ class StrategyEngine:
         if not governor_emergency:
             try:
                 with self._telemetry.measure('task_ms'):
+                    task_kwargs = {'previous_state': task_state}
+                    if self._task_accepts_survival_interrupt:
+                        task_kwargs['force_survival_interrupt'] = (
+                            task_survival_interrupt
+                        )
                     task_result = self._task_agent.apply(
                         observation,
                         decision,
                         intent,
-                        previous_state=task_state,
+                        **task_kwargs,
                     )
                 decision = task_result.decision
                 task_state = task_result.state
@@ -872,6 +924,21 @@ def _accepts_keyword(function: Callable[..., object], name: str) -> bool:
         parameter.name == name
         or parameter.kind is Parameter.VAR_KEYWORD
         for parameter in parameters
+    )
+
+
+def _active_task_controller_exclusions(
+    observation: Observation,
+) -> frozenset[int]:
+    if (
+        observation.time.phase is not Phase.NIGHT
+        or not observation.phase_task.strip()
+    ):
+        return frozenset()
+    return frozenset(
+        unit.unit_id
+        for unit in observation.our.units
+        if unit.health > 0 and unit.role_type.strip().lower() == 'pioneer'
     )
 
 

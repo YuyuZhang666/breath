@@ -359,6 +359,10 @@ def forecast_recompute_reason(
         return 'first forecast of night'
     if observation.time.round_in_phase == 1:
         return 'first forecast of night'
+    if bool(previous_observation.phase_task.strip()) != bool(
+        observation.phase_task.strip()
+    ):
+        return 'active task changed controller availability'
     lost_kind = _lost_asset_kind(previous_observation, observation)
     if lost_kind is not None:
         return f'{lost_kind} destroyed'

@@ -118,6 +118,29 @@ class NightForecastTests(unittest.TestCase):
         self.assertEqual(refreshed.reason, 'wall destroyed')
         self.assertEqual(refreshed.forecast.generated_round, 72)
 
+    def test_active_task_transition_forces_full_recompute(self) -> None:
+        first = self._quiet_night(71)
+        second = replace(
+            self._quiet_night(72),
+            phase_task='Return the exact answer.',
+        )
+        config = Phase3Config(tail_visible_roster_complete=True)
+        initial = refresh_night_forecast(first, config=config)
+
+        refreshed = refresh_night_forecast(
+            second,
+            previous_observation=first,
+            previous_forecast=initial.forecast,
+            config=config,
+        )
+
+        self.assertTrue(refreshed.recomputed)
+        self.assertEqual(
+            refreshed.reason,
+            'active task changed controller availability',
+        )
+        self.assertEqual(refreshed.forecast.generated_round, 72)
+
     def test_day_rebase_clears_stale_immediate_lethal_prediction(self) -> None:
         config = Phase3Config(tail_visible_roster_complete=True)
         forecast = build_night_forecast(

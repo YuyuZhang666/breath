@@ -47,9 +47,15 @@ class ControllerAssignmentCache:
         world: WorldGrid,
         *,
         mode_key: str,
+        excluded_role_ids: frozenset[int] = frozenset(),
     ) -> tuple[tuple[ControllerAssignment, ...], bool]:
         team_id = observation.our.team_id.strip()
-        signature = _assignment_signature(observation, world, mode_key)
+        signature = _assignment_signature(
+            observation,
+            world,
+            mode_key,
+            excluded_role_ids,
+        )
         if team_id:
             with self._lock:
                 cached = self._entries.get(team_id)
@@ -60,6 +66,7 @@ class ControllerAssignmentCache:
             observation,
             world,
             mode_key=mode_key,
+            excluded_role_ids=excluded_role_ids,
         )
         if team_id:
             with self._lock:
@@ -74,12 +81,14 @@ def _assignment_signature(
     observation: Observation,
     world: WorldGrid,
     mode_key: str,
+    excluded_role_ids: frozenset[int],
 ) -> tuple[object, ...]:
     return (
         observation.width,
         observation.height,
         observation.our.team_type,
         mode_key,
+        tuple(sorted(excluded_role_ids)),
         tuple(
             (role.unit_id, role.position.x, role.position.y)
             for role in world.friendly_roles
@@ -108,8 +117,18 @@ def assign_controllers(
     world: WorldGrid,
     *,
     mode_key: str = 'economy',
+    excluded_role_ids: frozenset[int] = frozenset(),
 ) -> tuple[ControllerAssignment, ...]:
-    roles = tuple(sorted(world.friendly_roles, key=lambda value: value.unit_id))
+    roles = tuple(
+        sorted(
+            (
+                role
+                for role in world.friendly_roles
+                if role.unit_id not in excluded_role_ids
+            ),
+            key=lambda value: value.unit_id,
+        )
+    )
     weapons = tuple(sorted(world.weapons, key=lambda value: value.unit_id))
     distances_by_role = {
         role.unit_id: _distance_map(world, role.position) for role in roles

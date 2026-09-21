@@ -80,6 +80,36 @@ class TaskAgentTests(unittest.TestCase):
         )
         self.assertTrue(parse_command_result('[TRUNCATED]').truncated)
 
+    def test_command_result_preserves_truncation_marker_after_large_output(
+        self,
+    ) -> None:
+        raw = '[exitCode:0]\n' + ('x' * 65_536) + '\n[TRUNCATED]'
+
+        result = parse_command_result(raw)
+
+        self.assertEqual(result.kind, CommandResultKind.SUCCESS)
+        self.assertTrue(result.truncated)
+        self.assertLessEqual(len(result.output), 32_768)
+        self.assertTrue(result.output.endswith('[TRUNCATED]'))
+
+    def test_command_state_reconciliation_keeps_large_output_trailer(
+        self,
+    ) -> None:
+        raw = '[exitCode:0]\n' + ('x' * 65_536) + '\n[TRUNCATED]'
+        observed = observation(
+            round_no=2,
+            last_command_result=raw,
+        )
+
+        state = TaskAgent().reconcile(
+            observed,
+            TaskAgentState(pending_command_round=1),
+        )
+
+        self.assertEqual(state.last_command_kind, CommandResultKind.SUCCESS)
+        self.assertLessEqual(len(state.last_command_result), 32_768)
+        self.assertTrue(state.last_command_result.endswith('[TRUNCATED]'))
+
     def test_anytime_does_not_resubmit_identical_llm_answer(self) -> None:
         agent = TaskAgent()
         task_text = 'Return a useful partial answer.'
@@ -484,6 +514,29 @@ class TaskAgentTests(unittest.TestCase):
 
         self.assertNotIn(2, result.decision.commands)
         self.assertTrue(result.decision.prompt)
+
+    def test_explicit_survival_interrupt_pauses_active_task_for_one_turn(
+        self,
+    ) -> None:
+        base = Decision(commands={2: Action.move(Position(1, 2))})
+        observed = observation(
+            round_no=71,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            phase_task='Return the exact answer.',
+        )
+
+        result = TaskAgent().apply(
+            observed,
+            base,
+            SURVIVE_INTENT,
+            previous_state=TaskAgentState(active_task_type='analysis'),
+            force_survival_interrupt=True,
+        )
+
+        self.assertEqual(result.decision, base)
+        self.assertEqual(result.state.active_task_type, 'analysis')
+        self.assertEqual(result.state.abandoned_task_fingerprint, '')
+        self.assertIsNone(result.state.abandon_until_round)
 
     def test_task_never_overrides_emergency_item_use(self) -> None:
         base = Decision(commands={2: Action.use('Medicine')})

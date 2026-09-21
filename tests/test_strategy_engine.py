@@ -16,6 +16,10 @@ from future_war_agent.protocol.time import TurnTime
 from future_war_agent.strategy.compute import ComputeGovernor
 from future_war_agent.strategy.engine import StrategyEngine
 from future_war_agent.strategy.director import StrategicDirector
+from future_war_agent.strategy.forecast import (
+    RiskLevel,
+    refresh_night_forecast,
+)
 from future_war_agent.strategy.policy import (
     DEFAULT_STRATEGIC_INTENT,
     ItemPolicy,
@@ -192,6 +196,142 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertIs(duplicate, first)
         self.assertEqual(len(phase2.observations), 1)
         self.assertEqual(search.calls, [])
+
+    def test_safe_active_night_task_reserves_pioneer_from_fire_control(
+        self,
+    ) -> None:
+        captured: list[tuple[object, ...] | None] = []
+
+        def phase2(
+            observation,
+            *,
+            intent=DEFAULT_STRATEGIC_INTENT,
+            controller_assignments=None,
+        ):
+            del observation, intent
+            captured.append(controller_assignments)
+            return Decision(prompt='phase2')
+
+        def safe_forecaster(observation, **kwargs):
+            refresh = refresh_night_forecast(observation, **kwargs)
+            return replace(
+                refresh,
+                forecast=replace(
+                    refresh.forecast,
+                    risk_level=RiskLevel.SAFE,
+                ),
+            )
+
+        engine = StrategyEngine(
+            phase2_planner=phase2,
+            night_forecaster=safe_forecaster,
+            clock=lambda: 100.0,
+        )
+        observed = replace(
+            self.night,
+            phase_task='Return the exact answer.',
+        )
+
+        decision = engine.plan(observed)
+
+        self.assertNotIn(103, {item.role_id for item in captured[0]})
+        self.assertTrue(decision.prompt)
+        session = engine._sessions.get(observed.our.team_id)
+        self.assertTrue(session.task_state.active_task_type)
+
+    def test_critical_active_night_task_releases_pioneer_to_fire_control(
+        self,
+    ) -> None:
+        forecast_assignments: list[tuple[object, ...] | None] = []
+        phase2_assignments: list[tuple[object, ...] | None] = []
+
+        def phase2(
+            observation,
+            *,
+            intent=DEFAULT_STRATEGIC_INTENT,
+            controller_assignments=None,
+        ):
+            del observation, intent
+            phase2_assignments.append(controller_assignments)
+            return Decision(prompt='phase2')
+
+        def critical_forecaster(observation, **kwargs):
+            forecast_assignments.append(kwargs.get('controller_assignments'))
+            refresh = refresh_night_forecast(observation, **kwargs)
+            return replace(
+                refresh,
+                forecast=replace(
+                    refresh.forecast,
+                    risk_level=RiskLevel.CRITICAL,
+                ),
+            )
+
+        engine = StrategyEngine(
+            phase2_planner=phase2,
+            night_forecaster=critical_forecaster,
+            clock=lambda: 100.0,
+        )
+        observed = replace(
+            self.night,
+            phase_task='Return the exact answer.',
+        )
+
+        decision = engine.plan(observed)
+
+        self.assertNotIn(
+            103,
+            {item.role_id for item in forecast_assignments[0]},
+        )
+        self.assertIn(
+            103,
+            {item.role_id for item in phase2_assignments[0]},
+        )
+        self.assertEqual(decision.prompt, 'phase2')
+        session = engine._sessions.get(observed.our.team_id)
+        self.assertEqual(session.task_state.active_task_type, '')
+        self.assertEqual(session.task_state.abandoned_task_fingerprint, '')
+
+    def test_active_night_task_fails_closed_when_assignment_cache_fails(
+        self,
+    ) -> None:
+        class BrokenAssignmentCache:
+            def resolve(self, *args, **kwargs):
+                del args, kwargs
+                raise RuntimeError('assignment unavailable')
+
+        def phase2(
+            observation,
+            *,
+            intent=DEFAULT_STRATEGIC_INTENT,
+            controller_assignments=None,
+        ):
+            del observation, intent, controller_assignments
+            return Decision(prompt='phase2')
+
+        def safe_forecaster(observation, **kwargs):
+            refresh = refresh_night_forecast(observation, **kwargs)
+            return replace(
+                refresh,
+                forecast=replace(
+                    refresh.forecast,
+                    risk_level=RiskLevel.SAFE,
+                ),
+            )
+
+        engine = StrategyEngine(
+            phase2_planner=phase2,
+            night_forecaster=safe_forecaster,
+            controller_assignment_cache=BrokenAssignmentCache(),
+            clock=lambda: 100.0,
+        )
+        observed = replace(
+            self.night,
+            phase_task='Return the exact answer.',
+        )
+
+        decision = engine.plan(observed)
+
+        self.assertEqual(decision.prompt, 'phase2')
 
     def test_consecutive_day_to_night_uses_phase_3_and_objective(self) -> None:
         objectives: list[Observation] = []

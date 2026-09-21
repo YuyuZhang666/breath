@@ -208,6 +208,39 @@ class NightPolicyTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertFalse(moved_hit)
 
+    def test_assignment_cache_keys_task_role_exclusions(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 4, 5, 'worker'),
+                unit(10011, 4, 6, 'pioneer'),
+                unit(10020, 5, 5, 'gatling', level=1, attack_range=5),
+                unit(10030, 5, 6, 'railgun', level=1, attack_range=6),
+            ),
+        )
+        world = WorldGrid.from_observation(observed)
+        cache = ControllerAssignmentCache()
+
+        full, _ = cache.resolve(observed, world, mode_key='score')
+        reserved, first_hit = cache.resolve(
+            observed,
+            world,
+            mode_key='score',
+            excluded_role_ids=frozenset({10011}),
+        )
+        repeated, second_hit = cache.resolve(
+            observed,
+            world,
+            mode_key='score',
+            excluded_role_ids=frozenset({10011}),
+        )
+
+        self.assertEqual({item.role_id for item in full}, {10010, 10011})
+        self.assertEqual({item.role_id for item in reserved}, {10010})
+        self.assertFalse(first_hit)
+        self.assertTrue(second_hit)
+        self.assertIs(reserved, repeated)
+
     def test_unassigned_role_gets_safe_defensive_candidate(self) -> None:
         observed = observation(
             round_no=71,
