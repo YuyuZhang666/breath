@@ -1,5 +1,6 @@
 import copy
 import json
+import threading
 import unittest
 from dataclasses import replace
 from math import ceil
@@ -14,6 +15,7 @@ from future_war_agent.protocol.models import Observation
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.protocol.time import TurnTime
 from future_war_agent.strategy.engine import StrategyEngine
+from future_war_agent.strategy.compute import ComputeGovernor, ComputeGovernorConfig
 from future_war_agent.strategy.forecast import (
     ForecastUpdateKind,
     refresh_night_forecast,
@@ -264,6 +266,156 @@ class DeadlineNightReplayTests(unittest.TestCase):
         )
         self.assertFalse(sample.emergency_fire_deadline_hit)
         self.assertTrue(sample.timeout_prevented)
+        self.assertEqual(sample.deadline_stage, 'engine_entry')
+
+    def test_engine_lock_wait_is_capped_before_emergency_reserve(self) -> None:
+        class RejectingLock:
+            def __init__(self) -> None:
+                self.timeout: float | None = None
+                self.release_calls = 0
+
+            def acquire(self, *, timeout: float) -> bool:
+                self.timeout = timeout
+                return False
+
+            def release(self) -> None:
+                self.release_calls += 1
+
+        clock = FakeClock(0.0)
+        telemetry = TelemetryRecorder()
+        engine = StrategyEngine(clock=clock, telemetry=telemetry)
+        lock = RejectingLock()
+        engine._lock = lock
+        budget = RequestBudget.start(
+            started_at=0.0,
+            response_budget_seconds=3.5,
+            compute_budget_seconds=3.0,
+            clock=clock,
+        )
+
+        decision = engine.plan(self.night, request_budget=budget)
+
+        self.assertEqual(lock.timeout, 2.5)
+        self.assertEqual(lock.release_calls, 0)
+        self.assertTrue(decision.commands)
+        sample = telemetry.snapshot()[-1]
+        self.assertTrue(sample.engine_lock_timed_out)
+        self.assertEqual(sample.deadline_stage, 'engine_lock')
+        self.assertEqual(sample.decision_source, 'emergency_fire')
+
+    def test_real_lock_contention_returns_before_compute_deadline(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        first_errors: list[BaseException] = []
+
+        def blocking_phase2(
+            observation: Observation,
+            **kwargs: object,
+        ) -> Decision:
+            del kwargs
+            if observation.time.phase.value == 'day':
+                entered.set()
+                release.wait(timeout=2.0)
+            return Decision()
+
+        config = ComputeGovernorConfig(
+            total_decision_budget_seconds=0.20,
+            emergency_reserve_seconds=0.05,
+            emergency_fire_budget_seconds=0.01,
+            emergency_postprocess_guard_seconds=0.01,
+        )
+        telemetry = TelemetryRecorder()
+        engine = StrategyEngine(
+            phase2_planner=blocking_phase2,
+            telemetry=telemetry,
+            compute_governor=ComputeGovernor(config),
+        )
+
+        def run_first() -> None:
+            try:
+                engine.plan(self.day)
+            except BaseException as exc:
+                first_errors.append(exc)
+
+        first = threading.Thread(target=run_first)
+        first.start()
+        self.assertTrue(entered.wait(timeout=1.0))
+        budget = RequestBudget.start(
+            response_budget_seconds=0.30,
+            compute_budget_seconds=0.20,
+        )
+        started = perf_counter()
+        try:
+            decision = engine.plan(self.night, request_budget=budget)
+            elapsed = perf_counter() - started
+        finally:
+            release.set()
+            first.join(timeout=1.0)
+
+        self.assertFalse(first.is_alive())
+        self.assertEqual(first_errors, [])
+        self.assertLess(elapsed, 0.30)
+        self.assertTrue(decision.commands)
+        sample = next(
+            item for item in telemetry.snapshot() if item.round_no == 71
+        )
+        self.assertTrue(sample.engine_lock_timed_out)
+        self.assertEqual(sample.deadline_stage, 'engine_lock')
+        self.assertGreater(sample.engine_lock_wait_ms, 50.0)
+        self.assertEqual(sample.decision_source, 'emergency_fire')
+
+    def test_post_lock_reserve_recheck_releases_before_day_fallback(self) -> None:
+        class AdvancingLock:
+            def __init__(self, clock: FakeClock) -> None:
+                self.clock = clock
+                self.timeout: float | None = None
+                self.release_calls = 0
+
+            def acquire(self, *, timeout: float) -> bool:
+                self.timeout = timeout
+                self.clock.now = 2.5
+                return True
+
+            def release(self) -> None:
+                self.release_calls += 1
+
+        clock = FakeClock(2.49)
+        phase2 = Phase2Spy()
+        telemetry = TelemetryRecorder()
+        emergency_calls = 0
+
+        def forbidden_emergency(*args: object, **kwargs: object):
+            nonlocal emergency_calls
+            del args, kwargs
+            emergency_calls += 1
+            raise AssertionError('day fallback must not run emergency fire')
+
+        engine = StrategyEngine(
+            phase2_planner=phase2,
+            emergency_planner=forbidden_emergency,
+            clock=clock,
+            telemetry=telemetry,
+        )
+        lock = AdvancingLock(clock)
+        engine._lock = lock
+        budget = RequestBudget.start(
+            started_at=0.0,
+            response_budget_seconds=3.5,
+            compute_budget_seconds=3.0,
+            clock=clock,
+        )
+
+        decision = engine.plan(self.day, request_budget=budget)
+
+        self.assertAlmostEqual(lock.timeout, 0.01)
+        self.assertEqual(lock.release_calls, 1)
+        self.assertEqual(phase2.calls, 0)
+        self.assertEqual(emergency_calls, 0)
+        self.assertEqual(decision, Decision())
+        sample = telemetry.snapshot()[-1]
+        self.assertEqual(sample.deadline_stage, 'post_lock')
+        self.assertEqual(sample.forecast_mode, 'none')
+        self.assertEqual(sample.emergency_fire_ms, 0.0)
 
     def test_emergency_reserve_fires_legally_under_35_robot_load(self) -> None:
         raw = make_35_robot_night_payload()

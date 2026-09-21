@@ -722,7 +722,7 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertIs(decision, phase2.decisions[-1])
         self.assertEqual(search.calls, [])
 
-    def test_emergency_reserve_reconciles_but_skips_new_task_work(self) -> None:
+    def test_emergency_reserve_skips_reconciliation_and_new_task_work(self) -> None:
         class TaskSpy:
             def __init__(self) -> None:
                 self.calls = 0
@@ -748,9 +748,9 @@ class StrategyEngineTests(unittest.TestCase):
         engine.plan(self.day, request_started_at=0.0)
 
         self.assertEqual(task_agent.calls, 0)
-        self.assertEqual(task_agent.reconcile_calls, 1)
+        self.assertEqual(task_agent.reconcile_calls, 0)
 
-    def test_emergency_reserve_persists_success_feedback_into_sop(self) -> None:
+    def test_emergency_reserve_defers_success_feedback_until_retry(self) -> None:
         engine = StrategyEngine(
             phase2_planner=Phase2Spy(),
             clock=lambda: 2.6,
@@ -778,6 +778,11 @@ class StrategyEngineTests(unittest.TestCase):
         engine.plan(prompted)
         engine.plan(answered)
         engine.plan(feedback, request_started_at=0.0)
+
+        session = engine._sessions.get(self.day.our.team_id)
+        self.assertEqual(session.task_state.sops, ())
+
+        engine.plan(feedback)
 
         session = engine._sessions.get(self.day.our.team_id)
         self.assertEqual(session.task_state.sops[0].answer, '42')

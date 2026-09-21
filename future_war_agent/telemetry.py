@@ -85,6 +85,9 @@ class TurnTelemetry:
     timeout_prevented: bool = False
     decision_source: str = 'safe'
     response_action_count: int = 0
+    engine_lock_wait_ms: float = 0.0
+    engine_lock_timed_out: bool = False
+    deadline_stage: str = 'none'
     emergency_fire_ms: float = 0.0
     emergency_fire_action_count: int = 0
     emergency_fire_deadline_hit: bool = False
@@ -166,6 +169,9 @@ class _ActiveTurn:
     timeout_prevented: bool = False
     decision_source: str = 'safe'
     response_action_count: int = 0
+    engine_lock_wait_ms: float = 0.0
+    engine_lock_timed_out: bool = False
+    deadline_stage: str = 'none'
     emergency_fire_ms: float = 0.0
     emergency_fire_action_count: int = 0
     emergency_fire_deadline_hit: bool = False
@@ -326,6 +332,9 @@ class TelemetryRecorder:
             timeout_prevented=active.timeout_prevented,
             decision_source=active.decision_source,
             response_action_count=active.response_action_count,
+            engine_lock_wait_ms=active.engine_lock_wait_ms,
+            engine_lock_timed_out=active.engine_lock_timed_out,
+            deadline_stage=active.deadline_stage,
             emergency_fire_ms=active.emergency_fire_ms,
             emergency_fire_action_count=active.emergency_fire_action_count,
             emergency_fire_deadline_hit=active.emergency_fire_deadline_hit,

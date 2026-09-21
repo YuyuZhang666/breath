@@ -25,6 +25,9 @@ class TelemetryTests(unittest.TestCase):
         self.assertFalse(sample.timeout_prevented)
         self.assertEqual(sample.decision_source, 'safe')
         self.assertEqual(sample.response_action_count, 0)
+        self.assertEqual(sample.engine_lock_wait_ms, 0.0)
+        self.assertFalse(sample.engine_lock_timed_out)
+        self.assertEqual(sample.deadline_stage, 'none')
         self.assertEqual(sample.emergency_fire_ms, 0.0)
         self.assertEqual(sample.emergency_fire_action_count, 0)
         self.assertFalse(sample.emergency_fire_deadline_hit)
@@ -43,6 +46,9 @@ class TelemetryTests(unittest.TestCase):
             timeout_prevented=True,
             decision_source='phase2',
             response_action_count=2,
+            engine_lock_wait_ms=3.25,
+            engine_lock_timed_out=True,
+            deadline_stage='engine_lock',
             emergency_fire_ms=1.25,
             emergency_fire_action_count=2,
             emergency_fire_deadline_hit=True,
@@ -61,6 +67,9 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(sample.timeout_prevented)
         self.assertEqual(sample.decision_source, 'phase2')
         self.assertEqual(sample.response_action_count, 2)
+        self.assertEqual(sample.engine_lock_wait_ms, 3.25)
+        self.assertTrue(sample.engine_lock_timed_out)
+        self.assertEqual(sample.deadline_stage, 'engine_lock')
         self.assertEqual(sample.emergency_fire_ms, 1.25)
         self.assertEqual(sample.emergency_fire_action_count, 2)
         self.assertTrue(sample.emergency_fire_deadline_hit)
@@ -68,6 +77,8 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(payload['forecast_mode'], 'lightweight')
         self.assertEqual(payload['fallback_reason'], 'deadline_low')
         self.assertEqual(payload['response_action_count'], 2)
+        self.assertTrue(payload['engine_lock_timed_out'])
+        self.assertEqual(payload['deadline_stage'], 'engine_lock')
         self.assertEqual(payload['emergency_fire_action_count'], 2)
 
     def test_nested_context_produces_one_bounded_sample(self) -> None:

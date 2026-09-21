@@ -210,19 +210,36 @@ class StrategyEngine:
             phase=observation.time.phase.value,
         )
         try:
-            if (
-                observation.time.phase is Phase.NIGHT
-                and request_budget.remaining_compute()
-                <= self._compute_governor.config.emergency_reserve_seconds
-            ):
-                return self._plan_emergency(observation, request_budget)
-            with self._lock:
-                if (
-                    observation.time.phase is Phase.NIGHT
-                    and request_budget.remaining_compute()
-                    <= self._compute_governor.config.emergency_reserve_seconds
-                ):
-                    return self._plan_emergency(observation, request_budget)
+            reserve = self._compute_governor.config.emergency_reserve_seconds
+            remaining = request_budget.remaining_compute()
+            if remaining <= reserve:
+                return self._plan_emergency(
+                    observation,
+                    request_budget,
+                    deadline_stage='engine_entry',
+                )
+            lock_timeout = remaining - reserve
+            with self._telemetry.measure('engine_lock_wait_ms'):
+                lock_acquired = self._lock.acquire(timeout=lock_timeout)
+            if not lock_acquired:
+                self._telemetry.set(
+                    engine_lock_timed_out=True,
+                    deadline_stage='engine_lock',
+                )
+                return self._plan_emergency(
+                    observation,
+                    request_budget,
+                    deadline_stage='engine_lock',
+                )
+            try:
+                if request_budget.remaining_compute() <= reserve:
+                    self._lock.release()
+                    lock_acquired = False
+                    return self._plan_emergency(
+                        observation,
+                        request_budget,
+                        deadline_stage='post_lock',
+                    )
                 try:
                     return self._plan_locked(
                         observation,
@@ -248,6 +265,9 @@ class StrategyEngine:
                             observation.our.team_id,
                             observation.time.round_no,
                         )
+            finally:
+                if lock_acquired:
+                    self._lock.release()
         finally:
             self._telemetry.finish(token)
 
@@ -255,18 +275,25 @@ class StrategyEngine:
         self,
         observation: Observation,
         request_budget: RequestBudget,
+        *,
+        deadline_stage: str = 'strategy',
     ) -> Decision:
         config = self._compute_governor.config
         self._telemetry.set(
             safe_action_generated=True,
             compute_governor_action='emergency_reserve',
             phase3_level=Phase3Level.NONE.value,
-            forecast_mode='skipped',
-            forecast_reason='deadline_low',
             fallback_used=True,
             fallback_reason='deadline_low',
             timeout_prevented=True,
             decision_source='safe',
+            deadline_stage=deadline_stage,
+        )
+        if observation.time.phase is not Phase.NIGHT:
+            return Decision()
+        self._telemetry.set(
+            forecast_mode='skipped',
+            forecast_reason='deadline_low',
         )
         now = request_budget.clock()
         emergency_deadline = min(
