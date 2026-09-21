@@ -1,6 +1,6 @@
 import unittest
 
-from future_war_agent.strategy.compute import ComputeGovernor
+from future_war_agent.strategy.compute import ComputeGovernor, ComputeGovernorConfig
 from future_war_agent.strategy.simulation.config import (
     Phase3Config,
     Phase3Level,
@@ -8,6 +8,17 @@ from future_war_agent.strategy.simulation.config import (
 
 
 class ComputeGovernorTests(unittest.TestCase):
+    def test_emergency_micro_budgets_must_fit_inside_reserve(self) -> None:
+        with self.assertRaises(ValueError):
+            ComputeGovernorConfig(emergency_fire_budget_seconds=0.0)
+        with self.assertRaises(ValueError):
+            ComputeGovernorConfig(emergency_postprocess_guard_seconds=0.0)
+        with self.assertRaises(ValueError):
+            ComputeGovernorConfig(
+                emergency_fire_budget_seconds=0.45,
+                emergency_postprocess_guard_seconds=0.05,
+            )
+
     def setUp(self) -> None:
         self.governor = ComputeGovernor()
         self.phase3 = Phase3Config()

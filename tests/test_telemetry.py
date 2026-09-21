@@ -25,6 +25,9 @@ class TelemetryTests(unittest.TestCase):
         self.assertFalse(sample.timeout_prevented)
         self.assertEqual(sample.decision_source, 'safe')
         self.assertEqual(sample.response_action_count, 0)
+        self.assertEqual(sample.emergency_fire_ms, 0.0)
+        self.assertEqual(sample.emergency_fire_action_count, 0)
+        self.assertFalse(sample.emergency_fire_deadline_hit)
 
     def test_observability_fields_are_finished_and_logged(self) -> None:
         ticks = iter((0, 4_000_000))
@@ -40,6 +43,9 @@ class TelemetryTests(unittest.TestCase):
             timeout_prevented=True,
             decision_source='phase2',
             response_action_count=2,
+            emergency_fire_ms=1.25,
+            emergency_fire_action_count=2,
+            emergency_fire_deadline_hit=True,
         )
 
         with self.assertLogs('future_war_agent.telemetry', level='INFO') as logs:
@@ -55,10 +61,14 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(sample.timeout_prevented)
         self.assertEqual(sample.decision_source, 'phase2')
         self.assertEqual(sample.response_action_count, 2)
+        self.assertEqual(sample.emergency_fire_ms, 1.25)
+        self.assertEqual(sample.emergency_fire_action_count, 2)
+        self.assertTrue(sample.emergency_fire_deadline_hit)
         payload = json.loads(logs.output[0].split('turn_telemetry ', 1)[1])
         self.assertEqual(payload['forecast_mode'], 'lightweight')
         self.assertEqual(payload['fallback_reason'], 'deadline_low')
         self.assertEqual(payload['response_action_count'], 2)
+        self.assertEqual(payload['emergency_fire_action_count'], 2)
 
     def test_nested_context_produces_one_bounded_sample(self) -> None:
         ticks = iter((0, 1_000_000, 3_000_000, 5_000_000))

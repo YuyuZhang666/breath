@@ -1,4 +1,5 @@
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import combinations, permutations, product
 from threading import RLock
@@ -6,12 +7,14 @@ from types import MappingProxyType
 from typing import Mapping
 
 from future_war_agent.decision.actions import Action
+from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import (
     Observation,
     Position,
     RobotState,
     UnitState,
 )
+from future_war_agent.protocol.time import Phase
 
 from .jobs import Job, JobKind
 from .items import has_item
@@ -22,12 +25,153 @@ from .simulation.geometry import is_legal_cone
 from .world import WorldGrid
 
 
+_PERSONAL_ROLES = frozenset({'worker', 'pioneer'})
+_EMERGENCY_WEAPON_LIMIT = 3
+_EMERGENCY_ROBOT_LIMIT = 64
+
+
+class _EmergencyDeadlineExpired(Exception):
+    pass
+
+
 @dataclass(frozen=True, slots=True)
 class ControllerAssignment:
     role_id: int
     weapon_id: int
     stand: Position
     distance: int
+
+
+@dataclass(frozen=True, slots=True)
+class EmergencyFirePlan:
+    decision: Decision
+    deadline_hit: bool
+    weapons_considered: int
+
+
+def plan_emergency_night_fire(
+    observation: Observation,
+    *,
+    clock: Callable[[], float],
+    deadline: float,
+    max_weapons: int = _EMERGENCY_WEAPON_LIMIT,
+    max_robots: int = _EMERGENCY_ROBOT_LIMIT,
+) -> EmergencyFirePlan:
+    if max_weapons <= 0 or max_robots <= 0:
+        raise ValueError('emergency fire limits must be positive')
+    if observation.time.phase is not Phase.NIGHT:
+        return EmergencyFirePlan(Decision(), False, 0)
+
+    commands: dict[int, Action] = {}
+    weapons_considered = 0
+
+    def check_deadline() -> None:
+        if clock() >= deadline:
+            raise _EmergencyDeadlineExpired
+
+    try:
+        check_deadline()
+        world = WorldGrid.from_observation(observation)
+        check_deadline()
+        station = world.our_station()
+        station_cells = (
+            station_footprint(station.position, world.rules)
+            if station is not None
+            else frozenset()
+        )
+        hostile: list[RobotState] = []
+        for robot in observation.robots:
+            check_deadline()
+            if (
+                robot.health > 0
+                and robot.target_team == observation.our.team_type
+            ):
+                hostile.append(robot)
+        hostile.sort(
+            key=lambda robot: (
+                min(
+                    (
+                        robot.position.chebyshev_distance(cell)
+                        for cell in station_cells
+                    ),
+                    default=0,
+                ),
+                robot.health,
+                robot.robot_id,
+            )
+        )
+        hostile_robots = tuple(hostile[:max_robots])
+        if not hostile_robots:
+            return EmergencyFirePlan(Decision(), False, 0)
+
+        controllers = tuple(
+            sorted(
+                (
+                    role
+                    for role in world.friendly_roles
+                    if role.health > 0 and role.role_type in _PERSONAL_ROLES
+                ),
+                key=lambda role: role.unit_id,
+            )
+        )
+        weapons = tuple(
+            sorted(
+                (
+                    weapon
+                    for weapon in world.weapons
+                    if weapon.health > 0
+                    and weapon.cooldown == 0
+                    and weapon.attack_range > 0
+                    and (weapon.level or 0) > 0
+                    and weapon.role_type in {'gatling', 'railgun', 'rocket'}
+                ),
+                key=lambda weapon: (
+                    -_assignment_weapon_value(weapon, 'survive'),
+                    weapon.unit_id,
+                ),
+            )[:max_weapons]
+        )
+        used_controllers: set[int] = set()
+        for weapon in weapons:
+            check_deadline()
+            weapons_considered += 1
+            controller = None
+            for role in controllers:
+                check_deadline()
+                if (
+                    role.unit_id not in used_controllers
+                    and role.position.chebyshev_distance(weapon.position) <= 1
+                ):
+                    controller = role
+                    break
+            if controller is None:
+                continue
+            targets = _phase2_attack_targets(
+                observation,
+                world,
+                weapon,
+                robot_candidates=hostile_robots,
+                deadline_check=check_deadline,
+            )
+            if not targets:
+                continue
+            commands[weapon.unit_id] = Action.attack(
+                controller.unit_id,
+                targets,
+            )
+            used_controllers.add(controller.unit_id)
+            check_deadline()
+    except _EmergencyDeadlineExpired:
+        return EmergencyFirePlan(
+            Decision(commands=commands),
+            True,
+            weapons_considered,
+        )
+    return EmergencyFirePlan(
+        Decision(commands=commands),
+        False,
+        weapons_considered,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -350,7 +494,11 @@ def _phase2_attack_targets(
     weapon: UnitState,
     *,
     allow_cross_team: bool = False,
+    robot_candidates: tuple[RobotState, ...] | None = None,
+    deadline_check: Callable[[], None] | None = None,
 ) -> tuple[Position, ...]:
+    if deadline_check is not None:
+        deadline_check()
     if (
         weapon.cooldown != 0
         or weapon.attack_range <= 0
@@ -358,24 +506,31 @@ def _phase2_attack_targets(
         or weapon.level <= 0
     ):
         return ()
-    living = tuple(
-        robot
-        for robot in observation.robots
-        if robot.health > 0
-        and (
+    living_list: list[RobotState] = []
+    for robot in (
+        observation.robots if robot_candidates is None else robot_candidates
+    ):
+        if deadline_check is not None:
+            deadline_check()
+        if robot.health > 0 and (
             allow_cross_team
             or robot.target_team == observation.our.team_type
-        )
-    )
+        ):
+            living_list.append(robot)
+    living = tuple(living_list)
     if not living:
         return ()
     if weapon.role_type == 'railgun':
-        in_range = tuple(
-            robot
-            for robot in living
-            if weapon.position.chebyshev_distance(robot.position)
-            <= weapon.attack_range
-        )
+        in_range_list: list[RobotState] = []
+        for robot in living:
+            if deadline_check is not None:
+                deadline_check()
+            if (
+                weapon.position.chebyshev_distance(robot.position)
+                <= weapon.attack_range
+            ):
+                in_range_list.append(robot)
+        in_range = tuple(in_range_list)
         if not in_range:
             return ()
         target = min(
@@ -384,9 +539,21 @@ def _phase2_attack_targets(
         )
         return (target.position,)
     if weapon.role_type == 'gatling':
-        return _gatling_targets(observation, world, weapon, living)
+        return _gatling_targets(
+            observation,
+            world,
+            weapon,
+            living,
+            deadline_check=deadline_check,
+        )
     if weapon.role_type == 'rocket':
-        return _rocket_targets(observation, world, weapon, living)
+        return _rocket_targets(
+            observation,
+            world,
+            weapon,
+            living,
+            deadline_check=deadline_check,
+        )
     return ()
 
 
@@ -456,9 +623,13 @@ def _gatling_targets(
     world: WorldGrid,
     weapon: UnitState,
     robots: tuple[RobotState, ...],
+    *,
+    deadline_check: Callable[[], None] | None = None,
 ) -> tuple[Position, ...]:
     robots_by_cell: dict[Position, list[RobotState]] = {}
     for robot in robots:
+        if deadline_check is not None:
+            deadline_check()
         if weapon.position.chebyshev_distance(robot.position) <= weapon.attack_range:
             robots_by_cell.setdefault(robot.position, []).append(robot)
     ranked_cells = tuple(
@@ -472,14 +643,12 @@ def _gatling_targets(
     )
     if len(ranked_cells) < weapon.level:
         return ()
-    return next(
-        (
-            group
-            for group in combinations(ranked_cells, weapon.level)
-            if is_legal_cone(weapon.position, group)
-        ),
-        (),
-    )
+    for group in combinations(ranked_cells, weapon.level):
+        if deadline_check is not None:
+            deadline_check()
+        if is_legal_cone(weapon.position, group):
+            return group
+    return ()
 
 
 def _rocket_targets(
@@ -487,13 +656,21 @@ def _rocket_targets(
     world: WorldGrid,
     weapon: UnitState,
     robots: tuple[RobotState, ...],
+    *,
+    deadline_check: Callable[[], None] | None = None,
 ) -> tuple[Position, ...]:
-    candidate_cells = {
-        Position(robot.position.x + delta_x, robot.position.y + delta_y)
-        for robot in robots
-        for delta_x in (-1, 0, 1)
-        for delta_y in (-1, 0, 1)
-    }
+    candidate_cells: set[Position] = set()
+    for robot in robots:
+        if deadline_check is not None:
+            deadline_check()
+        for delta_x in (-1, 0, 1):
+            for delta_y in (-1, 0, 1):
+                candidate_cells.add(
+                    Position(
+                        robot.position.x + delta_x,
+                        robot.position.y + delta_y,
+                    )
+                )
     ranked_cells = tuple(
         sorted(
             (
@@ -509,6 +686,7 @@ def _rocket_targets(
                 weapon,
                 robots,
                 cell,
+                deadline_check=deadline_check,
             ),
         )
     )
@@ -523,10 +701,16 @@ def _rocket_target_key(
     weapon: UnitState,
     robots: tuple[RobotState, ...],
     cell: Position,
+    *,
+    deadline_check: Callable[[], None] | None = None,
 ) -> tuple[object, ...]:
-    affected = tuple(
-        robot for robot in robots if cell.chebyshev_distance(robot.position) <= 1
-    )
+    affected_list: list[RobotState] = []
+    for robot in robots:
+        if deadline_check is not None:
+            deadline_check()
+        if cell.chebyshev_distance(robot.position) <= 1:
+            affected_list.append(robot)
+    affected = tuple(affected_list)
     targeted_count = sum(
         robot.target_team == observation.our.team_type for robot in affected
     )
