@@ -1,8 +1,11 @@
 import unittest
+from dataclasses import replace
 
 from future_war_agent.decision.actions import ActionKind
 from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.night import assign_controllers
+from future_war_agent.strategy.joint_fire import plan_joint_fire
+from future_war_agent.strategy.policy import DEFAULT_STRATEGIC_INTENT
 from future_war_agent.strategy.simulation.candidates import generate_root_actions
 from future_war_agent.strategy.simulation.state import build_sim_state
 from future_war_agent.strategy.world import WorldGrid
@@ -69,6 +72,52 @@ class SimulationCandidateTests(unittest.TestCase):
                 self.assertIs(action.kind, ActionKind.ATTACK)
                 self.assertEqual(action.controller_id, attack.controller_id)
                 self.assertEqual(action.target_positions, attack.targets)
+
+    def test_first_root_is_the_phase2_5_baseline_and_disabled_items_are_absent(self) -> None:
+        observed, world, state = self._scenario(controller=Position(4, 5))
+        role_id = next(
+            item.unit_id for item in observed.our.units if item.role_type == 'worker'
+        )
+        observed = replace(
+            observed,
+            our=replace(
+                observed.our,
+                units=tuple(
+                    replace(item, backpack=('Bomb', 'Dizzy'))
+                    if item.unit_id == role_id
+                    else item
+                    for item in observed.our.units
+                ),
+            ),
+        )
+        world = WorldGrid.from_observation(observed)
+        assignments = assign_controllers(observed, world)
+        state = build_sim_state(observed, assignments)
+        baseline = plan_joint_fire(
+            observed,
+            world,
+            DEFAULT_STRATEGIC_INTENT,
+            controller_assignments=assignments,
+        ).decision
+
+        roots = generate_root_actions(
+            observed,
+            world,
+            state,
+            controller_assignments=assignments,
+            baseline_decision=baseline,
+            max_roots=4,
+        )
+
+        self.assertEqual(roots[0].decision, baseline)
+        self.assertLessEqual(len(roots), 4)
+        self.assertTrue(
+            all(
+                action.kind is not ActionKind.USE
+                for root in roots
+                for action in root.decision.commands.values()
+            )
+        )
 
     @staticmethod
     def _scenario(controller: Position):

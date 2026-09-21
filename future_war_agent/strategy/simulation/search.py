@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from time import monotonic, perf_counter_ns
 
@@ -9,22 +9,27 @@ from future_war_agent.strategy.night import (
     ControllerAssignment,
     assign_controllers,
 )
+from future_war_agent.strategy.policy import (
+    DEFAULT_STRATEGIC_INTENT,
+    StrategicIntent,
+)
 from future_war_agent.strategy.world import WorldGrid
 
 from .candidates import RootAction, SimJointAction, generate_root_actions
 from .certificate import (
     RobotWaveSafetyCertificate,
     ScenarioOutcome,
+    WaveClassification,
     build_certificate,
     score_rank_key,
     survival_rank_key,
 )
-from .config import DEFAULT_PHASE3_CONFIG, Phase3Config
+from .config import DEFAULT_PHASE3_CONFIG, Phase3Config, Phase3Level
 from .errors import DeadlineExceeded, UnsupportedSimulation
 from .future import choose_future_action
 from .kernel import step_simulation
 from .objective import DEFAULT_NIGHT_OBJECTIVE, NightObjective
-from .robots import ALL_ROBOT_POLICIES
+from .robots import ALL_ROBOT_POLICIES, RobotPolicy
 from .state import AssignedStand, SimState, build_sim_state
 
 
@@ -39,6 +44,8 @@ class SearchStats:
     maximum_steps: int
     candidate_generation_ms: float = 0.0
     simulation_ms: float = 0.0
+    level: Phase3Level = Phase3Level.FULL
+    deadline_hit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +65,18 @@ def search_night(
     clock: Callable[[], float] = monotonic,
     deadline: float | None = None,
     controller_assignments: tuple[ControllerAssignment, ...] | None = None,
+    level: Phase3Level = Phase3Level.FULL,
+    intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
+    baseline_decision: Decision | None = None,
 ) -> SearchResult:
     _validate_weights(scenario_weights)
+    budget = config.budget_for(level)
+    started_at = clock()
+    budget_deadline = started_at + budget.seconds
     effective_deadline = (
-        clock() + config.watchdog_seconds if deadline is None else deadline
+        budget_deadline
+        if deadline is None
+        else min(deadline, budget_deadline)
     )
     _check_deadline(clock, effective_deadline)
 
@@ -77,7 +92,16 @@ def search_night(
         for item in resolved_assignments
     )
     state = build_sim_state(observation, assignments, config)
-    roots = generate_root_actions(observation, world, state, config)
+    roots = generate_root_actions(
+        observation,
+        world,
+        state,
+        config,
+        intent=intent,
+        controller_assignments=resolved_assignments,
+        baseline_decision=baseline_decision,
+        max_roots=budget.root_candidates,
+    )
     candidate_generation_ms = (
         perf_counter_ns() - candidate_started_ns
     ) / 1_000_000
@@ -85,7 +109,8 @@ def search_night(
     if not roots:
         raise UnsupportedSimulation("no legal Phase 3 root actions")
 
-    horizon = min(config.max_horizon, state.remaining_night_turns)
+    horizon = min(budget.exact_horizon, state.remaining_night_turns)
+    scenarios = _select_scenarios(scenario_weights, budget.scenarios)
     initial_controlled_role_ids = frozenset(
         role.unit_id for role in state.roles
     )
@@ -105,18 +130,32 @@ def search_night(
     evaluated: list[tuple[RootAction, RobotWaveSafetyCertificate]] = []
     simulation_started_ns = perf_counter_ns()
 
+    deadline_hit = False
     for root in roots:
-        _check_deadline(clock, effective_deadline)
+        if clock() >= effective_deadline:
+            deadline_hit = True
+            break
         outcomes: list[ScenarioOutcome] = []
-        for policy, weight in zip(ALL_ROBOT_POLICIES, scenario_weights):
-            _check_deadline(clock, effective_deadline)
+        complete_root = True
+        for policy, weight in scenarios:
+            if clock() >= effective_deadline:
+                deadline_hit = True
+                complete_root = False
+                break
             simulated = state
             for step_index in range(horizon):
-                _check_deadline(clock, effective_deadline)
+                if clock() >= effective_deadline:
+                    deadline_hit = True
+                    complete_root = False
+                    break
                 simulated_action = (
                     root.simulation_action
                     if step_index == 0
-                    else choose_future_action(simulated, config)
+                    else choose_future_action(
+                        simulated,
+                        config,
+                        profile=intent.profile,
+                    )
                 )
                 simulated = step_simulation(
                     simulated,
@@ -126,6 +165,8 @@ def search_night(
                 )
                 if simulated.station.health <= 0:
                     break
+            if not complete_root:
+                break
             outcomes.append(
                 _scenario_outcome(
                     simulated,
@@ -138,13 +179,16 @@ def search_night(
                     non_key_weapon_ids=non_key_weapon_ids,
                 )
             )
+        if not complete_root:
+            break
         evaluated.append(
             (
                 root,
-                build_certificate(tuple(outcomes), objective),
+                _bounded_horizon_certificate(tuple(outcomes), objective),
             )
         )
-        _check_deadline(clock, effective_deadline)
+    if not evaluated:
+        raise DeadlineExceeded("Phase 3 search expired before one complete root")
 
     simulation_ms = (perf_counter_ns() - simulation_started_ns) / 1_000_000
 
@@ -161,7 +205,6 @@ def search_night(
             pool,
             key=lambda item: survival_rank_key(item[1], item[0].stable_key),
         )
-    _check_deadline(clock, effective_deadline)
     root, certificate = winner
     return SearchResult(
         decision=root.decision,
@@ -170,11 +213,53 @@ def search_night(
         stats=SearchStats(
             roots_generated=len(roots),
             roots_evaluated=len(evaluated),
-            scenarios_per_root=len(ALL_ROBOT_POLICIES),
+            scenarios_per_root=len(scenarios),
             maximum_steps=horizon,
             candidate_generation_ms=candidate_generation_ms,
             simulation_ms=simulation_ms,
+            level=level,
+            deadline_hit=deadline_hit,
         ),
+    )
+
+
+def _bounded_horizon_certificate(
+    outcomes: tuple[ScenarioOutcome, ...],
+    objective: NightObjective,
+) -> RobotWaveSafetyCertificate:
+    certificate = build_certificate(outcomes, objective)
+    if (
+        certificate.classification is not WaveClassification.WAVE_SAFE
+        or all(outcome.ended_with_night for outcome in outcomes)
+    ):
+        return certificate
+    return replace(
+        certificate,
+        classification=WaveClassification.UNKNOWN,
+        secured=False,
+    )
+
+
+def _select_scenarios(
+    weights: ScenarioWeights,
+    count: int,
+) -> tuple[tuple[RobotPolicy, Fraction], ...]:
+    worst = RobotPolicy.MAXIMUM_STATION_PROGRESS
+    worst_index = ALL_ROBOT_POLICIES.index(worst)
+    selected_indices = [worst_index]
+    if count > 1:
+        alternatives = sorted(
+            (
+                (-weights[index], policy.value, index)
+                for index, policy in enumerate(ALL_ROBOT_POLICIES)
+                if index != worst_index
+            )
+        )
+        selected_indices.extend(item[2] for item in alternatives[: count - 1])
+    selected_total = sum((weights[index] for index in selected_indices), Fraction())
+    return tuple(
+        (ALL_ROBOT_POLICIES[index], weights[index] / selected_total)
+        for index in selected_indices
     )
 
 

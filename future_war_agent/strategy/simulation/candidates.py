@@ -2,24 +2,25 @@ from dataclasses import dataclass
 
 from future_war_agent.decision.actions import Action, ActionKind
 from future_war_agent.decision.decision import Decision
-from future_war_agent.protocol.models import Observation, Position, UnitState
-from future_war_agent.strategy.joint import (
-    AttackValidator,
-    Joint,
-    TacticalCandidate,
-    decision_for_joint,
-    enumerate_legal_joints,
-)
+from future_war_agent.protocol.models import Observation, Position
+from future_war_agent.strategy.joint import solve_joint
+from future_war_agent.strategy.joint_fire import choose_joint_fire_attacks
 from future_war_agent.strategy.night import (
+    ControllerAssignment,
     assign_controllers,
     generate_night_candidates,
+)
+from future_war_agent.strategy.policy import (
+    DEFAULT_STRATEGIC_INTENT,
+    StrategicIntent,
+    StrategyProfile,
 )
 from future_war_agent.strategy.world import WorldGrid
 
 from .config import DEFAULT_PHASE3_CONFIG, Phase3Config
-from .geometry import is_legal_cone
+from .errors import UnsupportedSimulation
 from .state import SimState
-from .weapons import WeaponAttack, generate_weapon_attacks
+from .weapons import WeaponAttack
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,7 @@ class RootAction:
     decision: Decision
     simulation_action: SimJointAction
     stable_key: tuple[object, ...]
+    kind: str = 'joint_fire'
 
 
 def generate_root_actions(
@@ -46,104 +48,114 @@ def generate_root_actions(
     world: WorldGrid,
     state: SimState,
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
+    *,
+    intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
+    controller_assignments: tuple[ControllerAssignment, ...] | None = None,
+    baseline_decision: Decision | None = None,
+    max_roots: int | None = None,
 ) -> tuple[RootAction, ...]:
-    assignments = assign_controllers(observation, world)
-    assignment_by_role = {
-        assignment.role_id: assignment for assignment in assignments
-    }
-    sim_weapon_by_id = {weapon.unit_id: weapon for weapon in state.weapons}
-    phase_2_choices = generate_night_candidates(observation, world)
-    choices: dict[int, tuple[TacticalCandidate, ...]] = {}
-
-    for role in sorted(world.friendly_roles, key=lambda item: item.unit_id):
-        assignment = assignment_by_role.get(role.unit_id)
-        if assignment is None or role.position != assignment.stand:
-            choices[role.unit_id] = phase_2_choices[role.unit_id]
-            continue
-
-        sim_weapon = sim_weapon_by_id.get(assignment.weapon_id)
-        if sim_weapon is None:
-            choices[role.unit_id] = (
-                TacticalCandidate.wait(role.unit_id, role.position),
-            )
-            continue
-
-        attacks = generate_weapon_attacks(
-            state,
-            sim_weapon,
-            role.unit_id,
-            config,
+    limit = config.max_root_actions if max_roots is None else max_roots
+    if limit <= 0:
+        raise ValueError('max_roots must be positive')
+    assignments = (
+        assign_controllers(
+            observation,
+            world,
+            mode_key=intent.profile.value,
         )
-        choices[role.unit_id] = tuple(
-            TacticalCandidate.attack(
-                role_id=role.unit_id,
-                start=role.position,
-                weapon_id=attack.weapon_id,
-                targets=attack.targets,
-                priority=500,
-            )
-            for attack in attacks
-        ) + (TacticalCandidate.wait(role.unit_id, role.position),)
-
-    validator = _phase_3_attack_validator(state)
-    joints = enumerate_legal_joints(
-        observation,
-        world,
-        choices,
-        limit=config.max_root_actions,
-        attack_validator=validator,
+        if controller_assignments is None
+        else controller_assignments
     )
-    return tuple(_root_for_joint(joint) for joint in joints)
+    baseline = baseline_decision
+    if baseline is None:
+        choices = generate_night_candidates(
+            observation,
+            world,
+            intent,
+            controller_assignments=assignments,
+        )
+        baseline = solve_joint(
+            observation,
+            world,
+            choices,
+            gold_reserve=intent.gold_reserve,
+        )
+    unsupported = tuple(
+        action.kind
+        for action in baseline.commands.values()
+        if action.kind not in {ActionKind.MOVE, ActionKind.ATTACK}
+    )
+    if unsupported:
+        raise UnsupportedSimulation(
+            f'Phase 3 cannot simulate root actions: {unsupported!r}'
+        )
 
+    roots: list[RootAction] = []
+    seen: set[tuple[object, ...]] = set()
 
-def _phase_3_attack_validator(
-    state: SimState,
-) -> AttackValidator:
-    sim_weapon_by_id = {weapon.unit_id: weapon for weapon in state.weapons}
+    def add(decision: Decision, kind: str) -> None:
+        root = _root_for_decision(decision, kind)
+        if root.stable_key in seen or len(roots) >= limit:
+            return
+        seen.add(root.stable_key)
+        roots.append(root)
 
-    def validate(role: UnitState, weapon: UnitState, action: Action) -> bool:
-        simulated = sim_weapon_by_id.get(weapon.unit_id)
-        if simulated is None:
-            return False
-        targets = action.target_positions
-        if (
-            role.position.chebyshev_distance(weapon.position) != 1
-            or action.controller_id != role.unit_id
-            or simulated.cooldown != 0
-            or len(set(targets)) != len(targets)
-        ):
-            return False
-        if any(
-            not (0 <= target.x < state.width and 0 <= target.y < state.height)
-            or simulated.position.chebyshev_distance(target)
-            > simulated.attack_range
-            for target in targets
-        ):
-            return False
-        if simulated.role_type == "railgun":
-            return len(targets) == 1
-        if simulated.role_type == "gatling":
-            return len(targets) == simulated.level and is_legal_cone(
-                simulated.position,
-                targets,
+    add(baseline, 'phase2_5')
+    base_commands = {
+        actor_id: action
+        for actor_id, action in baseline.commands.items()
+        if action.kind is ActionKind.MOVE
+    }
+    profiles = [StrategyProfile.SURVIVE, StrategyProfile.SCORE]
+    if limit > 4:
+        profiles.append(StrategyProfile.DESPERATION)
+    for profile in profiles:
+        selection = choose_joint_fire_attacks(
+            state,
+            profile,
+            excluded_controller_ids=frozenset(base_commands),
+            simulation_config=config,
+        )
+        commands = dict(base_commands)
+        for attack in selection.attacks:
+            commands[attack.weapon_id] = Action.attack(
+                attack.controller_id,
+                attack.targets,
             )
-        if simulated.role_type == "rocket":
-            return len(targets) == simulated.level
-        return False
+        add(Decision(commands=commands), f'{profile.value}_fire')
 
-    return validate
+    if any(
+        weapon.health > 0
+        and weapon.role_type == 'rocket'
+        and weapon.cooldown == 0
+        for weapon in state.weapons
+    ):
+        rocket_hold = choose_joint_fire_attacks(
+            state,
+            intent.profile,
+            excluded_controller_ids=frozenset(base_commands),
+            hold_rockets=True,
+            simulation_config=config,
+        )
+        hold_commands = dict(base_commands)
+        for attack in rocket_hold.attacks:
+            hold_commands[attack.weapon_id] = Action.attack(
+                attack.controller_id,
+                attack.targets,
+            )
+        add(Decision(commands=hold_commands), 'hold_rocket')
+    add(Decision(commands=base_commands), 'hold_fire')
+    return tuple(roots[:limit])
 
 
-def _root_for_joint(joint: Joint) -> RootAction:
-    decision = decision_for_joint(joint)
+def _root_for_decision(decision: Decision, kind: str) -> RootAction:
     role_moves = tuple(
         sorted(
             (
-                RoleMove(item.role_id, item.action.target_positions[0])
-                for item in joint
-                if item.action is not None
-                and item.action.kind is ActionKind.MOVE
-                and len(item.action.target_positions) == 1
+                RoleMove(actor_id, action.target_positions[0])
+                for actor_id, action in decision.commands.items()
+                if action.kind is ActionKind.MOVE
+                and len(action.target_positions) == 1
             ),
             key=lambda move: move.role_id,
         )
@@ -152,25 +164,22 @@ def _root_for_joint(joint: Joint) -> RootAction:
         sorted(
             (
                 WeaponAttack(
-                    weapon_id=item.command_actor_id,
-                    controller_id=item.role_id,
-                    targets=item.action.target_positions,
+                    weapon_id=actor_id,
+                    controller_id=action.controller_id,
+                    targets=action.target_positions,
                 )
-                for item in joint
-                if item.action is not None
-                and item.action.kind is ActionKind.ATTACK
+                for actor_id, action in decision.commands.items()
+                if action.kind is ActionKind.ATTACK
             ),
             key=lambda attack: attack.stable_key,
         )
     )
-    simulation_action = SimJointAction(
-        role_moves=role_moves,
-        weapon_attacks=weapon_attacks,
-    )
+    simulation_action = SimJointAction(role_moves, weapon_attacks)
     return RootAction(
         decision=decision,
         simulation_action=simulation_action,
         stable_key=_root_key(decision, simulation_action),
+        kind=kind,
     )
 
 

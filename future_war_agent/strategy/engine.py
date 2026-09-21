@@ -25,7 +25,11 @@ from .session import (
     observation_fingerprint,
     static_signature,
 )
-from .simulation.config import DEFAULT_PHASE3_CONFIG, Phase3Config
+from .simulation.config import (
+    DEFAULT_PHASE3_CONFIG,
+    Phase3Config,
+    Phase3Level,
+)
 from .simulation.errors import DeadlineExceeded, UnsupportedSimulation
 from .simulation.objective import NightObjective
 from .simulation.search import (
@@ -33,6 +37,7 @@ from .simulation.search import (
     SearchResult,
     search_night,
 )
+from .simulation.trigger import select_phase3_level
 from .task_agent import EMPTY_TASK_STATE, TaskAgent
 from .world import WorldGrid
 
@@ -82,6 +87,12 @@ class StrategyEngine:
         self._search_accepts_assignments = _accepts_keyword(
             night_searcher,
             'controller_assignments',
+        )
+        self._search_accepts_level = _accepts_keyword(night_searcher, 'level')
+        self._search_accepts_intent = _accepts_keyword(night_searcher, 'intent')
+        self._search_accepts_baseline = _accepts_keyword(
+            night_searcher,
+            'baseline_decision',
         )
         self._objective_provider = objective_provider
         self._director = director if director is not None else StrategicDirector()
@@ -230,6 +241,13 @@ class StrategyEngine:
             else None
         )
 
+        decision = self._plan_phase2(
+            observation,
+            intent,
+            controller_assignments,
+            fortification_threats,
+        )
+
         phase3_eligible = (
             not director_failed
             and observation.time.phase is Phase.NIGHT
@@ -245,102 +263,121 @@ class StrategyEngine:
         )
 
         if phase3_eligible:
-            self._telemetry.set(phase3_level='legacy_full')
-            try:
+            trigger = select_phase3_level(
+                observation,
+                previous_for_director.observation,
+                intent,
+            )
+            self._telemetry.set(phase3_level=trigger.level.value)
+            if trigger.level is not Phase3Level.NONE:
                 if continuity is SessionContinuity.CONSECUTIVE:
-                    weights = self._scenario_reconciler(
-                        previous,
-                        observation,
-                        config=self._config,
-                    )
-                deadline = self._clock() + self._config.watchdog_seconds
+                    try:
+                        weights = self._scenario_reconciler(
+                            previous,
+                            observation,
+                            config=self._config,
+                        )
+                    except Exception:
+                        self._telemetry.set(fallback_used=True)
+                        LOGGER.exception(
+                            'scenario reconciliation failed; using prior weights'
+                        )
                 objective = (
                     self._objective_provider(observation)
                     if self._objective_provider is not None
                     else intent.night_objective
                 )
-                search_kwargs = {
-                    'objective': objective,
-                    'config': self._config,
-                    'clock': self._clock,
-                    'deadline': deadline,
-                }
-                if self._search_accepts_assignments:
-                    search_kwargs['controller_assignments'] = (
-                        controller_assignments
-                    )
-                with self._telemetry.measure('phase3_ms'):
-                    result = self._night_searcher(
-                        observation,
-                        weights,
-                        **search_kwargs,
-                    )
-                stats = getattr(result, 'stats', None)
-                if stats is not None:
-                    self._telemetry.set(
-                        root_candidate_count=stats.roots_generated,
-                        scenario_count=stats.scenarios_per_root,
-                        simulation_count=(
-                            stats.roots_evaluated * stats.scenarios_per_root
+                attempts = (
+                    (Phase3Level.FULL, Phase3Level.LITE)
+                    if trigger.level is Phase3Level.FULL
+                    else (Phase3Level.LITE,)
+                )
+                chain_deadline = self._clock() + (
+                    self._config.watchdog_seconds
+                    + self._config.lite_watchdog_seconds
+                    + 0.020
+                )
+                for attempt in attempts:
+                    budget = self._config.budget_for(attempt)
+                    search_kwargs = {
+                        'objective': objective,
+                        'config': self._config,
+                        'clock': self._clock,
+                        'deadline': min(
+                            chain_deadline,
+                            self._clock() + budget.seconds,
                         ),
-                        candidate_generation_ms=stats.candidate_generation_ms,
-                        simulation_ms=stats.simulation_ms,
-                    )
-                decision = result.decision
-                simulation_action = result.simulation_action
-                certificate = result.certificate
-                fresh_certificate = result.certificate
-            except DeadlineExceeded:
-                self._telemetry.increment('phase3_fallback_count')
-                self._telemetry.set(fallback_used=True, watchdog_hit=True)
-                LOGGER.warning(
-                    "Phase 3 watchdog expired; using Phase 2 for team %s round %s",
-                    team_id,
-                    observation.time.round_no,
-                    exc_info=True,
-                )
-                decision = self._plan_phase2(
-                    observation,
-                    intent,
-                    controller_assignments,
-                    fortification_threats,
-                )
-            except UnsupportedSimulation:
-                self._telemetry.increment('phase3_fallback_count')
-                self._telemetry.set(fallback_used=True)
-                LOGGER.warning(
-                    "Phase 3 unavailable; using Phase 2 for team %s round %s",
-                    team_id,
-                    observation.time.round_no,
-                    exc_info=True,
-                )
-                decision = self._plan_phase2(
-                    observation,
-                    intent,
-                    controller_assignments,
-                    fortification_threats,
-                )
-            except Exception:
-                self._telemetry.increment('phase3_fallback_count')
-                self._telemetry.set(fallback_used=True)
-                LOGGER.exception(
-                    "Phase 3 failed; using Phase 2 for team %s round %s",
-                    team_id,
-                    observation.time.round_no,
-                )
-                decision = self._plan_phase2(
-                    observation,
-                    intent,
-                    controller_assignments,
-                    fortification_threats,
-                )
-        else:
-            decision = self._plan_phase2(
-                observation,
-                intent,
-                controller_assignments,
-                fortification_threats,
-            )
+                    }
+                    if self._search_accepts_assignments:
+                        search_kwargs['controller_assignments'] = (
+                            controller_assignments
+                        )
+                    if self._search_accepts_level:
+                        search_kwargs['level'] = attempt
+                    if self._search_accepts_intent:
+                        search_kwargs['intent'] = intent
+                    if self._search_accepts_baseline:
+                        search_kwargs['baseline_decision'] = decision
+                    try:
+                        with self._telemetry.measure('phase3_ms'):
+                            result = self._night_searcher(
+                                observation,
+                                weights,
+                                **search_kwargs,
+                            )
+                        stats = getattr(result, 'stats', None)
+                        if stats is not None:
+                            self._telemetry.set(
+                                root_candidate_count=stats.roots_generated,
+                                scenario_count=stats.scenarios_per_root,
+                                simulation_count=(
+                                    stats.roots_evaluated
+                                    * stats.scenarios_per_root
+                                ),
+                                candidate_generation_ms=(
+                                    stats.candidate_generation_ms
+                                ),
+                                simulation_ms=stats.simulation_ms,
+                            )
+                            if getattr(stats, 'deadline_hit', False):
+                                self._telemetry.set(watchdog_hit=True)
+                        decision = result.decision
+                        simulation_action = result.simulation_action
+                        certificate = result.certificate
+                        fresh_certificate = result.certificate
+                        break
+                    except DeadlineExceeded:
+                        self._telemetry.increment('phase3_fallback_count')
+                        self._telemetry.set(
+                            fallback_used=True,
+                            watchdog_hit=True,
+                        )
+                        LOGGER.warning(
+                            'Phase 3 %s watchdog expired for team %s round %s',
+                            attempt.value,
+                            team_id,
+                            observation.time.round_no,
+                            exc_info=True,
+                        )
+                    except UnsupportedSimulation:
+                        self._telemetry.increment('phase3_fallback_count')
+                        self._telemetry.set(fallback_used=True)
+                        LOGGER.warning(
+                            'Phase 3 %s unavailable for team %s round %s',
+                            attempt.value,
+                            team_id,
+                            observation.time.round_no,
+                            exc_info=True,
+                        )
+                    except Exception:
+                        self._telemetry.increment('phase3_fallback_count')
+                        self._telemetry.set(fallback_used=True)
+                        LOGGER.exception(
+                            'Phase 3 %s failed for team %s round %s',
+                            attempt.value,
+                            team_id,
+                            observation.time.round_no,
+                        )
 
         task_state = (
             previous_for_director.task_state

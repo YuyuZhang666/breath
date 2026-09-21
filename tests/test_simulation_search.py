@@ -4,8 +4,10 @@ from fractions import Fraction
 from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.serializer import decision_to_payload
 from future_war_agent.protocol.models import Position
+from future_war_agent.strategy.night import assign_controllers
+from future_war_agent.strategy.simulation.candidates import generate_root_actions
 from future_war_agent.strategy.simulation.certificate import WaveClassification
-from future_war_agent.strategy.simulation.config import Phase3Config
+from future_war_agent.strategy.simulation.config import Phase3Config, Phase3Level
 from future_war_agent.strategy.simulation.errors import DeadlineExceeded
 from future_war_agent.strategy.simulation.search import _scenario_outcome, search_night
 from future_war_agent.strategy.simulation.state import (
@@ -13,7 +15,9 @@ from future_war_agent.strategy.simulation.state import (
     SimState,
     SimStructure,
     SimWeapon,
+    build_sim_state,
 )
+from future_war_agent.strategy.world import WorldGrid
 from tests.strategy_helpers import observation, robot, unit
 
 
@@ -34,10 +38,30 @@ class SimulationSearchTests(unittest.TestCase):
             deadline=1.0,
         )
 
-        self.assertLessEqual(result.stats.roots_generated, 64)
+        self.assertLessEqual(result.stats.roots_generated, 8)
         self.assertEqual(result.stats.roots_evaluated, result.stats.roots_generated)
-        self.assertEqual(result.stats.scenarios_per_root, 4)
-        self.assertLessEqual(result.stats.maximum_steps, 6)
+        self.assertEqual(result.stats.scenarios_per_root, 2)
+        self.assertLessEqual(result.stats.maximum_steps, 4)
+
+    def test_lite_obeys_four_one_two_budget(self) -> None:
+        result = search_night(
+            self._gatling_scenario(),
+            WEIGHTS,
+            level=Phase3Level.LITE,
+            clock=lambda: 0.0,
+            deadline=1.0,
+        )
+
+        self.assertLessEqual(result.stats.roots_generated, 4)
+        self.assertEqual(result.stats.scenarios_per_root, 1)
+        self.assertLessEqual(result.stats.maximum_steps, 2)
+        self.assertEqual(len(result.certificate.outcomes), 1)
+        self.assertEqual(result.certificate.outcomes[0].weight, Fraction(1))
+        self.assertIs(
+            result.certificate.classification,
+            WaveClassification.UNKNOWN,
+        )
+        self.assertFalse(result.certificate.secured)
 
     def test_stable_ties_return_byte_equivalent_decisions(self) -> None:
         observed = self._gatling_scenario()
@@ -208,33 +232,35 @@ class SimulationSearchTests(unittest.TestCase):
     def test_rocket_cooldown_changes_available_root_action(self) -> None:
         ready = self._rocket_scenario(cooldown=0)
         cooling = self._rocket_scenario(cooldown=1)
-        config = Phase3Config(max_horizon=5, watchdog_seconds=10)
-
-        ready_result = search_night(
+        ready_world = WorldGrid.from_observation(ready)
+        cooling_world = WorldGrid.from_observation(cooling)
+        ready_assignments = assign_controllers(ready, ready_world)
+        cooling_assignments = assign_controllers(cooling, cooling_world)
+        ready_roots = generate_root_actions(
             ready,
-            WEIGHTS,
-            config=config,
-            clock=lambda: 0.0,
-            deadline=1.0,
+            ready_world,
+            build_sim_state(ready, ready_assignments),
+            controller_assignments=ready_assignments,
         )
-        cooling_result = search_night(
+        cooling_roots = generate_root_actions(
             cooling,
-            WEIGHTS,
-            config=config,
-            clock=lambda: 0.0,
-            deadline=1.0,
+            cooling_world,
+            build_sim_state(cooling, cooling_assignments),
+            controller_assignments=cooling_assignments,
         )
 
         self.assertTrue(
             any(
                 action.kind is ActionKind.ATTACK
-                for action in ready_result.decision.commands.values()
+                for root in ready_roots
+                for action in root.decision.commands.values()
             )
         )
         self.assertFalse(
             any(
                 action.kind is ActionKind.ATTACK
-                for action in cooling_result.decision.commands.values()
+                for root in cooling_roots
+                for action in root.decision.commands.values()
             )
         )
 
@@ -263,6 +289,26 @@ class SimulationSearchTests(unittest.TestCase):
                 clock=AdvancingClock(),
                 deadline=0.55,
             )
+
+    def test_deadline_after_complete_root_returns_anytime_best(self) -> None:
+        class PrefixClock:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __call__(self) -> float:
+                self.calls += 1
+                return 0.0 if self.calls <= 14 else 1.0
+
+        result = search_night(
+            self._gatling_scenario(),
+            WEIGHTS,
+            clock=PrefixClock(),
+            deadline=0.5,
+        )
+
+        self.assertTrue(result.stats.deadline_hit)
+        self.assertGreaterEqual(result.stats.roots_evaluated, 1)
+        self.assertLess(result.stats.roots_evaluated, result.stats.roots_generated)
 
     def test_invalid_scenario_weights_are_rejected(self) -> None:
         invalid = (

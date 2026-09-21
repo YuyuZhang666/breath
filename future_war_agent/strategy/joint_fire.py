@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import lru_cache
 from itertools import combinations, product
 from time import perf_counter_ns
 
@@ -100,6 +101,14 @@ class JointFirePlan:
     scoring_ms: float
 
 
+@dataclass(frozen=True, slots=True)
+class JointFireSelection:
+    attacks: tuple[WeaponAttack, ...]
+    combinations_evaluated: int
+    active_weapon_count: int
+    attack_option_count: int
+
+
 def plan_joint_fire(
     observation: Observation,
     world: WorldGrid,
@@ -148,40 +157,18 @@ def plan_joint_fire(
         ),
         simulation_config,
     )
-    threats = assess_threats(state)
-    role_by_id = {role.unit_id: role for role in world.friendly_roles}
-    weapon_by_id = {weapon.unit_id: weapon for weapon in state.weapons}
-    option_sets: list[tuple[FireOption | None, ...]] = []
-    option_count = 0
-
-    for assignment in sorted(assignments, key=lambda item: item.weapon_id):
-        role = role_by_id.get(assignment.role_id)
-        weapon = weapon_by_id.get(assignment.weapon_id)
-        if (
-            role is None
-            or weapon is None
-            or role.position != assignment.stand
-            or assignment.role_id in base_commands
-        ):
-            continue
-        options = generate_fire_options(
-            state,
-            weapon,
-            assignment.role_id,
-            threats,
-            intent.profile,
-            config=config,
-            simulation_config=simulation_config,
-        )
-        if not options:
-            continue
-        option_count += len(options)
-        option_sets.append((None,) + options)
+    selection = choose_joint_fire_attacks(
+        state,
+        intent.profile,
+        excluded_controller_ids=frozenset(base_commands),
+        config=config,
+        simulation_config=simulation_config,
+    )
 
     candidate_generation_ms = (
         perf_counter_ns() - candidate_started_ns
     ) / 1_000_000
-    if not option_sets:
+    if selection.active_weapon_count == 0:
         return JointFirePlan(
             decision=Decision(commands=base_commands),
             combinations_evaluated=0,
@@ -191,7 +178,93 @@ def plan_joint_fire(
             scoring_ms=0.0,
         )
 
-    scoring_started_ns = perf_counter_ns()
+    commands = dict(base_commands)
+    for attack in selection.attacks:
+        commands[attack.weapon_id] = Action.attack(
+            attack.controller_id,
+            attack.targets,
+        )
+    return JointFirePlan(
+        decision=Decision(commands=commands),
+        combinations_evaluated=selection.combinations_evaluated,
+        active_weapon_count=selection.active_weapon_count,
+        attack_option_count=selection.attack_option_count,
+        candidate_generation_ms=candidate_generation_ms,
+        # Candidate construction and exact combination scoring now share the
+        # cached selector above, so the combined cost is reported once.
+        scoring_ms=0.0,
+    )
+
+
+def choose_joint_fire_attacks(
+    state: SimState,
+    profile: StrategyProfile,
+    *,
+    excluded_controller_ids: frozenset[int] = frozenset(),
+    hold_rockets: bool = False,
+    config: JointFireConfig = DEFAULT_JOINT_FIRE_CONFIG,
+    simulation_config: Phase3Config = DEFAULT_PHASE3_CONFIG,
+) -> JointFireSelection:
+    return _choose_joint_fire_attacks_cached(
+        _combat_state(state),
+        profile,
+        excluded_controller_ids,
+        hold_rockets,
+        config,
+        simulation_config,
+    )
+
+
+@lru_cache(maxsize=2048)
+def _choose_joint_fire_attacks_cached(
+    state: SimState,
+    profile: StrategyProfile,
+    excluded_controller_ids: frozenset[int],
+    hold_rockets: bool,
+    config: JointFireConfig,
+    simulation_config: Phase3Config,
+) -> JointFireSelection:
+    threats = assess_threats(state)
+    weapon_by_id = {weapon.unit_id: weapon for weapon in state.weapons}
+    option_sets: list[tuple[FireOption | None, ...]] = []
+    option_count = 0
+    used_weapons: set[int] = set()
+
+    for role in sorted(state.roles, key=lambda item: item.unit_id):
+        if (
+            role.health <= 0
+            or role.unit_id in excluded_controller_ids
+            or role.assigned_weapon_id is None
+            or role.assigned_stand is None
+            or role.position != role.assigned_stand
+            or role.assigned_weapon_id in used_weapons
+        ):
+            continue
+        weapon = weapon_by_id.get(role.assigned_weapon_id)
+        if (
+            weapon is None
+            or weapon.health <= 0
+            or (hold_rockets and weapon.role_type == 'rocket')
+        ):
+            continue
+        options = generate_fire_options(
+            state,
+            weapon,
+            role.unit_id,
+            threats,
+            profile,
+            config=config,
+            simulation_config=simulation_config,
+        )
+        if not options:
+            continue
+        used_weapons.add(weapon.unit_id)
+        option_count += len(options)
+        option_sets.append((None,) + options)
+
+    if not option_sets:
+        return JointFireSelection((), 0, 0, 0)
+
     robot_by_id = {robot.robot_id: robot for robot in state.robots}
     winner: tuple[FireOption, ...] = ()
     winner_score: tuple[int, ...] | None = None
@@ -200,7 +273,7 @@ def plan_joint_fire(
     for possible in product(*option_sets):
         selected = tuple(item for item in possible if item is not None)
         combinations_evaluated += 1
-        score = _joint_score(selected, robot_by_id, threats, intent.profile)
+        score = _joint_score(selected, robot_by_id, threats, profile)
         stable_key = tuple(item.stable_key for item in selected)
         if (
             winner_score is None
@@ -211,20 +284,34 @@ def plan_joint_fire(
             winner_score = score
             winner_key = stable_key
 
-    scoring_ms = (perf_counter_ns() - scoring_started_ns) / 1_000_000
-    commands = dict(base_commands)
-    for option in winner:
-        commands[option.attack.weapon_id] = Action.attack(
-            option.attack.controller_id,
-            option.attack.targets,
-        )
-    return JointFirePlan(
-        decision=Decision(commands=commands),
+    return JointFireSelection(
+        attacks=tuple(option.attack for option in winner),
         combinations_evaluated=combinations_evaluated,
         active_weapon_count=len(option_sets),
         attack_option_count=option_count,
-        candidate_generation_ms=candidate_generation_ms,
-        scoring_ms=scoring_ms,
+    )
+
+
+def _combat_state(state: SimState) -> SimState:
+    if (
+        state.round_no == 0
+        and state.remaining_night_turns == 0
+        and state.owned_kill_score == 0
+    ):
+        return state
+    return SimState(
+        round_no=0,
+        width=state.width,
+        height=state.height,
+        remaining_night_turns=0,
+        team_type=state.team_type,
+        static_blocked=state.static_blocked,
+        roles=state.roles,
+        station=state.station,
+        walls=state.walls,
+        weapons=state.weapons,
+        robots=state.robots,
+        owned_kill_score=0,
     )
 
 

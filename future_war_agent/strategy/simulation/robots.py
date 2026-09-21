@@ -2,6 +2,7 @@ from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 from fractions import Fraction
+from functools import lru_cache
 
 from future_war_agent.protocol.models import Position
 
@@ -56,11 +57,38 @@ def choose_robot_intents(
 ) -> tuple[RobotIntent, ...]:
     if state.station.health <= 0:
         return ()
-    targets = _attack_targets(state)
+    navigation_state = _navigation_state(state)
+    targets = _attack_targets(navigation_state)
     return tuple(
-        _choose_robot_intent(state, robot, targets, policy)
-        for robot in sorted(state.robots, key=lambda item: item.robot_id)
+        _choose_robot_intent(navigation_state, robot, targets, policy)
+        for robot in sorted(
+            navigation_state.robots,
+            key=lambda item: item.robot_id,
+        )
         if robot.health > 0
+    )
+
+
+def _navigation_state(state: SimState) -> SimState:
+    if (
+        state.round_no == 0
+        and state.remaining_night_turns == 0
+        and state.owned_kill_score == 0
+    ):
+        return state
+    return SimState(
+        round_no=0,
+        width=state.width,
+        height=state.height,
+        remaining_night_turns=0,
+        team_type=state.team_type,
+        static_blocked=state.static_blocked,
+        roles=state.roles,
+        station=state.station,
+        walls=state.walls,
+        weapons=state.weapons,
+        robots=state.robots,
+        owned_kill_score=0,
     )
 
 
@@ -90,7 +118,6 @@ def _choose_robot_intent(
         route_index = {
             cell: index for index, cell in enumerate(route)
         }
-        baseline = _station_distance(state, robot.position, robot, None)
 
         def key(target: _AttackTarget) -> tuple[object, ...]:
             distance = min(
@@ -101,7 +128,7 @@ def _choose_robot_intent(
                 (route_index[cell] for cell in target.cells if cell in route_index),
                 default=state.width * state.height,
             )
-            impact = _path_impact(state, robot, target, baseline)
+            impact = len(target.cells & candidate_route_cells)
             stable = (
                 target.kind,
                 target.target_id,
@@ -134,12 +161,15 @@ def _maximum_progress_intent(
     candidates: list[tuple[tuple[object, ...], RobotIntent]] = []
 
     for target in targets:
-        path_impact = _path_impact(state, robot, target, baseline)
         damage_fraction = Fraction(
             min(robot.attack_power, target.health),
             target.health,
         )
-        expected_progress = path_impact * damage_fraction
+        expected_progress = (
+            state.width * state.height
+            if target.kind == 'station'
+            else damage_fraction
+        )
         stable = (
             target.kind,
             target.target_id,
@@ -264,36 +294,29 @@ def _best_move(state: SimState, robot: SimRobot) -> Position | None:
     return min(options, key=lambda item: item[:-1])[-1]
 
 
-def _path_impact(
-    state: SimState,
-    robot: SimRobot,
-    target: _AttackTarget,
-    baseline: int | None,
-) -> int:
-    if target.kind == "station":
-        return state.width * state.height
-    after = _station_distance(state, robot.position, robot, target)
-    if after is None:
-        return 0
-    if baseline is None:
-        return state.width * state.height - after
-    return max(0, baseline - after)
-
-
+@lru_cache(maxsize=4096)
 def _station_distance(
     state: SimState,
     start: Position,
     robot: SimRobot,
     removed: _AttackTarget | None,
 ) -> int | None:
+    return _station_distance_map(state, robot, removed).get(start)
+
+
+@lru_cache(maxsize=4096)
+def _station_distance_map(
+    state: SimState,
+    robot: SimRobot,
+    removed: _AttackTarget | None,
+) -> dict[Position, int]:
     blocked = set(state.static_blocked)
     blocked.update(_dynamic_occupied(state))
     blocked.discard(robot.position)
-    blocked.discard(start)
     if removed is not None:
         blocked.difference_update(removed.cells)
 
-    goals = {
+    goals = frozenset(
         Position(x, y)
         for x in range(state.width)
         for y in range(state.height)
@@ -303,10 +326,16 @@ def _station_distance(
             for cell in state.station.occupied_cells
         )
         <= robot.attack_range
-    }
-    return _bfs_distance(state, start, goals, frozenset(blocked))
+    )
+    return _distance_map(
+        state.width,
+        state.height,
+        goals,
+        frozenset(blocked),
+    )
 
 
+@lru_cache(maxsize=4096)
 def _candidate_route_cells(
     state: SimState,
     robot: SimRobot,
@@ -320,12 +349,14 @@ def _candidate_route_cells(
         if other.health > 0 and other.robot_id != robot.robot_id
     )
     from_robot = _distance_map(
-        state,
+        state.width,
+        state.height,
         frozenset({robot.position}),
         frozenset(blocked),
     )
     from_station = _distance_map(
-        state,
+        state.width,
+        state.height,
         state.station.occupied_cells,
         frozenset(blocked),
     )
@@ -347,14 +378,20 @@ def _candidate_route_cells(
     )
 
 
+@lru_cache(maxsize=4096)
 def _distance_map(
-    state: SimState,
+    width: int,
+    height: int,
     starts: frozenset[Position],
     blocked: frozenset[Position],
 ) -> dict[Position, int]:
     valid_starts = tuple(
         sorted(
-            (cell for cell in starts if _in_bounds(state, cell)),
+            (
+                cell
+                for cell in starts
+                if 0 <= cell.x < width and 0 <= cell.y < height
+            ),
             key=lambda cell: (cell.x, cell.y),
         )
     )
@@ -366,7 +403,7 @@ def _distance_map(
             neighbor = Position(current.x + delta_x, current.y + delta_y)
             if (
                 neighbor in distances
-                or not _in_bounds(state, neighbor)
+                or not (0 <= neighbor.x < width and 0 <= neighbor.y < height)
                 or neighbor in blocked
             ):
                 continue
@@ -375,6 +412,7 @@ def _distance_map(
     return distances
 
 
+@lru_cache(maxsize=4096)
 def _ideal_station_route(
     state: SimState,
     robot: SimRobot,
@@ -396,16 +434,7 @@ def _ideal_station_route(
     )
 
 
-def _bfs_distance(
-    state: SimState,
-    start: Position,
-    goals: set[Position],
-    blocked: frozenset[Position],
-) -> int | None:
-    path = _bfs_path(state, start, frozenset(goals), blocked)
-    return len(path) - 1 if path else None
-
-
+@lru_cache(maxsize=8192)
 def _bfs_path(
     state: SimState,
     start: Position,

@@ -25,7 +25,7 @@ from future_war_agent.strategy.simulation.certificate import (
     ScenarioOutcome,
     build_certificate,
 )
-from future_war_agent.strategy.simulation.config import Phase3Config
+from future_war_agent.strategy.simulation.config import Phase3Config, Phase3Level
 from future_war_agent.strategy.simulation.errors import (
     DeadlineExceeded,
     UnsupportedSimulation,
@@ -37,6 +37,7 @@ from future_war_agent.strategy.simulation.search import (
     SearchResult,
     SearchStats,
 )
+from future_war_agent.telemetry import TelemetryRecorder
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -210,7 +211,9 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertEqual(objectives, [self.night])
         self.assertEqual(len(search.calls), 1)
         self.assertEqual(search.calls[0]["weights"], UNIFORM_WEIGHTS)
-        self.assertEqual(search.calls[0]["deadline"], 100.8)
+        self.assertEqual(search.calls[0]["deadline"], 100.08)
+        self.assertEqual(search.calls[0]["level"].value, "lite")
+        self.assertIs(search.calls[0]["baseline_decision"], phase2.decisions[1])
         self.assertIs(search.calls[0]["clock"], engine._clock)
         assignments = search.calls[0]['controller_assignments']
         self.assertTrue(assignments)
@@ -228,6 +231,63 @@ class StrategyEngineTests(unittest.TestCase):
 
         self.assertIs(second, first)
         self.assertEqual(len(search.calls), 1)
+
+    def test_stable_night_uses_phase2_5_without_rollout(self) -> None:
+        engine, phase2, search = self.make_engine()
+        stable_night = replace(self.night, robots=())
+
+        engine.plan(self.day)
+        decision = engine.plan(stable_night)
+
+        self.assertIs(decision, phase2.decisions[-1])
+        self.assertEqual(search.calls, [])
+
+    def test_full_failure_degrades_to_lite_before_phase2_5(self) -> None:
+        phase2 = Phase2Spy()
+        result = search_result()
+        attempts: list[Phase3Level] = []
+        telemetry = TelemetryRecorder()
+
+        def searcher(*args, level=Phase3Level.FULL, **kwargs):
+            del args, kwargs
+            attempts.append(level)
+            if level is Phase3Level.FULL:
+                raise DeadlineExceeded('full timeout')
+            return result
+
+        engine = StrategyEngine(
+            phase2_planner=phase2,
+            night_searcher=searcher,
+            clock=lambda: 100.0,
+            telemetry=telemetry,
+        )
+        station_id = next(
+            item.unit_id for item in self.night.our.units if item.role_type == 'station'
+        )
+        damaged_night = replace(
+            self.night,
+            our=replace(
+                self.night.our,
+                units=tuple(
+                    replace(item, health=item.health - 100)
+                    if item.unit_id == station_id
+                    else item
+                    for item in self.night.our.units
+                ),
+            ),
+        )
+
+        engine.plan(self.day)
+        decision = engine.plan(damaged_night)
+
+        self.assertIs(decision, result.decision)
+        self.assertEqual(attempts, [Phase3Level.FULL, Phase3Level.LITE])
+        self.assertEqual(len(phase2.observations), 2)
+        sample = telemetry.snapshot()[-1]
+        self.assertEqual(sample.phase3_level, 'full')
+        self.assertEqual(sample.phase3_fallback_count, 1)
+        self.assertTrue(sample.watchdog_hit)
+        self.assertTrue(sample.fallback_used)
 
     def test_duplicate_request_runs_director_once(self) -> None:
         director = DirectorSpy()
@@ -358,7 +418,7 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertIs(decision, phase2.decisions[-1])
         self.assertEqual(search.calls, [])
 
-    def test_same_round_revision_replans_without_reconciliation(self) -> None:
+    def test_same_round_revision_without_new_event_skips_rollout(self) -> None:
         reconciled = (
             Fraction(1, 10),
             Fraction(1, 5),
@@ -381,10 +441,9 @@ class StrategyEngineTests(unittest.TestCase):
 
         engine.plan(revised)
 
-        self.assertEqual(len(search.calls), 2)
+        self.assertEqual(len(search.calls), 1)
         self.assertEqual(len(reconciliation_calls), 1)
         self.assertEqual(search.calls[0]["weights"], reconciled)
-        self.assertEqual(search.calls[1]["weights"], reconciled)
 
     def test_discontinuities_use_phase_2_and_do_not_search(self) -> None:
         station = next(

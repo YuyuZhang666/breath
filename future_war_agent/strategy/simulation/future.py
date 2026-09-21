@@ -1,11 +1,13 @@
 from collections import deque
 
 from future_war_agent.protocol.models import Position
+from future_war_agent.strategy.joint_fire import choose_joint_fire_attacks
+from future_war_agent.strategy.policy import StrategyProfile
 
 from .candidates import RoleMove, SimJointAction
 from .config import DEFAULT_PHASE3_CONFIG, Phase3Config
 from .state import SimRole, SimState
-from .weapons import WeaponAttack, generate_weapon_attacks
+from .weapons import WeaponAttack
 
 
 _DIRECTIONS = (
@@ -23,14 +25,21 @@ _DIRECTIONS = (
 def choose_future_action(
     state: SimState,
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
+    *,
+    profile: StrategyProfile = StrategyProfile.SURVIVE,
 ) -> SimJointAction:
     weapons = {
         weapon.unit_id: weapon for weapon in state.weapons if weapon.health > 0
     }
     role_moves: list[RoleMove] = []
-    weapon_attacks: list[WeaponAttack] = []
+    weapon_attacks: list[WeaponAttack] = list(
+        choose_joint_fire_attacks(
+            state,
+            profile,
+            simulation_config=config,
+        ).attacks
+    )
     reserved_targets: set[Position] = set()
-    used_weapons: set[int] = set()
 
     for role in sorted(state.roles, key=lambda item: item.unit_id):
         if (
@@ -48,21 +57,6 @@ def choose_future_action(
                 role_moves.append(RoleMove(role.unit_id, step))
                 reserved_targets.add(step)
             continue
-        if (
-            weapon.unit_id in used_weapons
-            or weapon.cooldown != 0
-            or role.position.chebyshev_distance(weapon.position) != 1
-        ):
-            continue
-        attacks = generate_weapon_attacks(
-            state,
-            weapon,
-            role.unit_id,
-            config,
-        )
-        if attacks:
-            weapon_attacks.append(attacks[0])
-            used_weapons.add(weapon.unit_id)
 
     return SimJointAction(
         role_moves=tuple(role_moves),

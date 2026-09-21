@@ -98,9 +98,9 @@ class TelemetryTests(unittest.TestCase):
         engine.plan(night)
 
         sample = recorder.snapshot()[-1]
-        self.assertEqual(sample.phase3_level, 'legacy_full')
+        self.assertEqual(sample.phase3_level, 'lite')
         self.assertGreater(sample.root_candidate_count, 0)
-        self.assertEqual(sample.scenario_count, 4)
+        self.assertEqual(sample.scenario_count, 1)
         self.assertGreater(sample.simulation_count, 0)
         self.assertGreaterEqual(sample.candidate_generation_ms, 0)
         self.assertGreater(sample.simulation_ms, 0)

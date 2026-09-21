@@ -6,6 +6,7 @@ from future_war_agent.strategy.simulation.config import (
     DEFAULT_PHASE3_CONFIG,
     ROBOT_SPECS,
     Phase3Config,
+    Phase3Level,
     RobotSpec,
 )
 from future_war_agent.strategy.simulation.errors import (
@@ -53,13 +54,17 @@ class SimulationFoundationTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             ROBOT_SPECS["smallRobot"] = RobotSpec(99, 3, 40, 1)
 
-    def test_phase_3_defaults_enforce_the_fixed_search_budget(self) -> None:
+    def test_phase_3_defaults_expose_lite_and_full_budgets(self) -> None:
         config = DEFAULT_PHASE3_CONFIG
 
-        self.assertEqual(config.max_root_actions, 64)
-        self.assertEqual(config.scenario_count, 4)
-        self.assertEqual(config.max_horizon, 6)
-        self.assertEqual(config.watchdog_seconds, 0.8)
+        self.assertEqual(config.max_root_actions, 8)
+        self.assertEqual(config.scenario_count, 2)
+        self.assertEqual(config.max_horizon, 4)
+        self.assertEqual(config.watchdog_seconds, 0.250)
+        self.assertEqual(config.budget_for(Phase3Level.LITE).root_candidates, 4)
+        self.assertEqual(config.budget_for(Phase3Level.LITE).scenarios, 1)
+        self.assertEqual(config.budget_for(Phase3Level.LITE).exact_horizon, 2)
+        self.assertEqual(config.budget_for(Phase3Level.LITE).seconds, 0.080)
         self.assertEqual(config.scenario_weight_floor, Fraction(1, 20))
         self.assertEqual(config.gatling_damage, 10)
         self.assertEqual(config.rocket_center_damage, 20)
@@ -69,11 +74,15 @@ class SimulationFoundationTests(unittest.TestCase):
 
     def test_phase_3_rejects_invalid_search_budget_values(self) -> None:
         invalid_configs = (
-            {"max_root_actions": 63},
+            {"max_root_actions": 9},
             {"scenario_count": 3},
             {"max_horizon": 0},
-            {"max_horizon": 7},
+            {"max_horizon": 5},
             {"watchdog_seconds": 0},
+            {"lite_root_actions": 5},
+            {"lite_scenario_count": 2},
+            {"lite_horizon": 3},
+            {"lite_watchdog_seconds": 0},
         )
         for values in invalid_configs:
             with self.subTest(values=values):
