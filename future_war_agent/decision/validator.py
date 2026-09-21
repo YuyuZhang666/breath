@@ -1,3 +1,5 @@
+from collections import Counter
+
 from future_war_agent.protocol.models import Observation, Position, UnitState
 from future_war_agent.protocol.time import Phase
 from future_war_agent.strategy.simulation.geometry import is_legal_cone
@@ -147,7 +149,113 @@ def _is_valid_personal_action(
         return False
     if action.kind is ActionKind.BUILD and observation.time.phase is not Phase.DAY:
         return False
+    backpack = Counter(item.casefold() for item in unit.backpack)
+    if action.kind is ActionKind.SUMMON_TREASURE:
+        requested = Counter(item.casefold() for item in action.items)
+        target = action.target_positions[0]
+        if (
+            unit.position.chebyshev_distance(target) > 1
+            or any(backpack[name] < quantity for name, quantity in requested.items())
+        ):
+            return False
+    if action.kind is ActionKind.USE:
+        if action.name is None or backpack[action.name.casefold()] <= 0:
+            return False
+    if action.kind is ActionKind.BUY:
+        if not _valid_buy(observation, unit, action):
+            return False
+    if action.kind is ActionKind.SELL:
+        if not _valid_sell(observation, unit, action):
+            return False
+    if action.kind is ActionKind.COLLECT:
+        target = action.target_positions[0]
+        if (
+            unit.position.chebyshev_distance(target) > 1
+            or not any(
+                zone.position == target
+                and zone.neutral_type in {'stone', 'iron', 'copper'}
+                for zone in observation.zones
+            )
+        ):
+            return False
     return True
+
+
+def _valid_buy(
+    observation: Observation,
+    unit: UnitState,
+    action: Action,
+) -> bool:
+    if action.name is None or action.quantity is None:
+        return False
+    prices = _adjacent_buy_prices(observation, unit, action.name)
+    if not prices:
+        return False
+    free_slots = max(0, unit.backpack_capacity - len(unit.backpack))
+    return (
+        action.quantity <= free_slots
+        and min(prices) * action.quantity <= observation.our.gold
+    )
+
+
+def _valid_sell(
+    observation: Observation,
+    unit: UnitState,
+    action: Action,
+) -> bool:
+    if action.name is None or action.quantity is None:
+        return False
+    backpack = Counter(item.casefold() for item in unit.backpack)
+    listed = any(
+        item.name == action.name and item.price > 0
+        for item in observation.vendor_shop
+    )
+    adjacent = any(
+        zone.neutral_type == 'vendor'
+        and unit.position.chebyshev_distance(zone.position) <= 1
+        for zone in observation.zones
+    )
+    return listed and adjacent and backpack[action.name.casefold()] >= action.quantity
+
+
+def _adjacent_buy_prices(
+    observation: Observation,
+    unit: UnitState,
+    name: str,
+) -> tuple[int, ...]:
+    adjacent_types = {
+        zone.neutral_type
+        for zone in observation.zones
+        if unit.position.chebyshev_distance(zone.position) <= 1
+    }
+    prices: list[int] = []
+    if 'vendor' in adjacent_types:
+        prices.extend(
+            item.price
+            for item in observation.vendor_shop
+            if item.name == name and item.price > 0
+        )
+    if 'weaponShop' in adjacent_types:
+        prices.extend(
+            item.price
+            for item in observation.weapon_shop
+            if item.name == name and item.price > 0
+        )
+    return tuple(prices)
+
+
+def _buy_cost(
+    observation: Observation,
+    unit: UnitState,
+    action: Action,
+) -> int:
+    if action.kind is not ActionKind.BUY or action.name is None:
+        return 0
+    price = min(
+        _adjacent_buy_prices(observation, unit, action.name),
+        default=0,
+    )
+    return price * (action.quantity or 0)
 
 
 def _is_valid_attack(weapon: UnitState, action: Action) -> bool:
@@ -193,7 +301,8 @@ def validate_decision(observation: Observation, decision: Decision) -> Decision:
     retained: dict[int, Action] = {}
     attack_candidates: list[tuple[int, Action]] = []
 
-    for unit_id, action in candidates:
+    remaining_gold = observation.our.gold
+    for unit_id, action in sorted(candidates, key=lambda value: value[0]):
         if action.kind is ActionKind.ATTACK:
             attack_candidates.append((unit_id, action))
             continue
@@ -202,7 +311,11 @@ def validate_decision(observation: Observation, decision: Decision) -> Decision:
             living_units[unit_id],
             action,
         ):
+            cost = _buy_cost(observation, living_units[unit_id], action)
+            if cost > remaining_gold:
+                continue
             retained[unit_id] = action
+            remaining_gold -= cost
 
     used_controllers: set[int] = set(retained)
     if observation.time.phase is Phase.NIGHT:

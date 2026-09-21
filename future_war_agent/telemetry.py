@@ -21,6 +21,7 @@ class TurnTelemetry:
     parser_ms: float = 0.0
     director_ms: float = 0.0
     task_ms: float = 0.0
+    treasure_ms: float = 0.0
     phase2_ms: float = 0.0
     phase2_5_ms: float = 0.0
     phase3_ms: float = 0.0
@@ -43,6 +44,11 @@ class TurnTelemetry:
     safety_plan_status: str = 'unknown'
     safety_plan_cost: int = 0
     effective_gold_reserve: int = 0
+    task_candidate_count: int = 0
+    task_sop_hit: bool = False
+    treasure_candidate_count: int = 0
+    treasure_attempted: bool = False
+    treasure_result: int = 0
     compute_governor_action: str = 'normal'
     governor_root_limit: int = 0
     governor_scenario_limit: int = 0
@@ -69,6 +75,7 @@ class _ActiveTurn:
     parser_ms: float = 0.0
     director_ms: float = 0.0
     task_ms: float = 0.0
+    treasure_ms: float = 0.0
     phase2_ms: float = 0.0
     phase2_5_ms: float = 0.0
     phase3_ms: float = 0.0
@@ -90,6 +97,11 @@ class _ActiveTurn:
     safety_plan_status: str = 'unknown'
     safety_plan_cost: int = 0
     effective_gold_reserve: int = 0
+    task_candidate_count: int = 0
+    task_sop_hit: bool = False
+    treasure_candidate_count: int = 0
+    treasure_attempted: bool = False
+    treasure_result: int = 0
     compute_governor_action: str = 'normal'
     governor_root_limit: int = 0
     governor_scenario_limit: int = 0
@@ -188,6 +200,7 @@ class TelemetryRecorder:
             parser_ms=active.parser_ms,
             director_ms=active.director_ms,
             task_ms=active.task_ms,
+            treasure_ms=active.treasure_ms,
             phase2_ms=active.phase2_ms,
             phase2_5_ms=active.phase2_5_ms,
             phase3_ms=active.phase3_ms,
@@ -210,6 +223,11 @@ class TelemetryRecorder:
             safety_plan_status=active.safety_plan_status,
             safety_plan_cost=active.safety_plan_cost,
             effective_gold_reserve=active.effective_gold_reserve,
+            task_candidate_count=active.task_candidate_count,
+            task_sop_hit=active.task_sop_hit,
+            treasure_candidate_count=active.treasure_candidate_count,
+            treasure_attempted=active.treasure_attempted,
+            treasure_result=active.treasure_result,
             compute_governor_action=active.compute_governor_action,
             governor_root_limit=active.governor_root_limit,
             governor_scenario_limit=active.governor_scenario_limit,

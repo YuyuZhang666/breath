@@ -3,7 +3,7 @@ import unittest
 from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.decision import Decision
 from future_war_agent.decision.validator import validate_decision
-from future_war_agent.protocol.models import Position, TaskPointState
+from future_war_agent.protocol.models import Position, TaskPointState, WorldNews
 from future_war_agent.strategy.engine import StrategyEngine
 from tests.strategy_helpers import observation, unit
 
@@ -50,6 +50,37 @@ class BrokenTaskAgent:
 
 
 class Phase5AcceptanceTests(unittest.TestCase):
+    def test_real_engine_treasure_overrides_ordinary_preposition(self) -> None:
+        observed = observation(
+            round_no=1,
+            our_units=(
+                unit(10, 5, 5, 'station', health=1000, level=1),
+                unit(11, 3, 3, 'gatling', level=1),
+                unit(12, 4, 3, 'railgun', level=1),
+                unit(13, 5, 3, 'rocket', level=1),
+                unit(
+                    14,
+                    1,
+                    1,
+                    'pioneer',
+                    backpack=('StarSand',),
+                    backpack_capacity=10,
+                ),
+            ),
+            gold=200,
+            world_news=WorldNews(
+                folk_legends='{"treasure":{"x":2,"y":2,"items":["StarSand"],"days":[1],"confidence":0.9}}'
+            ),
+        )
+
+        decision = StrategyEngine().plan(observed)
+
+        self.assertEqual(
+            decision.commands[14].kind,
+            ActionKind.SUMMON_TREASURE,
+        )
+        self.assertEqual(validate_decision(observed, decision), decision)
+
     def test_real_engine_learns_and_reuses_successful_sop(self) -> None:
         engine = StrategyEngine()
 

@@ -579,10 +579,16 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertIs(decision, phase2.decisions[-1])
         self.assertEqual(search.calls, [])
 
-    def test_emergency_reserve_skips_task_agent(self) -> None:
+    def test_emergency_reserve_reconciles_but_skips_new_task_work(self) -> None:
         class TaskSpy:
             def __init__(self) -> None:
                 self.calls = 0
+                self.reconcile_calls = 0
+
+            def reconcile(self, observation, state):
+                del observation
+                self.reconcile_calls += 1
+                return state
 
             def apply(self, *args, **kwargs):
                 del args, kwargs
@@ -599,6 +605,39 @@ class StrategyEngineTests(unittest.TestCase):
         engine.plan(self.day, request_started_at=0.0)
 
         self.assertEqual(task_agent.calls, 0)
+        self.assertEqual(task_agent.reconcile_calls, 1)
+
+    def test_emergency_reserve_persists_success_feedback_into_sop(self) -> None:
+        engine = StrategyEngine(
+            phase2_planner=Phase2Spy(),
+            clock=lambda: 2.6,
+        )
+        task_text = 'Return the sum of 20 and 22.'
+        prompted = replace(
+            self.day,
+            time=TurnTime.from_round(1),
+            phase_task=task_text,
+        )
+        answered = replace(
+            self.day,
+            time=TurnTime.from_round(2),
+            phase_task=task_text,
+            llm_response='42',
+        )
+        feedback = replace(
+            self.day,
+            time=TurnTime.from_round(3),
+            phase_task='',
+            llm_response='',
+            last_action_results={103: True},
+        )
+
+        engine.plan(prompted)
+        engine.plan(answered)
+        engine.plan(feedback, request_started_at=0.0)
+
+        session = engine._sessions.get(self.day.our.team_id)
+        self.assertEqual(session.task_state.sops[0].answer, '42')
 
     def test_phase_3_failures_fall_back_atomically_and_cache_result(self) -> None:
         failures = (

@@ -4,6 +4,7 @@ from inspect import Parameter, signature
 from threading import RLock
 from time import monotonic, perf_counter_ns
 
+from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.time import Phase
@@ -47,6 +48,7 @@ from .simulation.search import (
 )
 from .simulation.trigger import select_phase3_level
 from .task_agent import EMPTY_TASK_STATE, TaskAgent
+from .treasure import EMPTY_TREASURE_STATE, TreasureAgent
 from .world import WorldGrid
 
 
@@ -70,6 +72,7 @@ class StrategyEngine:
         objective_provider: ObjectiveProvider | None = None,
         director: StrategicDirector | None = None,
         task_agent: TaskAgent | None = None,
+        treasure_agent: TreasureAgent | None = None,
         memory_store: MatchMemoryStore | None = None,
         clock: Callable[[], float] = monotonic,
         session_store: SessionStore | None = None,
@@ -112,6 +115,9 @@ class StrategyEngine:
         self._objective_provider = objective_provider
         self._director = director if director is not None else StrategicDirector()
         self._task_agent = task_agent if task_agent is not None else TaskAgent()
+        self._treasure_agent = (
+            treasure_agent if treasure_agent is not None else TreasureAgent()
+        )
         self._memory = (
             memory_store if memory_store is not None else MatchMemoryStore()
         )
@@ -655,6 +661,37 @@ class StrategyEngine:
             if previous_for_director is not None
             else EMPTY_TASK_STATE
         )
+        previous_treasure_state = (
+            previous.treasure_state
+            if previous is not None
+            and signature == previous.signature
+            and observation.time.round_no > previous.last_round
+            else None
+        )
+        treasure_state = previous_treasure_state
+        try:
+            task_state = self._task_agent.reconcile(observation, task_state)
+        except Exception:
+            self._telemetry.set(fallback_used=True)
+            LOGGER.exception(
+                'Task feedback reconciliation failed for team %s round %s',
+                team_id,
+                observation.time.round_no,
+            )
+        try:
+            treasure_state = self._treasure_agent.reconcile(
+                observation,
+                treasure_state,
+            )
+        except Exception:
+            self._telemetry.set(fallback_used=True)
+            LOGGER.exception(
+                'Treasure feedback reconciliation failed for team %s round %s',
+                team_id,
+                observation.time.round_no,
+            )
+            if treasure_state is None:
+                treasure_state = EMPTY_TREASURE_STATE
         if not governor_emergency:
             try:
                 with self._telemetry.measure('task_ms'):
@@ -666,6 +703,21 @@ class StrategyEngine:
                     )
                 decision = task_result.decision
                 task_state = task_result.state
+                pending_candidate = next(
+                    (
+                        candidate
+                        for candidate in task_state.candidates
+                        if candidate.answer == task_state.pending_answer
+                    ),
+                    None,
+                )
+                self._telemetry.set(
+                    task_candidate_count=len(task_state.candidates),
+                    task_sop_hit=(
+                        pending_candidate is not None
+                        and pending_candidate.source == 'sop'
+                    ),
+                )
             except Exception:
                 self._telemetry.set(fallback_used=True)
                 LOGGER.exception(
@@ -673,7 +725,35 @@ class StrategyEngine:
                     team_id,
                     observation.time.round_no,
                 )
-                task_state = EMPTY_TASK_STATE
+            try:
+                with self._telemetry.measure('treasure_ms'):
+                    treasure_result = self._treasure_agent.apply(
+                        observation,
+                        decision,
+                        intent,
+                        previous_state=treasure_state,
+                        task_active=bool(
+                            task_state.active_task_type
+                            or observation.phase_task.strip()
+                        ),
+                    )
+                decision = treasure_result.decision
+                treasure_state = treasure_result.state
+                self._telemetry.set(
+                    treasure_candidate_count=len(treasure_state.candidates),
+                    treasure_attempted=any(
+                        action.kind is ActionKind.SUMMON_TREASURE
+                        for action in decision.commands.values()
+                    ),
+                    treasure_result=observation.last_summon_treasure_result,
+                )
+            except Exception:
+                self._telemetry.set(fallback_used=True)
+                LOGGER.exception(
+                    'Phase 5 treasure agent failed; using task decision for team %s round %s',
+                    team_id,
+                    observation.time.round_no,
+                )
 
         if fresh_certificate is not None or night_forecast is not None:
             try:
@@ -704,6 +784,7 @@ class StrategyEngine:
                 director_state=director_state,
                 intent=intent,
                 task_state=task_state,
+                treasure_state=treasure_state,
                 night_forecast=night_forecast,
             )
         )

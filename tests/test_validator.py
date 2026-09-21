@@ -6,7 +6,7 @@ from pathlib import Path
 from future_war_agent.decision.actions import Action
 from future_war_agent.decision.decision import Decision
 from future_war_agent.decision.validator import validate_decision
-from future_war_agent.protocol.models import Position
+from future_war_agent.protocol.models import Position, ShopItem, Zone
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.protocol.time import TurnTime
 
@@ -175,6 +175,87 @@ class ValidatorTests(unittest.TestCase):
         )
 
         self.assertEqual(validated.commands, {})
+
+    def test_treasure_requires_items_in_pioneer_backpack(self) -> None:
+        source = next(
+            unit for unit in self.observed.our.units if unit.role_type == 'worker'
+        )
+        pioneer = replace(source, role_type='pioneer', backpack=())
+        observed = replace(
+            self.observed,
+            our=replace(
+                self.observed.our,
+                units=tuple(
+                    pioneer if unit.unit_id == source.unit_id else unit
+                    for unit in self.observed.our.units
+                ),
+            ),
+        )
+        nearby_target = Position(pioneer.position.x + 1, pioneer.position.y)
+        action = Action.summon_treasure(nearby_target, ('StarSand',))
+        missing = validate_decision(
+            observed,
+            Decision(commands={pioneer.unit_id: action}),
+        )
+        stocked_observation = replace(
+            observed,
+            our=replace(
+                observed.our,
+                units=tuple(
+                    replace(unit, backpack=('StarSand',))
+                    if unit.unit_id == pioneer.unit_id
+                    else unit
+                    for unit in observed.our.units
+                ),
+            ),
+        )
+        stocked = validate_decision(
+            stocked_observation,
+            Decision(commands={pioneer.unit_id: action}),
+        )
+
+        self.assertNotIn(pioneer.unit_id, missing.commands)
+        self.assertIn(pioneer.unit_id, stocked.commands)
+
+        distant = validate_decision(
+            stocked_observation,
+            Decision(
+                commands={
+                    pioneer.unit_id: Action.summon_treasure(
+                        Position(0, 0),
+                        ('StarSand',),
+                    )
+                }
+            ),
+        )
+        self.assertNotIn(pioneer.unit_id, distant.commands)
+
+    def test_buy_requires_shop_inventory_capacity_and_aggregate_gold(self) -> None:
+        workers = tuple(
+            unit for unit in self.observed.our.units if unit.role_type == 'worker'
+        )[:2]
+        observed = replace(
+            self.observed,
+            zones=(Zone(workers[0].position, 'vendor'),),
+            vendor_shop=(ShopItem('StarSand', 60),),
+            our=replace(
+                self.observed.our,
+                gold=100,
+                units=tuple(
+                    replace(unit, position=workers[0].position)
+                    if unit.unit_id in {worker.unit_id for worker in workers}
+                    else unit
+                    for unit in self.observed.our.units
+                ),
+            ),
+        )
+        decision = Decision(
+            commands={worker.unit_id: Action.buy('StarSand', 1) for worker in workers}
+        )
+
+        validated = validate_decision(observed, decision)
+
+        self.assertEqual(len(validated.commands), 1)
 
 
 if __name__ == "__main__":

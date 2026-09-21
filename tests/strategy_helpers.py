@@ -80,6 +80,8 @@ def observation(
     tasks: Iterable[TaskPointState] = (),
     phase_task: str = '',
     llm_response: str = '',
+    last_summon_treasure_result: int = 0,
+    last_command_result: str = '',
     last_action_results: Mapping[int, bool] | None = None,
     total_score: int = 0,
     world_news: WorldNews = WorldNews(),
@@ -101,6 +103,8 @@ def observation(
         robots=tuple(robots),
         phase_task=phase_task,
         llm_response=llm_response,
+        last_summon_treasure_result=last_summon_treasure_result,
+        last_command_result=last_command_result,
         last_action_results=(
             {} if last_action_results is None else last_action_results
         ),

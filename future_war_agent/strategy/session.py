@@ -13,6 +13,7 @@ from .simulation.candidates import SimJointAction
 from .simulation.certificate import RobotWaveSafetyCertificate
 from .simulation.search import ScenarioWeights
 from .task_agent import EMPTY_TASK_STATE, TaskAgentState
+from .treasure import EMPTY_TREASURE_STATE, TreasureState
 
 
 class SessionContinuity(StrEnum):
@@ -37,6 +38,7 @@ class StrategySession:
     director_state: DirectorState | None = None
     intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT
     task_state: TaskAgentState = EMPTY_TASK_STATE
+    treasure_state: TreasureState = EMPTY_TREASURE_STATE
     night_forecast: NightForecast | None = None
 
 
