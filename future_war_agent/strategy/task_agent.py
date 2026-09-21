@@ -27,6 +27,9 @@ MAX_SOPS = 16
 MAX_TASK_TYPE_LENGTH = 128
 MAX_ANSWER_CANDIDATES = 16
 MAX_SUBMITTED_ANSWERS = 32
+DEFAULT_EXPECTED_SOLVE_ROUNDS = 10.0
+TASK_GOLD_POINT_WEIGHT = 0.1
+TASK_TRAVEL_COST_PER_ROUND = 0.25
 
 
 class CommandResultKind(StrEnum):
@@ -98,10 +101,10 @@ class AnswerCandidate:
 
 @dataclass(frozen=True, slots=True)
 class TaskAbandonPolicy:
-    margin: int = 500
+    margin: float = 5.0
     cooldown_rounds: int = 30
-    cooldown_cost_per_round: int = 20
-    time_cost_per_round: int = 1
+    cooldown_cost_per_round: float = 0.25
+    time_cost_per_round: float = 0.1
 
     def __post_init__(self) -> None:
         if min(
@@ -115,10 +118,10 @@ class TaskAbandonPolicy:
     def should_abandon(
         self,
         *,
-        continue_value: int | None,
-        alternative_value: int | None,
+        continue_value: float | None,
+        alternative_value: float | None,
         remaining_rounds: int | None,
-        survival_risk: int | None,
+        survival_risk: float | None,
     ) -> bool:
         if (
             continue_value is None
@@ -147,6 +150,8 @@ class TaskSop:
     task_template: str = ''
     sample_task: str = ''
     command_steps: int = 0
+    success_count: int = 1
+    solve_rounds_ewma: float = 1.0
 
     def __post_init__(self) -> None:
         if not self.task_type.strip() or not self.answer.strip():
@@ -159,13 +164,15 @@ class TaskSop:
             raise ValueError('task SOP sample is too long')
         if self.command_steps < 0:
             raise ValueError('task SOP command steps cannot be negative')
+        if self.success_count <= 0 or self.solve_rounds_ewma <= 0:
+            raise ValueError('task SOP statistics must be positive')
 
 
 @dataclass(frozen=True, slots=True)
 class TaskAgentState:
     active_task_type: str = ''
     selected_task_position: Position | None = None
-    selected_task_value: int | None = None
+    selected_task_value: float | None = None
     accepted_round: int | None = None
     timeout_rounds: int | None = None
     deadline_round: int | None = None
@@ -236,7 +243,7 @@ class TaskAgentResult:
 class _TaskCandidate:
     task: TaskPointState
     path: PathResult
-    value: int
+    value: float
 
     @property
     def sort_key(self) -> tuple[object, ...]:
@@ -385,6 +392,7 @@ class TaskAgent:
             selected = _select_task(
                 observation,
                 pioneer,
+                state,
                 excluded_task=(
                     state.abandoned_task_type,
                     state.abandoned_task_position,
@@ -669,13 +677,14 @@ def _continue_selected_task(
             _normalize_task_type(task.task_type) == state.active_task_type
             and task.position == state.selected_task_position
         ):
-            return _candidate_for_task(task, world, pioneer)
+            return _candidate_for_task(task, world, pioneer, state)
     return None
 
 
 def _select_task(
     observation: Observation,
     pioneer: UnitState,
+    state: TaskAgentState,
     *,
     excluded_task: tuple[str, Position | None] | None = None,
 ) -> _TaskCandidate | None:
@@ -687,7 +696,7 @@ def _select_task(
             task.position,
         ):
             continue
-        candidate = _candidate_for_task(task, world, pioneer)
+        candidate = _candidate_for_task(task, world, pioneer, state)
         if candidate is not None:
             candidates.append(candidate)
     return min(candidates, key=lambda item: item.sort_key) if candidates else None
@@ -717,7 +726,7 @@ def _should_abandon_active_task(
     alternatives = tuple(
         _task_abandon_value(candidate)
         for task in observation.our.tasks
-        for candidate in (_candidate_for_task(task, world, pioneer),)
+        for candidate in (_candidate_for_task(task, world, pioneer, state),)
         if candidate is not None
         and (
             task.position != state.selected_task_position
@@ -732,22 +741,15 @@ def _should_abandon_active_task(
     )
 
 
-def _task_abandon_value(candidate: _TaskCandidate) -> int:
-    task = candidate.task
-    timeout = task.timeout_rounds if task.timeout_rounds is not None else 100
-    urgency = max(0, 100 - min(timeout, 100))
-    return (
-        task.score_reward * 100
-        + task.gold_reward
-        + urgency
-        - candidate.path.cost * 10
-    )
+def _task_abandon_value(candidate: _TaskCandidate) -> float:
+    return candidate.value
 
 
 def _candidate_for_task(
     task: TaskPointState,
     world: WorldGrid,
     pioneer: UnitState,
+    state: TaskAgentState,
 ) -> _TaskCandidate | None:
     if (
         not task.is_valid
@@ -758,13 +760,27 @@ def _candidate_for_task(
     path = path_to_interaction(world, pioneer.position, task.position)
     if path is None:
         return None
-    timeout = task.timeout_rounds if task.timeout_rounds is not None else 1000
-    urgency = max(0, 100 - min(timeout, 100))
+    task_type = _normalize_task_type(task.task_type)
+    sop = next(
+        (value for value in state.sops if value.task_type == task_type),
+        None,
+    )
+    expected_solve_rounds = (
+        sop.solve_rounds_ewma
+        if sop is not None
+        else DEFAULT_EXPECTED_SOLVE_ROUNDS
+    )
+    completion_probability = 0.9 if sop is not None else 0.65
+    timeout = task.timeout_rounds
+    speed_bonus = (
+        5.0 * timeout / max(1.0, expected_solve_rounds)
+        if timeout is not None and timeout > 0
+        else 0.0
+    )
     value = (
-        task.score_reward * 10_000
-        + task.gold_reward * 100
-        + urgency
-        - path.cost * 10
+        completion_probability * (task.score_reward + speed_bonus)
+        + task.gold_reward * TASK_GOLD_POINT_WEIGHT
+        - path.cost * TASK_TRAVEL_COST_PER_ROUND
     )
     return _TaskCandidate(task, path, value)
 
@@ -823,15 +839,58 @@ def _reconcile_feedback(
         and pioneer_id in observation.last_action_results
     )
     sops = state.sops
-    if has_immediate_result and observation.last_action_results[pioneer_id]:
+    answer_was_rejected = any(
+        error.error_code == 2 for error in observation.errors
+    )
+    if (
+        has_immediate_result
+        and observation.last_action_results[pioneer_id]
+        and not answer_was_rejected
+    ):
         task_text = state.pending_task_text
+        task_template = _task_template(task_text) if task_text else ''
+        existing_sop = next(
+            (
+                sop
+                for sop in state.sops
+                if (
+                    sop.task_type,
+                    sop.task_template or sop.task_fingerprint,
+                )
+                == (
+                    state.pending_task_type,
+                    task_template or state.pending_task_fingerprint,
+                )
+            ),
+            None,
+        )
+        solve_rounds = max(
+            1,
+            observation.time.round_no
+            - (
+                state.accepted_round
+                if state.accepted_round is not None
+                else state.pending_round or observation.time.round_no - 1
+            ),
+        )
         learned = TaskSop(
             state.pending_task_type,
             state.pending_answer,
             task_fingerprint=state.pending_task_fingerprint,
-            task_template=_task_template(task_text) if task_text else '',
+            task_template=task_template,
             sample_task=task_text,
             command_steps=state.command_step,
+            success_count=(
+                existing_sop.success_count + 1
+                if existing_sop is not None
+                else 1
+            ),
+            solve_rounds_ewma=(
+                existing_sop.solve_rounds_ewma * 0.75
+                + solve_rounds * 0.25
+                if existing_sop is not None
+                else float(solve_rounds)
+            ),
         )
         sops = (
             learned,

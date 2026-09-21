@@ -9,6 +9,7 @@ from .joint_fire import plan_joint_fire
 from .jobs import generate_day_jobs
 from .joint import candidates_for_jobs, solve_joint
 from .layout import build_defensive_layout
+from .market import MarketView
 from .night import ControllerAssignment, generate_night_candidates
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .rules import DEFAULT_RULES, RulesConfig
@@ -28,6 +29,8 @@ def plan_turn(
     controller_assignments: tuple[ControllerAssignment, ...] | None = None,
     telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
     fortification_threats: tuple[Position, ...] = (),
+    expected_wall_losses: int = 0,
+    market_view: MarketView | None = None,
 ) -> Decision:
     world = WorldGrid.from_observation(observation, rules)
     if not world.friendly_roles:
@@ -73,7 +76,14 @@ def plan_turn(
         intent.build_plan,
         recent_threat_positions=fortification_threats,
     )
-    jobs = generate_day_jobs(observation, world, layout, intent)
+    jobs = generate_day_jobs(
+        observation,
+        world,
+        layout,
+        intent,
+        expected_wall_losses=expected_wall_losses,
+        market_view=market_view,
+    )
     candidates = {
         role.unit_id: candidates_for_jobs(
             observation,

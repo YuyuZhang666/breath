@@ -8,6 +8,7 @@ from future_war_agent.protocol.models import Observation, Position, UnitState
 from .director import DirectorState
 from .features import StrategyFeatures
 from .forecast import NightForecast
+from .market import EMPTY_MARKET_STATE, MarketState
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .simulation.candidates import SimJointAction
 from .simulation.certificate import RobotWaveSafetyCertificate
@@ -40,6 +41,7 @@ class StrategySession:
     task_state: TaskAgentState = EMPTY_TASK_STATE
     treasure_state: TreasureState = EMPTY_TREASURE_STATE
     night_forecast: NightForecast | None = None
+    market_state: MarketState = EMPTY_MARKET_STATE
 
 
 class SessionStore:

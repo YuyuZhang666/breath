@@ -22,6 +22,7 @@ from .forecast import (
     refresh_night_forecast,
 )
 from .items import has_item
+from .market import EMPTY_MARKET_STATE, MarketMemory, MarketView
 from .memory import MatchMemoryStore
 from .night import ControllerAssignment, ControllerAssignmentCache
 from .planner import plan_turn
@@ -82,6 +83,7 @@ class StrategyEngine:
         night_forecaster: NightForecaster = refresh_night_forecast,
         telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
         compute_governor: ComputeGovernor | None = None,
+        market_memory: MarketMemory | None = None,
     ) -> None:
         self._config = config
         self._phase2_planner = phase2_planner
@@ -120,6 +122,14 @@ class StrategyEngine:
             self._task_agent.apply,
             'force_survival_interrupt',
         )
+        self._phase2_accepts_expected_wall_losses = _accepts_keyword(
+            phase2_planner,
+            'expected_wall_losses',
+        )
+        self._phase2_accepts_market_view = _accepts_keyword(
+            phase2_planner,
+            'market_view',
+        )
         self._treasure_agent = (
             treasure_agent if treasure_agent is not None else TreasureAgent()
         )
@@ -144,6 +154,9 @@ class StrategyEngine:
             compute_governor
             if compute_governor is not None
             else ComputeGovernor()
+        )
+        self._market = (
+            market_memory if market_memory is not None else MarketMemory()
         )
         self._lock = RLock()
 
@@ -292,6 +305,37 @@ class StrategyEngine:
             and continuity is not SessionContinuity.DISCONTINUITY
             else None
         )
+        previous_market_state = (
+            previous.market_state
+            if previous is not None
+            and signature == previous.signature
+            and observation.time.round_no >= previous.last_round
+            else None
+        )
+        market_state = (
+            previous_market_state
+            if previous_market_state is not None
+            else EMPTY_MARKET_STATE
+        )
+        market_view: MarketView | None = None
+        try:
+            market_state = self._market.observe(
+                observation,
+                previous_market_state,
+            )
+            market_view = self._market.view(observation, market_state)
+            self._telemetry.set(
+                market_signal_count=len(market_state.signals),
+                market_hold_count=len(market_view.hold_items),
+                market_sell_count=len(market_view.sell_items),
+            )
+        except Exception:
+            self._telemetry.set(fallback_used=True)
+            LOGGER.exception(
+                'Market memory update failed for team %s round %s',
+                team_id,
+                observation.time.round_no,
+            )
         controller_assignments: tuple[ControllerAssignment, ...] | None = None
         controller_assignment_mode: str | None = None
         controller_assignment_exclusions: frozenset[int] | None = None
@@ -534,6 +578,12 @@ class StrategyEngine:
             intent,
             controller_assignments,
             fortification_threats,
+            (
+                night_forecast.expected_wall_losses
+                if night_forecast is not None
+                else 0
+            ),
+            market_view,
         )
         compute_usage.phase2_5_ms = max(0.0, float(
             self._telemetry.current('phase2_5_ms', 0.0)
@@ -878,6 +928,7 @@ class StrategyEngine:
                 task_state=task_state,
                 treasure_state=treasure_state,
                 night_forecast=night_forecast,
+                market_state=market_state,
             )
         )
         return decision
@@ -888,6 +939,8 @@ class StrategyEngine:
         intent: StrategicIntent,
         controller_assignments: tuple[ControllerAssignment, ...] | None = None,
         fortification_threats: tuple[Position, ...] = (),
+        expected_wall_losses: int = 0,
+        market_view: MarketView | None = None,
     ) -> Decision:
         kwargs: dict[str, object] = {}
         if self._phase2_accepts_intent:
@@ -898,6 +951,10 @@ class StrategyEngine:
             kwargs['telemetry'] = self._telemetry
         if self._phase2_accepts_fortification_threats:
             kwargs['fortification_threats'] = fortification_threats
+        if self._phase2_accepts_expected_wall_losses:
+            kwargs['expected_wall_losses'] = expected_wall_losses
+        if self._phase2_accepts_market_view:
+            kwargs['market_view'] = market_view
         try:
             with self._telemetry.measure('phase2_ms'):
                 return self._phase2_planner(observation, **kwargs)

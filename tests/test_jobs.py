@@ -1,7 +1,11 @@
 import unittest
 
 from future_war_agent.protocol.models import Position, ShopItem, Zone
-from future_war_agent.strategy.jobs import JobKind, generate_day_jobs
+from future_war_agent.strategy.jobs import (
+    JobKind,
+    calculate_stone_reserve,
+    generate_day_jobs,
+)
 from future_war_agent.strategy.layout import build_defensive_layout
 from future_war_agent.strategy.policy import (
     DayPriorities,
@@ -101,6 +105,108 @@ class DayJobTests(unittest.TestCase):
 
         mining = next(job for job in jobs[10010] if job.kind is JobKind.COLLECT)
         self.assertEqual(mining.name, "stone")
+
+    def test_reserved_stone_is_not_sold_when_backpack_is_full(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(
+                    10010,
+                    2,
+                    2,
+                    'worker',
+                    backpack_capacity=5,
+                    backpack=('stone',) * 5,
+                ),
+                unit(10013, 7, 7, 'station', level=1),
+                unit(10020, 6, 6, 'gatling', level=1),
+            ),
+            zones=(Zone(Position(3, 2), 'vendor'),),
+            vendor_shop=(ShopItem('stone', 1),),
+        )
+
+        jobs = self.jobs(observed)
+
+        self.assertFalse(
+            any(
+                job.kind is JobKind.SELL and job.name == 'stone'
+                for job in jobs[10010]
+            )
+        )
+
+    def test_only_stone_above_reserve_is_sold(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(
+                    10010,
+                    2,
+                    2,
+                    'worker',
+                    backpack_capacity=7,
+                    backpack=('stone',) * 7,
+                ),
+                unit(10013, 7, 7, 'station', level=1),
+                unit(10020, 6, 6, 'gatling', level=1),
+            ),
+            zones=(Zone(Position(3, 2), 'vendor'),),
+            vendor_shop=(ShopItem('stone', 1),),
+        )
+
+        jobs = self.jobs(observed)
+
+        sale = next(
+            job
+            for job in jobs[10010]
+            if job.kind is JobKind.SELL and job.name == 'stone'
+        )
+        self.assertEqual(sale.quantity, 2)
+
+    def test_sufficient_stone_stock_does_not_force_more_stone_mining(
+        self,
+    ) -> None:
+        observed = observation(
+            our_units=(
+                unit(
+                    10010,
+                    2,
+                    2,
+                    'worker',
+                    backpack=('stone',) * 5,
+                ),
+                unit(10013, 7, 7, 'station', level=1),
+                unit(10020, 6, 6, 'gatling', level=1),
+            ),
+            zones=(
+                Zone(Position(3, 2), 'stone'),
+                Zone(Position(2, 4), 'copper'),
+            ),
+            vendor_shop=(ShopItem('stone', 1), ShopItem('copper', 20)),
+        )
+
+        jobs = self.jobs(observed)
+
+        mining = next(
+            job for job in jobs[10010] if job.kind is JobKind.COLLECT
+        )
+        self.assertEqual(mining.name, 'copper')
+
+    def test_forecast_wall_losses_raise_stone_reserve(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 2, 'worker'),
+                unit(10013, 7, 7, 'station', level=1),
+            ),
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+
+        reserve = calculate_stone_reserve(
+            world,
+            layout,
+            StrategicIntent(),
+            expected_wall_losses=8,
+        )
+
+        self.assertEqual(reserve, 8)
 
     def test_first_weapon_precedes_walls(self) -> None:
         observed = observation(

@@ -4,7 +4,12 @@ from hashlib import sha256
 
 from future_war_agent.decision.actions import Action, ActionKind
 from future_war_agent.decision.decision import Decision
-from future_war_agent.protocol.models import Position, TaskPointState, WorldNews
+from future_war_agent.protocol.models import (
+    GameError,
+    Position,
+    TaskPointState,
+    WorldNews,
+)
 from future_war_agent.protocol.time import TurnTime
 from future_war_agent.strategy.policy import (
     RuleFeatureFlags,
@@ -370,6 +375,67 @@ class TaskAgentTests(unittest.TestCase):
         self.assertEqual(reconciled.sops[0].answer, '42')
         self.assertEqual(reconciled.active_task_type, '')
 
+    def test_legal_but_wrong_answer_is_not_learned_as_sop(self) -> None:
+        state = TaskAgentState(
+            active_task_type='math',
+            pending_task_type='math',
+            pending_answer='41',
+            pending_pioneer_id=2,
+            pending_round=2,
+            pending_task_text='Return the sum of 20 and 22.',
+        )
+        observed = replace(
+            observation(
+                round_no=3,
+                our_units=(unit(2, 1, 1, 'pioneer'),),
+                last_action_results={2: True},
+            ),
+            errors=(GameError(2, 'answer incorrect'),),
+        )
+
+        reconciled = TaskAgent().reconcile(observed, state)
+
+        self.assertEqual(reconciled.sops, ())
+        self.assertEqual(reconciled.completed_task_fingerprint, '')
+
+    def test_equal_reward_task_prefers_faster_validated_sop_type(
+        self,
+    ) -> None:
+        observed = observation(
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            tasks=(
+                task('slow', 2, 1, score=50, timeout=20),
+                task('fast', 1, 2, score=50, timeout=20),
+            ),
+        )
+        state = TaskAgentState(
+            sops=(
+                TaskSop(
+                    'slow',
+                    'answer',
+                    solve_rounds_ewma=8.0,
+                ),
+                TaskSop(
+                    'fast',
+                    'answer',
+                    solve_rounds_ewma=2.0,
+                ),
+            ),
+        )
+
+        result = TaskAgent().apply(
+            observed,
+            Decision(),
+            SCORE_INTENT,
+            previous_state=state,
+        )
+
+        self.assertEqual(result.state.active_task_type, 'fast')
+        self.assertEqual(
+            result.decision.commands[2].kind,
+            ActionKind.ACCEPT_TASK,
+        )
+
     def test_success_feedback_does_not_resubmit_if_phase_task_lingers(self) -> None:
         task_text = 'Return the sum of 20 and 22.'
         state = TaskAgentState(
@@ -399,7 +465,11 @@ class TaskAgentTests(unittest.TestCase):
         self.assertTrue(result.state.completed_task_fingerprint)
 
     def test_task_abandon_policy_is_margin_guarded(self) -> None:
-        policy = TaskAbandonPolicy(margin=100, cooldown_rounds=30)
+        policy = TaskAbandonPolicy(
+            margin=100,
+            cooldown_rounds=30,
+            cooldown_cost_per_round=20,
+        )
 
         self.assertFalse(
             policy.should_abandon(
@@ -423,7 +493,7 @@ class TaskAgentTests(unittest.TestCase):
         state = TaskAgentState(
             active_task_type='current',
             selected_task_position=Position(2, 2),
-            selected_task_value=100,
+            selected_task_value=10,
             timeout_rounds=1,
         )
         abandoned = agent.apply(

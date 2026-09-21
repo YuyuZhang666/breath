@@ -88,11 +88,173 @@ class TreasureStrategyTests(unittest.TestCase):
             base,
         )
 
-        self.assertIn(1, wrong_place.candidates[0].invalid_days)
+        self.assertEqual(wrong_place.candidates[0].invalid_days, frozenset())
+        self.assertIn((2, 2, 1), wrong_place.failed_position_times)
         self.assertEqual(wrong_items.candidates[0].item_conflicts, 1)
+        self.assertIn(('starsand',), wrong_items.failed_item_multisets)
         self.assertTrue(depleted.candidates[0].depleted)
         self.assertEqual(ignored.candidates, base.candidates)
         self.assertEqual(ignored.pending_candidate_key, '')
+
+    def test_explicit_natural_language_clue_is_parsed_conservatively(
+        self,
+    ) -> None:
+        clues = parse_treasure_clues(
+            'Coordinate: (2, 3); items: StarSand, MoonDust; '
+            'day 2; confidence: 0.9',
+            width=10,
+            height=10,
+        )
+
+        self.assertEqual(len(clues), 1)
+        self.assertEqual(clues[0].position, Position(2, 3))
+        self.assertEqual(clues[0].items, ('StarSand', 'MoonDust'))
+        self.assertEqual(clues[0].opening_days, (2,))
+        self.assertEqual(parse_treasure_clues('somewhere west', 10, 10), ())
+
+    def test_result_two_blocks_only_exact_attempt_turn(self) -> None:
+        attempted = candidate(attempt_count=1, last_attempt_evidence_revision=1)
+        pending = TreasureState(
+            candidates=(attempted,),
+            pending_candidate_key=attempted.key,
+            pending_round=1,
+            pending_day=1,
+            evidence_revision=1,
+            attempt_count=1,
+            last_attempt_evidence_revision=1,
+        )
+        failed = TreasureAgent().reconcile(
+            observation(round_no=2, last_summon_treasure_result=2),
+            pending,
+        )
+        refreshed_candidate = replace(
+            failed.candidates[0],
+            confidence=0.9,
+            evidence_revision=2,
+        )
+        refreshed = replace(
+            failed,
+            candidates=(refreshed_candidate,),
+            evidence_revision=2,
+        )
+        enabled = intent_for_profile(
+            StrategyProfile.SCORE,
+            'verified retry',
+            feature_flags=RuleFeatureFlags(enable_treasure_retry=True),
+        )
+        observed = observation(
+            round_no=3,
+            our_units=(
+                unit(
+                    2,
+                    2,
+                    1,
+                    'pioneer',
+                    backpack=('StarSand',),
+                    backpack_capacity=10,
+                ),
+            ),
+        )
+
+        result = TreasureAgent().apply(
+            observed,
+            Decision(),
+            enabled,
+            previous_state=refreshed,
+        )
+
+        self.assertEqual(
+            result.decision.commands[2].kind,
+            ActionKind.SUMMON_TREASURE,
+        )
+
+    def test_result_three_blocks_item_multiset_across_new_candidates(
+        self,
+    ) -> None:
+        attempted = candidate(
+            items=('MoonDust', 'StarSand'),
+            attempt_count=1,
+            last_attempt_evidence_revision=1,
+        )
+        pending = TreasureState(
+            candidates=(attempted,),
+            pending_candidate_key=attempted.key,
+            pending_round=1,
+            pending_day=1,
+            evidence_revision=1,
+            attempt_count=1,
+            last_attempt_evidence_revision=1,
+        )
+        failed = TreasureAgent().reconcile(
+            observation(round_no=2, last_summon_treasure_result=3),
+            pending,
+        )
+        alternate = candidate(
+            position=Position(3, 2),
+            items=('StarSand', 'MoonDust'),
+            evidence_revision=2,
+        )
+        refreshed = replace(
+            failed,
+            candidates=(alternate, *failed.candidates),
+            evidence_revision=2,
+        )
+        enabled = intent_for_profile(
+            StrategyProfile.SCORE,
+            'verified retry',
+            feature_flags=RuleFeatureFlags(enable_treasure_retry=True),
+        )
+        observed = observation(
+            round_no=3,
+            our_units=(
+                unit(
+                    2,
+                    3,
+                    1,
+                    'pioneer',
+                    backpack=('StarSand', 'MoonDust'),
+                    backpack_capacity=10,
+                ),
+            ),
+        )
+
+        result = TreasureAgent().apply(
+            observed,
+            Decision(),
+            enabled,
+            previous_state=refreshed,
+        )
+
+        self.assertNotIn(2, result.decision.commands)
+
+    def test_saturated_negative_evidence_disables_automatic_attempts(
+        self,
+    ) -> None:
+        observed = observation(
+            our_units=(
+                unit(
+                    2,
+                    2,
+                    1,
+                    'pioneer',
+                    backpack=('StarSand',),
+                    backpack_capacity=10,
+                ),
+            ),
+        )
+        state = TreasureState(
+            candidates=(candidate(),),
+            negative_evidence_saturated=True,
+        )
+
+        result = TreasureAgent().apply(
+            observed,
+            Decision(),
+            SCORE_INTENT,
+            previous_state=state,
+        )
+
+        self.assertNotIn(2, result.decision.commands)
 
     def test_initial_high_confidence_attempt_is_emitted_once(self) -> None:
         observed = observation(

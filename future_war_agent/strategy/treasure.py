@@ -2,6 +2,8 @@ from collections import Counter
 from dataclasses import dataclass, replace
 from hashlib import sha256
 import json
+import re
+from typing import TypeVar
 
 from future_war_agent.decision.actions import Action, ActionKind
 from future_war_agent.decision.decision import Decision
@@ -16,8 +18,10 @@ from .world import WorldGrid
 MAX_TREASURE_CANDIDATES = 16
 MAX_TREASURE_EVIDENCE = 16
 MAX_TREASURE_NEWS = 16
+MAX_TREASURE_NEGATIVE_EVIDENCE = 64
 ATTEMPT_CONFIDENCE = 0.85
 LAST_WINDOW_CONFIDENCE = 0.65
+_EvidenceT = TypeVar('_EvidenceT')
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +122,9 @@ class TreasureState:
     processed_news: tuple[str, ...] = ()
     processed_results: tuple[str, ...] = ()
     rumors: tuple[str, ...] = ()
+    failed_position_times: tuple[tuple[int, int, int], ...] = ()
+    failed_item_multisets: tuple[tuple[str, ...], ...] = ()
+    negative_evidence_saturated: bool = False
 
     def __post_init__(self) -> None:
         if len(self.candidates) > MAX_TREASURE_CANDIDATES:
@@ -128,6 +135,11 @@ class TreasureState:
             raise ValueError('treasure result capacity exceeded')
         if len(self.rumors) > MAX_TREASURE_NEWS:
             raise ValueError('treasure rumor capacity exceeded')
+        if (
+            len(self.failed_position_times) > MAX_TREASURE_NEGATIVE_EVIDENCE
+            or len(self.failed_item_multisets) > MAX_TREASURE_NEGATIVE_EVIDENCE
+        ):
+            raise ValueError('treasure negative evidence capacity exceeded')
 
 
 EMPTY_TREASURE_STATE = TreasureState()
@@ -150,7 +162,8 @@ def parse_treasure_clues(
     try:
         decoded = json.loads(text)
     except (json.JSONDecodeError, TypeError, ValueError):
-        return ()
+        clue = _parse_natural_clue(text, width, height)
+        return (clue,) if clue is not None else ()
     if isinstance(decoded, dict) and 'treasure' in decoded:
         decoded = decoded['treasure']
     records = decoded if isinstance(decoded, list) else [decoded]
@@ -332,6 +345,87 @@ def _parse_clue_record(
     )
 
 
+def _parse_natural_clue(
+    text: str,
+    width: int,
+    height: int,
+) -> TreasureClue | None:
+    position_match = re.search(
+        r'(?:coordinate|position|坐标|位置|祭坛)'
+        r'\s*(?:is|at|为|是|=|:|：)?\s*'
+        r'[\(（\[]?\s*(\d+)\s*[,，]\s*(\d+)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if position_match is None:
+        return None
+    x, y = (int(position_match.group(1)), int(position_match.group(2)))
+    if not 0 <= x < width or not 0 <= y < height:
+        return None
+
+    item_match = re.search(
+        r'(?:items?|offerings?|祭品|物品)'
+        r'\s*(?:are|is|为|是|=|:|：)\s*'
+        r'([^;；。\n]+)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    if item_match is None:
+        return None
+    raw_items = re.split(
+        r'(?:\bday\s*\d+|第\s*\d+\s*天|'
+        r'\bconfidence\b|置信度|\bcoordinate\b|\bposition\b|坐标|位置)',
+        item_match.group(1),
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    items = tuple(
+        dict.fromkeys(
+            item.strip().strip('[](){}"\' ')
+            for item in re.split(r'[,，、|+]', raw_items)
+            if item.strip().strip('[](){}"\' ')
+        )
+    )
+    if (
+        not items
+        or len(items) > 8
+        or any(len(item) > 64 for item in items)
+    ):
+        return None
+
+    days = tuple(
+        sorted(
+            {
+                int(english or chinese)
+                for english, chinese in re.findall(
+                    r'\bday\s*(\d+)\b|第\s*(\d+)\s*天',
+                    text,
+                    flags=re.IGNORECASE,
+                )
+            }
+        )
+    )
+    if not days or any(day <= 0 for day in days):
+        return None
+    confidence_match = re.search(
+        r'(?:confidence|置信度)\s*(?:=|:|：)?\s*(0(?:\.\d+)?|1(?:\.0+)?)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    confidence = (
+        float(confidence_match.group(1))
+        if confidence_match is not None
+        else ATTEMPT_CONFIDENCE
+    )
+    return TreasureClue(
+        position=Position(x, y),
+        items=items,
+        opening_days=days,
+        confidence=confidence,
+        evidence=text[:512],
+    )
+
+
 def _observe_folk_legend(
     observation: Observation,
     state: TreasureState,
@@ -435,6 +529,9 @@ def _reconcile_result(
     last_failed_position = state.last_failed_position
     last_failed_items = state.last_failed_items
     last_failed_days = state.last_failed_days
+    failed_position_times = state.failed_position_times
+    failed_item_multisets = state.failed_item_multisets
+    negative_evidence_saturated = state.negative_evidence_saturated
     if result == 1:
         completed = True
     elif candidate is not None and result == 2:
@@ -442,13 +539,22 @@ def _reconcile_result(
         last_failed_position = candidate.position
         last_failed_items = candidate.items
         last_failed_days = candidate.opening_days
+        failed_position_times, saturated = _append_negative_evidence(
+            failed_position_times,
+            (
+                candidate.position.x,
+                candidate.position.y,
+                state.pending_round,
+            ),
+        )
+        negative_evidence_saturated = (
+            negative_evidence_saturated or saturated
+        )
         candidate = replace(
             candidate,
             confidence=max(0.0, candidate.confidence - 0.25),
-            invalid_days=candidate.invalid_days
-            | ({state.pending_day} if state.pending_day is not None else set()),
             conflict_evidence=(
-                f'result:2:day:{state.pending_day}',
+                f'result:2:round:{state.pending_round}',
                 *candidate.conflict_evidence,
             )[:MAX_TREASURE_EVIDENCE],
         )
@@ -458,6 +564,13 @@ def _reconcile_result(
         last_failed_position = candidate.position
         last_failed_items = candidate.items
         last_failed_days = candidate.opening_days
+        failed_item_multisets, saturated = _append_negative_evidence(
+            failed_item_multisets,
+            _item_multiset(candidate.items),
+        )
+        negative_evidence_saturated = (
+            negative_evidence_saturated or saturated
+        )
         candidate = replace(
             candidate,
             confidence=max(0.0, candidate.confidence - 0.25),
@@ -486,6 +599,9 @@ def _reconcile_result(
         last_failed_position=last_failed_position,
         last_failed_items=last_failed_items,
         last_failed_days=last_failed_days,
+        failed_position_times=failed_position_times,
+        failed_item_multisets=failed_item_multisets,
+        negative_evidence_saturated=negative_evidence_saturated,
         processed_results=(result_key, *state.processed_results)[
             :MAX_TREASURE_NEWS
         ],
@@ -516,7 +632,10 @@ def _select_candidate(
     intent: StrategicIntent,
     state: TreasureState,
 ) -> TreasureCandidate | None:
-    if state.reward.score + state.reward.gold <= 0:
+    if (
+        state.reward.score + state.reward.gold <= 0
+        or state.negative_evidence_saturated
+    ):
         return None
     attempt_count = max(state.attempt_count, _attempt_count(state))
     eligible: list[TreasureCandidate] = []
@@ -532,23 +651,20 @@ def _select_candidate(
             or day not in candidate.opening_days
             or day in candidate.invalid_days
             or candidate.confidence < threshold
+            or (
+                candidate.position.x,
+                candidate.position.y,
+                observation.time.round_no,
+            )
+            in state.failed_position_times
+            or _item_multiset(candidate.items)
+            in state.failed_item_multisets
         ):
             continue
         if attempt_count > 0:
             if not intent.feature_flags.enable_treasure_retry:
                 continue
             if state.evidence_revision <= state.last_attempt_evidence_revision:
-                continue
-            if (
-                state.last_failure_code == 2
-                and candidate.position == state.last_failed_position
-                and candidate.opening_days == state.last_failed_days
-            ):
-                continue
-            if (
-                state.last_failure_code == 3
-                and candidate.items == state.last_failed_items
-            ):
                 continue
         eligible.append(candidate)
     return (
@@ -570,6 +686,21 @@ def _select_candidate(
 
 def _attempt_count(state: TreasureState) -> int:
     return max((value.attempt_count for value in state.candidates), default=0)
+
+
+def _item_multiset(items: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(sorted(item.casefold() for item in items))
+
+
+def _append_negative_evidence(
+    evidence: tuple[_EvidenceT, ...],
+    value: _EvidenceT,
+) -> tuple[tuple[_EvidenceT, ...], bool]:
+    if value in evidence:
+        return evidence, False
+    if len(evidence) >= MAX_TREASURE_NEGATIVE_EVIDENCE:
+        return evidence, True
+    return (value, *evidence), False
 
 
 def _living_pioneer(observation: Observation) -> UnitState | None:

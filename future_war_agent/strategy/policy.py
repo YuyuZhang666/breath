@@ -42,6 +42,7 @@ class BuildPlan:
     critical_wall_priority_boost: int = 75
     threat_wall_priority_boost: int = 30
     max_wall_job_candidates: int = 4
+    minimum_wall_stock: int = 5
 
     def __post_init__(self) -> None:
         if any(not name.strip() for name in self.weapon_loadout):
@@ -60,6 +61,8 @@ class BuildPlan:
             raise ValueError('threat_wall_priority_boost cannot be negative')
         if self.max_wall_job_candidates <= 0:
             raise ValueError('max_wall_job_candidates must be positive')
+        if self.minimum_wall_stock < 0:
+            raise ValueError('minimum_wall_stock cannot be negative')
 
 
 @dataclass(frozen=True, slots=True)

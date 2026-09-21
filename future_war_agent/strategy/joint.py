@@ -30,6 +30,8 @@ class TacticalCandidate:
     gold_cost: int = 0
     stone_cost: int = 0
     reserve_eligible: bool = False
+    utility: float = 0.0
+    exclusive_job_key: tuple[JobKind, Position] | None = None
 
     @classmethod
     def wait(cls, role_id: int, start: Position) -> "TacticalCandidate":
@@ -52,6 +54,7 @@ class TacticalCandidate:
         gold_cost: int = 0,
         stone_cost: int = 0,
         reserve_eligible: bool = False,
+        utility: float = 0.0,
     ) -> "TacticalCandidate":
         kind = JobKind.BUILD_WALL if name == "wall" else JobKind.BUILD_WEAPON
         return cls(
@@ -67,6 +70,12 @@ class TacticalCandidate:
             gold_cost=gold_cost,
             stone_cost=stone_cost,
             reserve_eligible=reserve_eligible,
+            utility=utility,
+            exclusive_job_key=(
+                (JobKind.BUILD_WALL, target)
+                if kind is JobKind.BUILD_WALL
+                else None
+            ),
         )
 
     @classmethod
@@ -99,6 +108,7 @@ class TacticalCandidate:
         priority: int,
         *,
         gold_cost: int = 0,
+        utility: float = 0.0,
     ) -> 'TacticalCandidate':
         return cls(
             role_id=role_id,
@@ -110,6 +120,7 @@ class TacticalCandidate:
             completes_job=True,
             progress=1,
             gold_cost=gold_cost,
+            utility=utility,
         )
 
 
@@ -163,6 +174,7 @@ def candidates_for_jobs(
                                 else 0
                             ),
                             reserve_eligible=job.reserve_eligible,
+                            utility=job.value,
                         )
                     )
             else:
@@ -188,6 +200,7 @@ def candidates_for_jobs(
                                 job.kind,
                                 job.priority,
                                 gold_cost=price * job.quantity,
+                                utility=job.value,
                             )
                         )
             else:
@@ -202,6 +215,7 @@ def candidates_for_jobs(
                     Action.use(job.name),
                     job.kind,
                     job.priority,
+                    utility=job.value,
                 )
             )
 
@@ -213,6 +227,7 @@ def candidates_for_jobs(
         key=lambda item: (
             -item.priority,
             -item.completes_job,
+            -item.utility,
             -item.progress,
             item.command_actor_id,
             repr(item.action),
@@ -282,6 +297,13 @@ def is_valid_joint(
     if len(set(build_targets)) != len(build_targets):
         return False
     if set(build_targets).intersection(move_targets):
+        return False
+    exclusive_job_keys = tuple(
+        item.exclusive_job_key
+        for item in joint
+        if item.exclusive_job_key is not None
+    )
+    if len(set(exclusive_job_keys)) != len(exclusive_job_keys):
         return False
     if gold_reserve < 0:
         return False
@@ -376,6 +398,7 @@ def solve_joint(
         score: tuple[object, ...] = (
             sum(item.priority for item in joint),
             sum(item.completes_job for item in joint),
+            sum(item.utility for item in joint),
             sum(item.progress for item in joint),
             sum(item.action is not None for item in joint),
             tuple(
@@ -415,6 +438,12 @@ def _move_candidates(
             move_target=target,
             priority=job.priority,
             progress=1,
+            utility=job.value,
+            exclusive_job_key=(
+                (JobKind.BUILD_WALL, job.target)
+                if job.kind is JobKind.BUILD_WALL
+                else None
+            ),
         )
         for target in first_step_options(world, role.position, goals, limit=2)
     ]
@@ -430,6 +459,7 @@ def _direct(role: UnitState, job: Job, action: Action) -> TacticalCandidate:
         priority=job.priority,
         completes_job=True,
         progress=1,
+        utility=job.value,
     )
 
 

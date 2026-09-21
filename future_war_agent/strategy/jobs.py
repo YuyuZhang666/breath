@@ -8,6 +8,7 @@ from future_war_agent.protocol.models import Observation, Position, UnitState
 
 from .items import count_item, has_item
 from .layout import DefensiveLayout
+from .market import MarketView, PriceDirection
 from .pathfinding import path_to_interaction
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .world import WorldGrid
@@ -62,6 +63,9 @@ def generate_day_jobs(
     world: WorldGrid,
     layout: DefensiveLayout,
     intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
+    *,
+    expected_wall_losses: int = 0,
+    market_view: MarketView | None = None,
 ) -> Mapping[int, tuple[Job, ...]]:
     priorities = intent.day_priorities
     roles = tuple(sorted(world.friendly_roles, key=lambda value: value.unit_id))
@@ -92,6 +96,22 @@ def generate_day_jobs(
         for position in layout.wall_sites
         if position not in existing_wall_positions
     ) if intent.build_plan.build_walls else ()
+    stone_reserve = calculate_stone_reserve(
+        world,
+        layout,
+        intent,
+        expected_wall_losses=expected_wall_losses,
+    )
+    reserved_stone_by_worker = _stone_reserve_by_worker(
+        workers,
+        world,
+        missing_wall_sites,
+        stone_reserve,
+    )
+    current_stone = sum(
+        count_item(worker.backpack, world.rules.wall_material)
+        for worker in workers
+    )
 
     for role in roles:
         policy = intent.item_policy
@@ -175,14 +195,12 @@ def generate_day_jobs(
                         )
                     )
 
-        full = (
-            worker.backpack_capacity > 0
-            and len(worker.backpack) >= worker.backpack_capacity
-        )
-        sale_needed = full or (
+        near_full = _backpack_near_full(worker)
+        defense_funding_needed = (
             bool(missing_weapon_sites)
             and observation.our.gold < world.rules.weapon_build_cost
         )
+        sale_needed = near_full or defense_funding_needed
         if sale_needed:
             _add_sell_jobs(
                 result[worker.unit_id],
@@ -190,6 +208,12 @@ def generate_day_jobs(
                 observation,
                 world,
                 priority=priorities.sell,
+                reserved_stone=reserved_stone_by_worker.get(
+                    worker.unit_id,
+                    0,
+                ),
+                market_view=market_view,
+                allow_held_sale=defense_funding_needed,
             )
         if worker.unit_id in medicine_buyer_ids:
             _add_medicine_purchase_jobs(
@@ -199,14 +223,18 @@ def generate_day_jobs(
                 world,
                 intent,
             )
-        if not full and intent.allow_mining:
+        if not near_full and intent.allow_mining:
             _add_mining_jobs(
                 result[worker.unit_id],
                 worker,
                 observation,
                 world,
-                walls_missing=bool(missing_wall_sites),
+                stone_needed=(
+                    bool(missing_wall_sites)
+                    and current_stone < stone_reserve
+                ),
                 priority=priorities.collect,
+                market_view=market_view,
             )
 
     for pioneer in pioneers:
@@ -274,17 +302,50 @@ def _add_sell_jobs(
     world: WorldGrid,
     *,
     priority: int,
+    reserved_stone: int = 0,
+    market_view: MarketView | None = None,
+    allow_held_sale: bool = False,
 ) -> None:
     backpack = Counter(worker.backpack)
     prices = {item.name: item.price for item in observation.vendor_shop}
     sale_options = tuple(
         sorted(
             (
-                (name, count, prices[name] * count)
+                (
+                    name,
+                    (
+                        max(0, count - reserved_stone)
+                        if name == world.rules.wall_material
+                        else count
+                    ),
+                    prices[name]
+                    * (
+                        max(0, count - reserved_stone)
+                        if name == world.rules.wall_material
+                        else count
+                    ),
+                )
                 for name, count in backpack.items()
-                if count > 0 and name in prices
+                if count > 0
+                and name in prices
+                and (
+                    allow_held_sale
+                    or market_view is None
+                    or name.casefold() not in market_view.hold_items
+                )
+                and (
+                    name != world.rules.wall_material
+                    or count > reserved_stone
+                )
             ),
-            key=lambda value: (-value[2], value[0]),
+            key=lambda value: (
+                not (
+                    market_view is not None
+                    and value[0].casefold() in market_view.sell_items
+                ),
+                -value[2],
+                value[0],
+            ),
         )
     )
     if not sale_options:
@@ -386,8 +447,9 @@ def _add_mining_jobs(
     observation: Observation,
     world: WorldGrid,
     *,
-    walls_missing: bool,
+    stone_needed: bool,
     priority: int,
+    market_view: MarketView | None = None,
 ) -> None:
     prices = {item.name: item.price for item in observation.vendor_shop}
     for zone in observation.zones:
@@ -397,7 +459,13 @@ def _add_mining_jobs(
         if path is None:
             continue
         score = prices.get(zone.neutral_type, 0) / (path.cost + 1)
-        if walls_missing and zone.neutral_type == world.rules.wall_material:
+        if market_view is not None:
+            direction = market_view.direction(zone.neutral_type.casefold())
+            if direction is PriceDirection.UP:
+                score *= 1.15
+            elif direction is PriceDirection.DOWN:
+                score *= 0.85
+        if stone_needed and zone.neutral_type == world.rules.wall_material:
             score += 1_000_000
         jobs.append(
             Job(
@@ -410,3 +478,61 @@ def _add_mining_jobs(
                 quantity=1,
             )
         )
+
+
+def calculate_stone_reserve(
+    world: WorldGrid,
+    layout: DefensiveLayout,
+    intent: StrategicIntent,
+    *,
+    expected_wall_losses: int = 0,
+) -> int:
+    if not intent.build_plan.build_walls or not layout.wall_sites:
+        return 0
+    existing_wall_positions = {wall.position for wall in world.walls}
+    missing_critical_count = sum(
+        position not in existing_wall_positions
+        for position in layout.critical_wall_sites
+    )
+    material_cost = world.rules.wall_material_cost
+    return max(
+        intent.build_plan.minimum_wall_stock,
+        max(0, expected_wall_losses) * material_cost,
+        missing_critical_count * material_cost,
+    )
+
+
+def _stone_reserve_by_worker(
+    workers: tuple[UnitState, ...],
+    world: WorldGrid,
+    missing_wall_sites: tuple[Position, ...],
+    stone_reserve: int,
+) -> dict[int, int]:
+    def distance_to_gap(worker: UnitState) -> tuple[int, int]:
+        costs = tuple(
+            path.cost
+            for position in missing_wall_sites
+            if (path := path_to_interaction(
+                world,
+                worker.position,
+                position,
+            )) is not None
+        )
+        return (min(costs) if costs else 1_000_000, worker.unit_id)
+
+    remaining = stone_reserve
+    reserved: dict[int, int] = {}
+    for worker in sorted(workers, key=distance_to_gap):
+        count = count_item(worker.backpack, world.rules.wall_material)
+        held = min(count, remaining)
+        reserved[worker.unit_id] = held
+        remaining -= held
+    return reserved
+
+
+def _backpack_near_full(worker: UnitState) -> bool:
+    if worker.backpack_capacity <= 0:
+        return False
+    remaining = worker.backpack_capacity - len(worker.backpack)
+    margin = max(1, worker.backpack_capacity // 10)
+    return remaining <= margin

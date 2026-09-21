@@ -2,7 +2,7 @@ import unittest
 
 from future_war_agent.decision.actions import Action
 from future_war_agent.decision.serializer import decision_to_payload
-from future_war_agent.protocol.models import Position
+from future_war_agent.protocol.models import Position, Zone
 from future_war_agent.strategy.joint import (
     TacticalCandidate,
     candidates_for_jobs,
@@ -22,6 +22,7 @@ def candidate(
     target: Position | None,
     *,
     priority: int = 100,
+    utility: float = 0.0,
 ) -> TacticalCandidate:
     action = None if target is None else Action.move(target)
     return TacticalCandidate(
@@ -34,6 +35,7 @@ def candidate(
         priority=priority,
         completes_job=False,
         progress=1 if target is not None else 0,
+        utility=utility,
     )
 
 
@@ -230,6 +232,98 @@ class JointSolverTests(unittest.TestCase):
             solve_joint(self.observed, self.world, choices),
             solve_joint(self.observed, self.world, choices),
         )
+
+    def test_solver_uses_job_utility_before_repr_tiebreak(self) -> None:
+        choices = {
+            10010: (
+                candidate(
+                    10010,
+                    Position(1, 1),
+                    Position(1, 2),
+                    utility=1.0,
+                ),
+                candidate(
+                    10010,
+                    Position(1, 1),
+                    Position(2, 2),
+                    utility=50.0,
+                ),
+            ),
+        }
+
+        decision = solve_joint(self.observed, self.world, choices)
+
+        self.assertEqual(
+            decision.commands[10010].target_positions,
+            (Position(2, 2),),
+        )
+
+    def test_two_workers_cannot_move_toward_same_wall_job(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(1, 1, 1, 'worker', backpack=('stone',)),
+                unit(2, 3, 1, 'worker', backpack=('stone',)),
+            ),
+        )
+        world = WorldGrid.from_observation(observed)
+        target = Position(2, 4)
+        jobs = {
+            role_id: (
+                Job(
+                    role_id=role_id,
+                    kind=JobKind.BUILD_WALL,
+                    target=target,
+                    priority=350,
+                    value=10,
+                    name='wall',
+                    quantity=1,
+                ),
+            )
+            for role_id in (1, 2)
+        }
+        first = candidates_for_jobs(
+            observed,
+            world,
+            world.unit_by_id(1),
+            jobs[1],
+        )[0]
+        second = candidates_for_jobs(
+            observed,
+            world,
+            world.unit_by_id(2),
+            jobs[2],
+        )[0]
+
+        self.assertNotEqual(first.move_target, second.move_target)
+        self.assertEqual(first.exclusive_job_key, second.exclusive_job_key)
+        self.assertFalse(is_valid_joint(observed, world, (first, second)))
+
+    def test_two_workers_may_collect_same_tail_mine(self) -> None:
+        mine = Position(2, 2)
+        observed = observation(
+            our_units=(
+                unit(1, 1, 2, 'worker'),
+                unit(2, 2, 1, 'worker'),
+            ),
+            zones=(Zone(mine, 'stone'),),
+        )
+        world = WorldGrid.from_observation(observed)
+        first = TacticalCandidate(
+            role_id=1,
+            command_actor_id=1,
+            action=Action.collect(mine),
+            job_kind=JobKind.COLLECT,
+            start=Position(1, 2),
+        )
+        second = TacticalCandidate(
+            role_id=2,
+            command_actor_id=2,
+            action=Action.collect(mine),
+            job_kind=JobKind.COLLECT,
+            start=Position(2, 1),
+        )
+
+        self.assertTrue(is_valid_joint(observed, world, (first, second)))
 
     def test_gold_reserve_applies_to_whole_joint(self) -> None:
         observed = observation(our_units=self.observed.our.units, gold=50)
