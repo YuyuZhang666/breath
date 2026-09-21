@@ -17,6 +17,7 @@ from future_war_agent.seclog import decrypt, is_encrypted
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_ROOT = "FutureWarAgent"
 BUILDER = ROOT / "tools" / "build_submission.py"
+TEST_KEY = "submission-log-key-0123456789-abcdefghijklmnop"
 
 
 class SubmissionPackageTests(unittest.TestCase):
@@ -43,6 +44,7 @@ class SubmissionPackageTests(unittest.TestCase):
             f"{PACKAGE_ROOT}/src/future_war_agent/logtool.py",
             names,
         )
+        self.assertIn(f"{PACKAGE_ROOT}/log_secret.key", names)
         self.assertTrue(
             all(
                 name == PACKAGE_ROOT
@@ -118,15 +120,23 @@ class SubmissionPackageTests(unittest.TestCase):
         self.assertTrue(encrypted_lines, output_lines)
         self.assertTrue(
             any(
-                "agent server listening" in decrypt(line)
+                "agent server listening" in decrypt(line, TEST_KEY)
                 for line in encrypted_lines
             ),
             output_lines,
         )
 
     def _build_archive(self, output_dir: Path) -> Path:
+        key_file = output_dir / "test-log-secret.key"
+        key_file.write_text(TEST_KEY + "\n", encoding="utf-8")
         result = subprocess.run(
-            [sys.executable, str(BUILDER), str(output_dir)],
+            [
+                sys.executable,
+                str(BUILDER),
+                str(output_dir),
+                "--key-file",
+                str(key_file),
+            ],
             cwd=ROOT,
             capture_output=True,
             text=True,
