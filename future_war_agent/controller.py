@@ -1,5 +1,7 @@
 import logging
 from collections.abc import Callable
+from inspect import Parameter, signature
+from time import monotonic
 
 from future_war_agent.decision.decision import Decision
 from future_war_agent.decision.serializer import decision_to_payload
@@ -14,13 +16,22 @@ from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 LOGGER = logging.getLogger(__name__)
 LOGGER.addHandler(logging.NullHandler())
 
-Planner = Callable[[Observation], Decision]
+Planner = Callable[..., Decision]
 
 DEFAULT_STRATEGY_ENGINE = StrategyEngine()
 
 
-def default_planner(observation: Observation) -> Decision:
-    return DEFAULT_STRATEGY_ENGINE.plan(observation)
+def default_planner(
+    observation: Observation,
+    *,
+    request_started_at: float | None = None,
+) -> Decision:
+    if request_started_at is None:
+        return DEFAULT_STRATEGY_ENGINE.plan(observation)
+    return DEFAULT_STRATEGY_ENGINE.plan(
+        observation,
+        request_started_at=request_started_at,
+    )
 
 
 def handle_payload(
@@ -29,6 +40,7 @@ def handle_payload(
     *,
     telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
 ) -> dict[str, object]:
+    request_started_at = monotonic()
     token = telemetry.begin()
     try:
         with telemetry.measure('parser_ms'):
@@ -38,7 +50,13 @@ def handle_payload(
             round_no=observation.time.round_no,
             phase=observation.time.phase.value,
         )
-        decision = planner(observation)
+        if _accepts_keyword(planner, 'request_started_at'):
+            decision = planner(
+                observation,
+                request_started_at=request_started_at,
+            )
+        else:
+            decision = planner(observation)
         with telemetry.measure('validation_ms'):
             validated = validate_decision(observation, decision)
         with telemetry.measure('serialization_ms'):
@@ -49,3 +67,15 @@ def handle_payload(
         return safe_payload()
     finally:
         telemetry.finish(token)
+
+
+def _accepts_keyword(function: Planner, name: str) -> bool:
+    try:
+        parameters = signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == name
+        or parameter.kind is Parameter.VAR_KEYWORD
+        for parameter in parameters
+    )

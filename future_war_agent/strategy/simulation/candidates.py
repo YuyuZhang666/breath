@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from future_war_agent.decision.actions import Action, ActionKind
@@ -17,7 +18,7 @@ from future_war_agent.strategy.policy import (
 )
 from future_war_agent.strategy.world import WorldGrid
 
-from .config import DEFAULT_PHASE3_CONFIG, Phase3Config
+from .config import DEFAULT_PHASE3_CONFIG, Phase3Config, Phase3Level
 from .errors import UnsupportedSimulation
 from .state import SimState
 from .weapons import WeaponAttack
@@ -53,10 +54,14 @@ def generate_root_actions(
     controller_assignments: tuple[ControllerAssignment, ...] | None = None,
     baseline_decision: Decision | None = None,
     max_roots: int | None = None,
+    deadline_check: Callable[[], None] | None = None,
+    level: Phase3Level = Phase3Level.FULL,
 ) -> tuple[RootAction, ...]:
     limit = config.max_root_actions if max_roots is None else max_roots
     if limit <= 0:
         raise ValueError('max_roots must be positive')
+    if deadline_check is not None:
+        deadline_check()
     assignments = (
         assign_controllers(
             observation,
@@ -107,14 +112,17 @@ def generate_root_actions(
         if action.kind is ActionKind.MOVE
     }
     profiles = [StrategyProfile.SURVIVE, StrategyProfile.SCORE]
-    if limit > 4:
+    if level is Phase3Level.FULL:
         profiles.append(StrategyProfile.DESPERATION)
     for profile in profiles:
+        if deadline_check is not None:
+            deadline_check()
         selection = choose_joint_fire_attacks(
             state,
             profile,
             excluded_controller_ids=frozenset(base_commands),
             simulation_config=config,
+            deadline_check=deadline_check,
         )
         commands = dict(base_commands)
         for attack in selection.attacks:
@@ -130,12 +138,15 @@ def generate_root_actions(
         and weapon.cooldown == 0
         for weapon in state.weapons
     ):
+        if deadline_check is not None:
+            deadline_check()
         rocket_hold = choose_joint_fire_attacks(
             state,
             intent.profile,
             excluded_controller_ids=frozenset(base_commands),
             hold_rockets=True,
             simulation_config=config,
+            deadline_check=deadline_check,
         )
         hold_commands = dict(base_commands)
         for attack in rocket_hold.attacks:
@@ -145,6 +156,8 @@ def generate_root_actions(
             )
         add(Decision(commands=hold_commands), 'hold_rocket')
     add(Decision(commands=base_commands), 'hold_fire')
+    if deadline_check is not None:
+        deadline_check()
     return tuple(roots[:limit])
 
 

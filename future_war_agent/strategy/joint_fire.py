@@ -1,3 +1,5 @@
+from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import combinations, product
@@ -21,6 +23,12 @@ from .simulation.geometry import is_legal_cone
 from .simulation.state import AssignedStand, SimRobot, SimState, SimWeapon, build_sim_state
 from .simulation.weapons import WeaponAttack, weapon_damage
 from .world import WorldGrid
+
+
+_DEADLINE_CHECK: ContextVar[Callable[[], None] | None] = ContextVar(
+    'joint_fire_deadline_check',
+    default=None,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,15 +212,25 @@ def choose_joint_fire_attacks(
     hold_rockets: bool = False,
     config: JointFireConfig = DEFAULT_JOINT_FIRE_CONFIG,
     simulation_config: Phase3Config = DEFAULT_PHASE3_CONFIG,
+    deadline_check: Callable[[], None] | None = None,
 ) -> JointFireSelection:
-    return _choose_joint_fire_attacks_cached(
-        _combat_state(state),
-        profile,
-        excluded_controller_ids,
-        hold_rockets,
-        config,
-        simulation_config,
-    )
+    if deadline_check is not None:
+        deadline_check()
+    token = _DEADLINE_CHECK.set(deadline_check)
+    try:
+        result = _choose_joint_fire_attacks_cached(
+            _combat_state(state),
+            profile,
+            excluded_controller_ids,
+            hold_rockets,
+            config,
+            simulation_config,
+        )
+    finally:
+        _DEADLINE_CHECK.reset(token)
+    if deadline_check is not None:
+        deadline_check()
+    return result
 
 
 @lru_cache(maxsize=2048)
@@ -224,6 +242,7 @@ def _choose_joint_fire_attacks_cached(
     config: JointFireConfig,
     simulation_config: Phase3Config,
 ) -> JointFireSelection:
+    deadline_check = _DEADLINE_CHECK.get()
     threats = assess_threats(state)
     weapon_by_id = {weapon.unit_id: weapon for weapon in state.weapons}
     option_sets: list[tuple[FireOption | None, ...]] = []
@@ -231,6 +250,8 @@ def _choose_joint_fire_attacks_cached(
     used_weapons: set[int] = set()
 
     for role in sorted(state.roles, key=lambda item: item.unit_id):
+        if deadline_check is not None:
+            deadline_check()
         if (
             role.health <= 0
             or role.unit_id in excluded_controller_ids
@@ -271,6 +292,8 @@ def _choose_joint_fire_attacks_cached(
     winner_key: tuple[object, ...] | None = None
     combinations_evaluated = 0
     for possible in product(*option_sets):
+        if deadline_check is not None:
+            deadline_check()
         selected = tuple(item for item in possible if item is not None)
         combinations_evaluated += 1
         score = _joint_score(selected, robot_by_id, threats, profile)

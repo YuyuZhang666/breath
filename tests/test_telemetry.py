@@ -99,6 +99,10 @@ class TelemetryTests(unittest.TestCase):
 
         sample = recorder.snapshot()[-1]
         self.assertEqual(sample.phase3_level, 'lite')
+        self.assertEqual(sample.phase3_effective_level, 'lite')
+        self.assertEqual(sample.compute_governor_action, 'normal')
+        self.assertGreater(sample.governor_root_limit, 0)
+        self.assertEqual(sample.governor_scenario_limit, 1)
         self.assertGreater(sample.root_candidate_count, 0)
         self.assertEqual(sample.scenario_count, 1)
         self.assertGreater(sample.simulation_count, 0)

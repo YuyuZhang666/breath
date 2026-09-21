@@ -55,6 +55,23 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(response["roleCommandMap"]["10010"]["action"], "move")
 
+    def test_request_budget_starts_before_parser_and_reaches_engine(self) -> None:
+        starts: list[float] = []
+
+        def planner(
+            observed: Observation,
+            *,
+            request_started_at: float,
+        ) -> Decision:
+            self.assertEqual(observed.time.round_no, 85)
+            starts.append(request_started_at)
+            return Decision()
+
+        handle_payload(self.payload, planner=planner)
+
+        self.assertEqual(len(starts), 1)
+        self.assertGreater(starts[0], 0)
+
     def test_invalid_payload_returns_safe_payload(self) -> None:
         self.assertEqual(handle_payload({}), safe_payload())
 

@@ -35,6 +35,7 @@ class TurnTelemetry:
     scenario_count: int = 0
     simulation_count: int = 0
     phase3_level: str = 'none'
+    phase3_effective_level: str = 'none'
     forecast_update_kind: str = 'none'
     night_risk_level: str = 'unknown'
     risk_ratio: float = 0.0
@@ -42,6 +43,12 @@ class TurnTelemetry:
     safety_plan_status: str = 'unknown'
     safety_plan_cost: int = 0
     effective_gold_reserve: int = 0
+    compute_governor_action: str = 'normal'
+    governor_root_limit: int = 0
+    governor_scenario_limit: int = 0
+    phase3_disabled_until_round: int = 0
+    ewma_phase2_5_ms: float = 0.0
+    ewma_root_rollout_ms: float = 0.0
     phase3_fallback_count: int = 0
     phase2_5_fallback_count: int = 0
     phase2_5_combination_count: int = 0
@@ -75,6 +82,7 @@ class _ActiveTurn:
     scenario_count: int = 0
     simulation_count: int = 0
     phase3_level: str = 'none'
+    phase3_effective_level: str = 'none'
     forecast_update_kind: str = 'none'
     night_risk_level: str = 'unknown'
     risk_ratio: float = 0.0
@@ -82,6 +90,12 @@ class _ActiveTurn:
     safety_plan_status: str = 'unknown'
     safety_plan_cost: int = 0
     effective_gold_reserve: int = 0
+    compute_governor_action: str = 'normal'
+    governor_root_limit: int = 0
+    governor_scenario_limit: int = 0
+    phase3_disabled_until_round: int = 0
+    ewma_phase2_5_ms: float = 0.0
+    ewma_root_rollout_ms: float = 0.0
     phase3_fallback_count: int = 0
     phase2_5_fallback_count: int = 0
     phase2_5_combination_count: int = 0
@@ -150,6 +164,12 @@ class TelemetryRecorder:
             return
         setattr(active, field, int(getattr(active, field)) + amount)
 
+    def current(self, field: str, default: object = None) -> object:
+        active = self._active.get()
+        if active is None or not hasattr(active, field):
+            return default
+        return getattr(active, field)
+
     def finish(
         self,
         token: Token[_ActiveTurn | None] | None,
@@ -182,6 +202,7 @@ class TelemetryRecorder:
             scenario_count=active.scenario_count,
             simulation_count=active.simulation_count,
             phase3_level=active.phase3_level,
+            phase3_effective_level=active.phase3_effective_level,
             forecast_update_kind=active.forecast_update_kind,
             night_risk_level=active.night_risk_level,
             risk_ratio=active.risk_ratio,
@@ -189,6 +210,12 @@ class TelemetryRecorder:
             safety_plan_status=active.safety_plan_status,
             safety_plan_cost=active.safety_plan_cost,
             effective_gold_reserve=active.effective_gold_reserve,
+            compute_governor_action=active.compute_governor_action,
+            governor_root_limit=active.governor_root_limit,
+            governor_scenario_limit=active.governor_scenario_limit,
+            phase3_disabled_until_round=active.phase3_disabled_until_round,
+            ewma_phase2_5_ms=active.ewma_phase2_5_ms,
+            ewma_root_rollout_ms=active.ewma_root_rollout_ms,
             phase3_fallback_count=active.phase3_fallback_count,
             phase2_5_fallback_count=active.phase2_5_fallback_count,
             phase2_5_combination_count=active.phase2_5_combination_count,

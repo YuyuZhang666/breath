@@ -13,6 +13,7 @@ from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.protocol.time import TurnTime
+from future_war_agent.strategy.compute import ComputeGovernor
 from future_war_agent.strategy.engine import StrategyEngine
 from future_war_agent.strategy.director import StrategicDirector
 from future_war_agent.strategy.policy import (
@@ -525,6 +526,79 @@ class StrategyEngineTests(unittest.TestCase):
             [call["observation"].our.team_id for call in search.calls],
             ["phase3-team", "phase3-team-b"],
         )
+
+    def test_governor_updates_inside_outer_http_telemetry_context(self) -> None:
+        phase2 = Phase2Spy()
+        search = SearchSpy()
+        telemetry = TelemetryRecorder()
+        governor = ComputeGovernor()
+        engine = StrategyEngine(
+            config=Phase3Config(watchdog_seconds=0.8),
+            phase2_planner=phase2,
+            night_searcher=search,
+            clock=lambda: 100.0,
+            telemetry=telemetry,
+            compute_governor=governor,
+        )
+        outer = telemetry.begin()
+        try:
+            engine.plan(self.day)
+            engine.plan(self.night)
+        finally:
+            telemetry.finish(outer)
+
+        state = governor.state_for(self.night.our.team_id)
+        self.assertGreater(state.ewma_root_rollout_ms, 0)
+        self.assertGreater(state.last_phase3_ms, 0)
+
+    def test_governor_watchdog_cooldown_skips_phase3(self) -> None:
+        governor = ComputeGovernor()
+        governor.observe_turn(
+            self.day.our.team_id,
+            round_no=70,
+            day_no=1,
+            phase2_5_ms=1.0,
+            phase3_ms=0.0,
+            roots_evaluated=0,
+            scenarios_per_root=0,
+            exact_horizon=0,
+            watchdog_hit=True,
+        )
+        phase2 = Phase2Spy()
+        search = SearchSpy()
+        engine = StrategyEngine(
+            phase2_planner=phase2,
+            night_searcher=search,
+            clock=lambda: 100.0,
+            compute_governor=governor,
+        )
+
+        engine.plan(self.day)
+        decision = engine.plan(self.night)
+
+        self.assertIs(decision, phase2.decisions[-1])
+        self.assertEqual(search.calls, [])
+
+    def test_emergency_reserve_skips_task_agent(self) -> None:
+        class TaskSpy:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def apply(self, *args, **kwargs):
+                del args, kwargs
+                self.calls += 1
+                raise AssertionError('TaskAgent must not run inside reserve')
+
+        task_agent = TaskSpy()
+        engine = StrategyEngine(
+            phase2_planner=Phase2Spy(),
+            task_agent=task_agent,
+            clock=lambda: 2.6,
+        )
+
+        engine.plan(self.day, request_started_at=0.0)
+
+        self.assertEqual(task_agent.calls, 0)
 
     def test_phase_3_failures_fall_back_atomically_and_cache_result(self) -> None:
         failures = (

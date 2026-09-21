@@ -2,13 +2,14 @@ import logging
 from collections.abc import Callable
 from inspect import Parameter, signature
 from threading import RLock
-from time import monotonic
+from time import monotonic, perf_counter_ns
 
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.time import Phase
 from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
+from .compute import ComputeGovernor, ComputeTurnUsage
 from .director import StrategicDirector
 from .features import extract_features
 from .forecast import (
@@ -76,6 +77,7 @@ class StrategyEngine:
         controller_assignment_cache: ControllerAssignmentCache | None = None,
         night_forecaster: NightForecaster = refresh_night_forecast,
         telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
+        compute_governor: ComputeGovernor | None = None,
     ) -> None:
         self._config = config
         self._phase2_planner = phase2_planner
@@ -103,6 +105,10 @@ class StrategyEngine:
             night_searcher,
             'baseline_decision',
         )
+        self._search_accepts_budget = _accepts_keyword(
+            night_searcher,
+            'budget',
+        )
         self._objective_provider = objective_provider
         self._director = director if director is not None else StrategicDirector()
         self._task_agent = task_agent if task_agent is not None else TaskAgent()
@@ -123,9 +129,22 @@ class StrategyEngine:
             'controller_assignments',
         )
         self._telemetry = telemetry
+        self._compute_governor = (
+            compute_governor
+            if compute_governor is not None
+            else ComputeGovernor()
+        )
         self._lock = RLock()
 
-    def plan(self, observation: Observation) -> Decision:
+    def plan(
+        self,
+        observation: Observation,
+        *,
+        request_started_at: float | None = None,
+    ) -> Decision:
+        if request_started_at is None:
+            request_started_at = self._clock()
+        compute_usage = ComputeTurnUsage()
         token = self._telemetry.begin()
         self._telemetry.identify(
             team_id=observation.our.team_id,
@@ -134,7 +153,31 @@ class StrategyEngine:
         )
         try:
             with self._lock:
-                return self._plan_locked(observation)
+                try:
+                    return self._plan_locked(
+                        observation,
+                        request_started_at,
+                        compute_usage,
+                    )
+                finally:
+                    try:
+                        self._compute_governor.observe_turn(
+                            observation.our.team_id,
+                            round_no=observation.time.round_no,
+                            day_no=observation.time.day_no,
+                            phase2_5_ms=compute_usage.phase2_5_ms,
+                            phase3_ms=compute_usage.phase3_ms,
+                            roots_evaluated=compute_usage.roots_evaluated,
+                            scenarios_per_root=compute_usage.scenarios_per_root,
+                            exact_horizon=compute_usage.exact_horizon,
+                            watchdog_hit=compute_usage.watchdog_hit,
+                        )
+                    except Exception:
+                        LOGGER.exception(
+                            'ComputeGovernor update failed for team %s round %s',
+                            observation.our.team_id,
+                            observation.time.round_no,
+                        )
         finally:
             self._telemetry.finish(token)
 
@@ -143,7 +186,12 @@ class StrategyEngine:
             session = self._sessions.get(team_id)
             return session.intent.profile if session is not None else None
 
-    def _plan_locked(self, observation: Observation) -> Decision:
+    def _plan_locked(
+        self,
+        observation: Observation,
+        request_started_at: float,
+        compute_usage: ComputeTurnUsage,
+    ) -> Decision:
         team_id = observation.our.team_id
         if not team_id.strip():
             return self._plan_phase2(observation, DEFAULT_STRATEGIC_INTENT)
@@ -156,6 +204,15 @@ class StrategyEngine:
             if previous is not None
             else SessionContinuity.DISCONTINUITY
         )
+        if (
+            previous is not None
+            and continuity is SessionContinuity.DISCONTINUITY
+            and (
+                observation.time.round_no <= previous.last_round
+                or signature != previous.signature
+            )
+        ):
+            self._compute_governor.reset(team_id)
         if continuity is SessionContinuity.DUPLICATE:
             if previous is None:
                 raise AssertionError("duplicate continuity requires a session")
@@ -376,12 +433,32 @@ class StrategyEngine:
             else None
         )
 
+        phase2_5_before = float(
+            self._telemetry.current('phase2_5_ms', 0.0)
+        )
         decision = self._plan_phase2(
             observation,
             intent,
             controller_assignments,
             fortification_threats,
         )
+        compute_usage.phase2_5_ms = max(0.0, float(
+            self._telemetry.current('phase2_5_ms', 0.0)
+        ) - phase2_5_before)
+        request_deadline = (
+            request_started_at
+            + self._compute_governor.config.total_decision_budget_seconds
+        )
+        governor_emergency = (
+            self._clock()
+            >= request_deadline
+            - self._compute_governor.config.emergency_reserve_seconds
+        )
+        if governor_emergency:
+            self._telemetry.set(
+                compute_governor_action='emergency_reserve',
+                phase3_level=Phase3Level.NONE.value,
+            )
 
         phase3_eligible = (
             not director_failed
@@ -395,6 +472,7 @@ class StrategyEngine:
                 )
             )
             and not _requires_emergency_medicine(observation, intent)
+            and not governor_emergency
         )
 
         if phase3_eligible:
@@ -423,27 +501,59 @@ class StrategyEngine:
                     if self._objective_provider is not None
                     else intent.night_objective
                 )
-                attempts = (
-                    (Phase3Level.FULL, Phase3Level.LITE)
-                    if trigger.level is Phase3Level.FULL
-                    else (Phase3Level.LITE,)
+                compute_plan = self._compute_governor.plan(
+                    team_id,
+                    requested_level=trigger.level,
+                    phase3_config=self._config,
+                    round_no=observation.time.round_no,
+                    day_no=observation.time.day_no,
+                    now=self._clock(),
+                    request_deadline=request_deadline,
                 )
-                chain_deadline = self._clock() + (
-                    self._config.watchdog_seconds
-                    + self._config.lite_watchdog_seconds
-                    + 0.020
+                governor_emergency = compute_plan.emergency_return
+                governor_state = compute_plan.state
+                first_attempt = (
+                    compute_plan.attempts[0]
+                    if compute_plan.attempts
+                    else None
                 )
-                for attempt in attempts:
-                    budget = self._config.budget_for(attempt)
+                self._telemetry.set(
+                    phase3_effective_level=compute_plan.effective_level.value,
+                    compute_governor_action=(
+                        ','.join(compute_plan.reasons)
+                        if compute_plan.reasons
+                        else 'normal'
+                    ),
+                    governor_root_limit=(
+                        first_attempt.budget.root_candidates
+                        if first_attempt is not None
+                        else 0
+                    ),
+                    governor_scenario_limit=(
+                        first_attempt.budget.scenarios
+                        if first_attempt is not None
+                        else 0
+                    ),
+                    phase3_disabled_until_round=(
+                        governor_state.phase3_disabled_until_round
+                    ),
+                    ewma_phase2_5_ms=governor_state.ewma_phase2_5_ms,
+                    ewma_root_rollout_ms=governor_state.ewma_root_rollout_ms,
+                )
+                for planned_attempt in compute_plan.attempts:
+                    attempt = planned_attempt.level
+                    budget = planned_attempt.budget
                     search_kwargs = {
                         'objective': objective,
                         'config': self._config,
                         'clock': self._clock,
                         'deadline': min(
-                            chain_deadline,
+                            compute_plan.chain_deadline,
                             self._clock() + budget.seconds,
                         ),
                     }
+                    if self._search_accepts_budget:
+                        search_kwargs['budget'] = budget
                     if self._search_accepts_assignments:
                         search_kwargs['controller_assignments'] = (
                             controller_assignments
@@ -455,6 +565,7 @@ class StrategyEngine:
                     if self._search_accepts_baseline:
                         search_kwargs['baseline_decision'] = decision
                     try:
+                        phase3_started_ns = perf_counter_ns()
                         with self._telemetry.measure('phase3_ms'):
                             result = self._night_searcher(
                                 observation,
@@ -463,6 +574,15 @@ class StrategyEngine:
                             )
                         stats = getattr(result, 'stats', None)
                         if stats is not None:
+                            compute_usage.roots_evaluated += stats.roots_evaluated
+                            compute_usage.scenarios_per_root = max(
+                                compute_usage.scenarios_per_root,
+                                stats.scenarios_per_root,
+                            )
+                            compute_usage.exact_horizon = max(
+                                compute_usage.exact_horizon,
+                                stats.maximum_steps,
+                            )
                             self._telemetry.set(
                                 root_candidate_count=stats.roots_generated,
                                 scenario_count=stats.scenarios_per_root,
@@ -478,12 +598,14 @@ class StrategyEngine:
                             )
                             if getattr(stats, 'deadline_hit', False):
                                 self._telemetry.set(watchdog_hit=True)
+                                compute_usage.watchdog_hit = True
                         decision = result.decision
                         simulation_action = result.simulation_action
                         certificate = result.certificate
                         fresh_certificate = result.certificate
                         break
                     except DeadlineExceeded:
+                        compute_usage.watchdog_hit = True
                         self._telemetry.increment('phase3_fallback_count')
                         self._telemetry.set(
                             fallback_used=True,
@@ -515,30 +637,43 @@ class StrategyEngine:
                             team_id,
                             observation.time.round_no,
                         )
+                    finally:
+                        compute_usage.phase3_ms += (
+                            perf_counter_ns() - phase3_started_ns
+                        ) / 1_000_000
+
+        if (
+            self._clock()
+            >= request_deadline
+            - self._compute_governor.config.emergency_reserve_seconds
+        ):
+            governor_emergency = True
+            self._telemetry.set(compute_governor_action='emergency_reserve')
 
         task_state = (
             previous_for_director.task_state
             if previous_for_director is not None
             else EMPTY_TASK_STATE
         )
-        try:
-            with self._telemetry.measure('task_ms'):
-                task_result = self._task_agent.apply(
-                    observation,
-                    decision,
-                    intent,
-                    previous_state=task_state,
+        if not governor_emergency:
+            try:
+                with self._telemetry.measure('task_ms'):
+                    task_result = self._task_agent.apply(
+                        observation,
+                        decision,
+                        intent,
+                        previous_state=task_state,
+                    )
+                decision = task_result.decision
+                task_state = task_result.state
+            except Exception:
+                self._telemetry.set(fallback_used=True)
+                LOGGER.exception(
+                    'Phase 5 task agent failed; using base decision for team %s round %s',
+                    team_id,
+                    observation.time.round_no,
                 )
-            decision = task_result.decision
-            task_state = task_result.state
-        except Exception:
-            self._telemetry.set(fallback_used=True)
-            LOGGER.exception(
-                'Phase 5 task agent failed; using base decision for team %s round %s',
-                team_id,
-                observation.time.round_no,
-            )
-            task_state = EMPTY_TASK_STATE
+                task_state = EMPTY_TASK_STATE
 
         if fresh_certificate is not None or night_forecast is not None:
             try:

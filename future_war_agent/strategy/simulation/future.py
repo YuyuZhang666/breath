@@ -1,4 +1,5 @@
 from collections import deque
+from collections.abc import Callable
 
 from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.joint_fire import choose_joint_fire_attacks
@@ -27,7 +28,10 @@ def choose_future_action(
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
     *,
     profile: StrategyProfile = StrategyProfile.SURVIVE,
+    deadline_check: Callable[[], None] | None = None,
 ) -> SimJointAction:
+    if deadline_check is not None:
+        deadline_check()
     weapons = {
         weapon.unit_id: weapon for weapon in state.weapons if weapon.health > 0
     }
@@ -37,11 +41,14 @@ def choose_future_action(
             state,
             profile,
             simulation_config=config,
+            deadline_check=deadline_check,
         ).attacks
     )
     reserved_targets: set[Position] = set()
 
     for role in sorted(state.roles, key=lambda item: item.unit_id):
+        if deadline_check is not None:
+            deadline_check()
         if (
             role.health <= 0
             or role.assigned_weapon_id is None
@@ -52,7 +59,13 @@ def choose_future_action(
         if weapon is None:
             continue
         if role.position != role.assigned_stand:
-            step = _shortest_step(state, role, role.assigned_stand, reserved_targets)
+            step = _shortest_step(
+                state,
+                role,
+                role.assigned_stand,
+                reserved_targets,
+                deadline_check,
+            )
             if step is not None:
                 role_moves.append(RoleMove(role.unit_id, step))
                 reserved_targets.add(step)
@@ -69,6 +82,7 @@ def _shortest_step(
     role: SimRole,
     goal: Position,
     reserved_targets: set[Position],
+    deadline_check: Callable[[], None] | None,
 ) -> Position | None:
     blocked = set(state.static_blocked)
     blocked.update(
@@ -85,6 +99,8 @@ def _shortest_step(
     parent: dict[Position, Position | None] = {role.position: None}
     found = False
     while queue and not found:
+        if deadline_check is not None:
+            deadline_check()
         current = queue.popleft()
         for delta_x, delta_y in _DIRECTIONS:
             neighbor = Position(current.x + delta_x, current.y + delta_y)
@@ -104,6 +120,8 @@ def _shortest_step(
 
     current = goal
     while parent[current] != role.position:
+        if deadline_check is not None:
+            deadline_check()
         previous = parent[current]
         if previous is None:
             return None

@@ -25,7 +25,12 @@ from .certificate import (
     score_rank_key,
     survival_rank_key,
 )
-from .config import DEFAULT_PHASE3_CONFIG, Phase3Config, Phase3Level
+from .config import (
+    DEFAULT_PHASE3_CONFIG,
+    Phase3Budget,
+    Phase3Config,
+    Phase3Level,
+)
 from .errors import DeadlineExceeded, UnsupportedSimulation
 from .future import choose_future_action
 from .kernel import step_simulation
@@ -75,11 +80,12 @@ def search_night(
     level: Phase3Level = Phase3Level.FULL,
     intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
     baseline_decision: Decision | None = None,
+    budget: Phase3Budget | None = None,
 ) -> SearchResult:
     _validate_weights(scenario_weights)
-    budget = config.budget_for(level)
+    resolved_budget = config.budget_for(level) if budget is None else budget
     started_at = clock()
-    budget_deadline = started_at + budget.seconds
+    budget_deadline = started_at + resolved_budget.seconds
     effective_deadline = (
         budget_deadline
         if deadline is None
@@ -107,7 +113,9 @@ def search_night(
         intent=intent,
         controller_assignments=resolved_assignments,
         baseline_decision=baseline_decision,
-        max_roots=budget.root_candidates,
+        max_roots=resolved_budget.root_candidates,
+        deadline_check=lambda: _check_deadline(clock, effective_deadline),
+        level=level,
     )
     candidate_generation_ms = (
         perf_counter_ns() - candidate_started_ns
@@ -116,8 +124,8 @@ def search_night(
     if not roots:
         raise UnsupportedSimulation("no legal Phase 3 root actions")
 
-    horizon = min(budget.exact_horizon, state.remaining_night_turns)
-    scenarios = _select_scenarios(scenario_weights, budget.scenarios)
+    horizon = min(resolved_budget.exact_horizon, state.remaining_night_turns)
+    scenarios = _select_scenarios(scenario_weights, resolved_budget.scenarios)
     initial_controlled_role_ids = frozenset(
         role.unit_id for role in state.roles
     )
@@ -156,21 +164,34 @@ def search_night(
                     deadline_hit = True
                     complete_root = False
                     break
-                simulated_action = (
-                    root.simulation_action
-                    if step_index == 0
-                    else choose_future_action(
-                        simulated,
-                        config,
-                        profile=intent.profile,
+                try:
+                    simulated_action = (
+                        root.simulation_action
+                        if step_index == 0
+                        else choose_future_action(
+                            simulated,
+                            config,
+                            profile=intent.profile,
+                            deadline_check=lambda: _check_deadline(
+                                clock,
+                                effective_deadline,
+                            ),
+                        )
                     )
-                )
-                simulated = step_simulation(
-                    simulated,
-                    simulated_action,
-                    policy,
-                    config,
-                )
+                    simulated = step_simulation(
+                        simulated,
+                        simulated_action,
+                        policy,
+                        config,
+                    )
+                except DeadlineExceeded:
+                    deadline_hit = True
+                    complete_root = False
+                    break
+                if clock() >= effective_deadline:
+                    deadline_hit = True
+                    complete_root = False
+                    break
                 if simulated.station.health <= 0:
                     break
             if not complete_root:
@@ -179,7 +200,18 @@ def search_night(
             if config.use_tail_estimator and simulated.remaining_night_turns > 0:
                 tail_started_ns = perf_counter_ns()
                 try:
-                    tail_estimate = estimate_tail(simulated, config)
+                    tail_estimate = estimate_tail(
+                        simulated,
+                        config,
+                        clock=clock,
+                        deadline=effective_deadline,
+                    )
+                except DeadlineExceeded:
+                    deadline_hit = True
+                    LOGGER.warning(
+                        'TailEstimator reached the Phase 3 deadline; '
+                        'retaining bounded certificate'
+                    )
                 except Exception:
                     LOGGER.exception(
                         'TailEstimator failed; retaining bounded certificate'

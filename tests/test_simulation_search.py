@@ -348,7 +348,10 @@ class SimulationSearchTests(unittest.TestCase):
 
             def __call__(self) -> float:
                 self.calls += 1
-                return 0.0 if self.calls <= 14 else 1.0
+                # Cooperative checks now cover candidates, joint-fire, BFS,
+                # exact steps and the TailEstimator. This boundary expires
+                # after one complete root instead of counting only outer loops.
+                return 0.0 if self.calls <= 200 else 1.0
 
         result = search_night(
             self._gatling_scenario(),

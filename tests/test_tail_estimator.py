@@ -2,6 +2,7 @@ import unittest
 
 from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.simulation.config import Phase3Config
+from future_war_agent.strategy.simulation.errors import DeadlineExceeded
 from future_war_agent.strategy.simulation.state import (
     SimRobot,
     SimRole,
@@ -13,6 +14,31 @@ from future_war_agent.strategy.simulation.tail import estimate_tail
 
 
 class TailEstimatorTests(unittest.TestCase):
+    def test_expired_deadline_stops_tail_estimation(self) -> None:
+        state = self._state(
+            remaining=10,
+            station_health=500,
+            robots=(
+                SimRobot(
+                    9,
+                    'middleRobot',
+                    Position(0, 0),
+                    60,
+                    10,
+                    3,
+                    2,
+                    False,
+                ),
+            ),
+        )
+
+        with self.assertRaises(DeadlineExceeded):
+            estimate_tail(
+                state,
+                clock=lambda: 1.0,
+                deadline=1.0,
+            )
+
     def test_eta_projects_damage_beyond_exact_horizon(self) -> None:
         state = self._state(
             remaining=10,
