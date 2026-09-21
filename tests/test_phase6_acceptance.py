@@ -1,7 +1,15 @@
 import unittest
 
 from future_war_agent.protocol.models import Position
+from future_war_agent.strategy.capability_matrix import (
+    Capability,
+    CapabilityMatrix,
+    CapabilityStatus,
+)
 from future_war_agent.strategy.engine import StrategyEngine
+from future_war_agent.strategy.memory import MatchMemoryStore
+from future_war_agent.strategy.policy import StrategyProfile
+from future_war_agent.telemetry import TelemetryRecorder
 from tests.strategy_helpers import observation, unit
 from tests.test_strategy_engine import load_observation, DAY_FIXTURE, NIGHT_FIXTURE
 
@@ -12,6 +20,52 @@ class BrokenMemoryStore:
 
 
 class Phase6AcceptanceTests(unittest.TestCase):
+    def test_manual_capabilities_are_logged_without_changing_strategy(self) -> None:
+        matrix = CapabilityMatrix.from_manual_config(
+            {Capability.ATTACK_ENEMY_STATION: CapabilityStatus.SUPPORTED}
+        )
+        telemetry = TelemetryRecorder()
+        configured = StrategyEngine(
+            memory_store=MatchMemoryStore(capability_matrix=matrix),
+            telemetry=telemetry,
+        )
+        baseline = StrategyEngine()
+        observed = observation(
+            our_units=(
+                unit(10, 5, 5, 'station', health=1000, level=1),
+                unit(11, 3, 3, 'gatling', level=1),
+                unit(12, 4, 3, 'railgun', level=1),
+                unit(13, 5, 3, 'rocket', level=1),
+                unit(14, 1, 1, 'pioneer'),
+            ),
+            enemy_units=(unit(90, 12, 12, 'station', health=100, level=1),),
+            gold=200,
+        )
+
+        expected = baseline.plan(observed)
+        actual = configured.plan(observed)
+        sample = telemetry.snapshot()[-1]
+
+        self.assertEqual(actual, expected)
+        self.assertIsNot(configured.current_profile('team'), StrategyProfile.PRESSURE)
+        self.assertEqual(sample.capability_supported_count, 1)
+        self.assertEqual(sample.capability_unknown_count, len(Capability) - 1)
+        self.assertEqual(len(sample.capability_log), len(Capability))
+        self.assertTrue(sample.opponent_structure_log)
+        self.assertTrue(sample.opponent_evidence_log)
+
+    def test_observations_never_auto_promote_unknown_capability(self) -> None:
+        store = MatchMemoryStore()
+        store.observe(
+            observation(
+                enemy_units=(unit(90, 4, 4, 'station', health=100),),
+            )
+        )
+
+        matrix = store.get('team').capability_matrix
+
+        self.assertEqual(matrix.status_counts(), (len(Capability), 0, 0))
+
     def test_memory_survives_session_discontinuity_and_side_swap(self) -> None:
         engine = StrategyEngine()
         first = observation(

@@ -4,7 +4,9 @@ from fractions import Fraction
 from future_war_agent.protocol.models import Observation, Position
 
 from .belief import OpponentBelief, update_opponent_belief
+from .capability_matrix import CapabilityMatrix, UNKNOWN_CAPABILITY_MATRIX
 from .forecast import NightForecast
+from .opponent_memory import OpponentMemory, update_opponent_memory
 from .session import observation_fingerprint
 from .simulation.certificate import (
     RobotWaveSafetyCertificate,
@@ -40,6 +42,8 @@ class MatchMemory:
     last_round: int = 0
     last_fingerprint: str = ''
     belief: OpponentBelief = OpponentBelief()
+    opponent_memory: OpponentMemory = OpponentMemory()
+    capability_matrix: CapabilityMatrix = UNKNOWN_CAPABILITY_MATRIX
     zones: tuple[NormalizedZone, ...] = ()
     wave_summaries: tuple[WaveSummary, ...] = ()
     recent_threat_positions: tuple[Position, ...] = ()
@@ -47,8 +51,21 @@ class MatchMemory:
 
 
 class MatchMemoryStore:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        capability_matrix: CapabilityMatrix | None = None,
+    ) -> None:
         self._by_team: dict[str, MatchMemory] = {}
+        self._capability_matrix = (
+            capability_matrix
+            if capability_matrix is not None
+            else UNKNOWN_CAPABILITY_MATRIX
+        )
+
+    @property
+    def capability_matrix(self) -> CapabilityMatrix:
+        return self._capability_matrix
 
     def get(self, team_id: str) -> MatchMemory | None:
         if not team_id.strip():
@@ -77,6 +94,7 @@ class MatchMemoryStore:
             observation,
             certificate=certificate,
             forecast=forecast,
+            capability_matrix=self._capability_matrix,
         )
         if team_id.strip():
             self._by_team[team_id] = memory
@@ -109,15 +127,47 @@ def canonical_position(
     )
 
 
+def observation_side_key(observation: Observation) -> str:
+    station = next(
+        (
+            unit
+            for unit in sorted(observation.our.units, key=lambda item: item.unit_id)
+            if unit.health > 0 and unit.role_type == 'station'
+        ),
+        None,
+    )
+    if station is None:
+        return 'unknown'
+    rotated = (
+        station.position.x * 2 < observation.width - 1
+        or station.position.y * 2 < observation.height - 1
+    )
+    return 'rotated' if rotated else 'native'
+
+
 def update_match_memory(
     previous: MatchMemory | None,
     observation: Observation,
     *,
     certificate: RobotWaveSafetyCertificate | None = None,
     forecast: NightForecast | None = None,
+    capability_matrix: CapabilityMatrix | None = None,
 ) -> MatchMemory:
     team_id = observation.our.team_id
-    prior = previous if previous is not None else MatchMemory(team_id=team_id)
+    matrix = (
+        capability_matrix
+        if capability_matrix is not None
+        else (
+            previous.capability_matrix
+            if previous is not None
+            else UNKNOWN_CAPABILITY_MATRIX
+        )
+    )
+    prior = (
+        previous
+        if previous is not None
+        else MatchMemory(team_id=team_id, capability_matrix=matrix)
+    )
     fingerprint = observation_fingerprint(observation)
     same_observation = prior.last_fingerprint == fingerprint
     rollback = (
@@ -138,6 +188,7 @@ def update_match_memory(
             observation.time.round_no - prior.last_round,
         )
     belief = prior.belief
+    opponent_memory = prior.opponent_memory
     zones = prior.zones
     recent_threat_positions = (
         () if rollback else prior.recent_threat_positions
@@ -148,6 +199,17 @@ def update_match_memory(
             observation,
             normalize=lambda position: canonical_position(observation, position),
             tick=observation_tick,
+        )
+        opponent_memory = update_opponent_memory(
+            prior.opponent_memory,
+            observation,
+            epoch=epoch,
+            observation_tick=observation_tick,
+            side_key=observation_side_key(observation),
+            normalize=lambda position: canonical_position(
+                observation,
+                position,
+            ),
         )
         normalized_zones = {
             NormalizedZone(
@@ -209,6 +271,8 @@ def update_match_memory(
         last_round=observation.time.round_no,
         last_fingerprint=fingerprint,
         belief=belief,
+        opponent_memory=opponent_memory,
+        capability_matrix=matrix,
         zones=zones,
         wave_summaries=summaries,
         recent_threat_positions=recent_threat_positions,

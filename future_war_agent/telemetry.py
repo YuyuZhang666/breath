@@ -49,6 +49,22 @@ class TurnTelemetry:
     treasure_candidate_count: int = 0
     treasure_attempted: bool = False
     treasure_result: int = 0
+    opponent_visible_structure_count: int = 0
+    opponent_visible_role_count: int = 0
+    opponent_defense_growth_per_100_rounds: float = 0.0
+    opponent_task_tendency: str = 'unknown'
+    opponent_task_proximity_observations: int = 0
+    opponent_hostile_robot_count: int = 0
+    opponent_summon_attribution: str = 'unknown'
+    opponent_last_observed_damage: int = 0
+    opponent_half_index: int = 0
+    opponent_structure_log: tuple[str, ...] = ()
+    opponent_role_log: tuple[str, ...] = ()
+    opponent_evidence_log: tuple[str, ...] = ()
+    capability_unknown_count: int = 0
+    capability_supported_count: int = 0
+    capability_unsupported_count: int = 0
+    capability_log: tuple[str, ...] = ()
     compute_governor_action: str = 'normal'
     governor_root_limit: int = 0
     governor_scenario_limit: int = 0
@@ -102,6 +118,22 @@ class _ActiveTurn:
     treasure_candidate_count: int = 0
     treasure_attempted: bool = False
     treasure_result: int = 0
+    opponent_visible_structure_count: int = 0
+    opponent_visible_role_count: int = 0
+    opponent_defense_growth_per_100_rounds: float = 0.0
+    opponent_task_tendency: str = 'unknown'
+    opponent_task_proximity_observations: int = 0
+    opponent_hostile_robot_count: int = 0
+    opponent_summon_attribution: str = 'unknown'
+    opponent_last_observed_damage: int = 0
+    opponent_half_index: int = 0
+    opponent_structure_log: tuple[str, ...] = ()
+    opponent_role_log: tuple[str, ...] = ()
+    opponent_evidence_log: tuple[str, ...] = ()
+    capability_unknown_count: int = 0
+    capability_supported_count: int = 0
+    capability_unsupported_count: int = 0
+    capability_log: tuple[str, ...] = ()
     compute_governor_action: str = 'normal'
     governor_root_limit: int = 0
     governor_scenario_limit: int = 0
@@ -228,6 +260,28 @@ class TelemetryRecorder:
             treasure_candidate_count=active.treasure_candidate_count,
             treasure_attempted=active.treasure_attempted,
             treasure_result=active.treasure_result,
+            opponent_visible_structure_count=(
+                active.opponent_visible_structure_count
+            ),
+            opponent_visible_role_count=active.opponent_visible_role_count,
+            opponent_defense_growth_per_100_rounds=(
+                active.opponent_defense_growth_per_100_rounds
+            ),
+            opponent_task_tendency=active.opponent_task_tendency,
+            opponent_task_proximity_observations=(
+                active.opponent_task_proximity_observations
+            ),
+            opponent_hostile_robot_count=active.opponent_hostile_robot_count,
+            opponent_summon_attribution=active.opponent_summon_attribution,
+            opponent_last_observed_damage=active.opponent_last_observed_damage,
+            opponent_half_index=active.opponent_half_index,
+            opponent_structure_log=active.opponent_structure_log,
+            opponent_role_log=active.opponent_role_log,
+            opponent_evidence_log=active.opponent_evidence_log,
+            capability_unknown_count=active.capability_unknown_count,
+            capability_supported_count=active.capability_supported_count,
+            capability_unsupported_count=active.capability_unsupported_count,
+            capability_log=active.capability_log,
             compute_governor_action=active.compute_governor_action,
             governor_root_limit=active.governor_root_limit,
             governor_scenario_limit=active.governor_scenario_limit,

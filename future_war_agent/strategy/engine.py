@@ -228,6 +228,46 @@ class StrategyEngine:
         match_memory = None
         try:
             match_memory = self._memory.observe(observation)
+            opponent_memory = match_memory.opponent_memory
+            (
+                capability_unknown_count,
+                capability_supported_count,
+                capability_unsupported_count,
+            ) = match_memory.capability_matrix.status_counts()
+            self._telemetry.set(
+                opponent_visible_structure_count=(
+                    opponent_memory.visible_structure_count
+                ),
+                opponent_visible_role_count=opponent_memory.visible_role_count,
+                opponent_defense_growth_per_100_rounds=float(
+                    opponent_memory.defense_growth_per_100_rounds
+                ),
+                opponent_task_tendency=opponent_memory.task_tendency.value,
+                opponent_task_proximity_observations=(
+                    opponent_memory.task_proximity_observations
+                ),
+                opponent_hostile_robot_count=(
+                    opponent_memory.visible_hostile_robot_count
+                ),
+                opponent_summon_attribution=(
+                    opponent_memory.summon_attribution.value
+                ),
+                opponent_last_observed_damage=(
+                    opponent_memory.last_observed_damage
+                ),
+                opponent_half_index=opponent_memory.half_index,
+                opponent_structure_log=(
+                    opponent_memory.structure_log_entries()
+                ),
+                opponent_role_log=opponent_memory.role_log_entries(),
+                opponent_evidence_log=(
+                    opponent_memory.evidence_log_entries()
+                ),
+                capability_unknown_count=capability_unknown_count,
+                capability_supported_count=capability_supported_count,
+                capability_unsupported_count=capability_unsupported_count,
+                capability_log=match_memory.capability_matrix.log_entries(),
+            )
         except Exception:
             LOGGER.exception(
                 'Phase 6 memory update failed for team %s round %s',
