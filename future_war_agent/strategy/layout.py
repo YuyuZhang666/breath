@@ -18,12 +18,16 @@ class WeaponSite:
 class DefensiveLayout:
     weapon_sites: tuple[WeaponSite, ...] = ()
     wall_sites: tuple[Position, ...] = ()
+    critical_wall_sites: tuple[Position, ...] = ()
+    controller_sites: tuple[Position, ...] = ()
     entrance: Position | None = None
 
 
 def build_defensive_layout(
     world: WorldGrid,
     build_plan: BuildPlan = DEFAULT_BUILD_PLAN,
+    *,
+    recent_threat_positions: tuple[Position, ...] = (),
 ) -> DefensiveLayout:
     station = world.our_station()
     if station is None:
@@ -72,12 +76,12 @@ def build_defensive_layout(
     )
 
     entrance = (
-        min(
+        max(
             ring_two,
             key=lambda value: (
                 _center_distance(value, map_center),
-                value.x,
-                value.y,
+                -value.x,
+                -value.y,
             ),
         )
         if ring_two
@@ -88,6 +92,17 @@ def build_defensive_layout(
         sum(value.y for value in footprint) / len(footprint),
     )
     weapon_positions = frozenset(site.position for site in weapon_sites)
+    current_threats = tuple(
+        robot.position
+        for robot in world.observation.robots
+        if robot.health > 0
+        and robot.target_team == world.observation.our.team_type
+    )
+    threat_positions = current_threats or recent_threat_positions
+    if not threat_positions:
+        threat_positions = (
+            Position(round(map_center[0]), round(map_center[1])),
+        )
     wall_sites = tuple(
         sorted(
             (
@@ -96,10 +111,12 @@ def build_defensive_layout(
                 if value != entrance and value not in weapon_positions
             ),
             key=lambda value: (
-                -atan2(
-                    value.y - footprint_center[1],
-                    value.x - footprint_center[0],
+                -_threat_pressure(value, threat_positions, world),
+                min(
+                    value.chebyshev_distance(threat)
+                    for threat in threat_positions
                 ),
+                -atan2(value.y - footprint_center[1], value.x - footprint_center[0]),
                 value.x,
                 value.y,
             ),
@@ -107,11 +124,67 @@ def build_defensive_layout(
     ) if build_plan.build_walls else ()
     if build_plan.wall_site_limit is not None:
         wall_sites = wall_sites[: build_plan.wall_site_limit]
+    critical_wall_sites = wall_sites[: build_plan.opening_critical_wall_count]
+    controller_sites, wall_sites = _reserve_controller_sites(
+        world,
+        weapon_sites,
+        wall_sites,
+    )
+    critical_wall_sites = tuple(
+        site for site in critical_wall_sites if site in wall_sites
+    )
     return DefensiveLayout(
         weapon_sites=weapon_sites,
         wall_sites=wall_sites,
+        critical_wall_sites=critical_wall_sites,
+        controller_sites=controller_sites,
         entrance=entrance,
     )
+
+
+def _threat_pressure(
+    position: Position,
+    threats: tuple[Position, ...],
+    world: WorldGrid,
+) -> int:
+    scale = world.observation.width + world.observation.height
+    return sum(
+        max(0, scale - position.chebyshev_distance(threat))
+        for threat in threats
+    )
+
+
+def _reserve_controller_sites(
+    world: WorldGrid,
+    weapon_sites: tuple[WeaponSite, ...],
+    wall_sites: tuple[Position, ...],
+) -> tuple[tuple[Position, ...], tuple[Position, ...]]:
+    planned_walls = set(wall_sites)
+    weapon_positions = {site.position for site in weapon_sites}
+    reserved: list[Position] = []
+    for site in weapon_sites:
+        candidates = tuple(
+            sorted(
+                (
+                    cell
+                    for cell in world.interaction_cells(site.position)
+                    if cell not in weapon_positions
+                    and cell not in reserved
+                ),
+                key=lambda cell: (
+                    cell in planned_walls,
+                    cell.x,
+                    cell.y,
+                ),
+            )
+        )
+        if not candidates:
+            continue
+        selected = candidates[0]
+        reserved.append(selected)
+        planned_walls.discard(selected)
+    retained_walls = tuple(site for site in wall_sites if site in planned_walls)
+    return tuple(reserved), retained_walls
 
 
 def _ring(

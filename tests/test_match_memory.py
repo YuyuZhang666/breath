@@ -5,7 +5,7 @@ from future_war_agent.strategy.memory import (
     MatchMemoryStore,
     canonical_position,
 )
-from tests.strategy_helpers import observation, unit
+from tests.strategy_helpers import observation, robot, unit
 from tests.test_strategy_engine import search_result
 
 
@@ -120,6 +120,30 @@ class MatchMemoryTests(unittest.TestCase):
         self.assertEqual(len(memory.wave_summaries), 16)
         self.assertEqual(memory.wave_summaries[0].round_no, 5)
         self.assertEqual(memory.wave_summaries[-1].round_no, 20)
+
+    def test_last_night_threat_direction_survives_into_next_day(self) -> None:
+        store = MatchMemoryStore()
+        night = observation(
+            round_no=71,
+            our_units=(unit(10, 5, 5, 'station', level=1),),
+            robots=(
+                robot(501, 12, 7),
+                robot(502, 11, 8),
+                robot(503, 1, 1, target_team='defender'),
+            ),
+        )
+        day = observation(
+            round_no=131,
+            our_units=(unit(10, 5, 5, 'station', level=1),),
+        )
+
+        store.observe(night)
+        memory = store.observe(day)
+
+        self.assertEqual(
+            memory.recent_threat_positions,
+            (Position(11, 8), Position(12, 7)),
+        )
 
 
 if __name__ == '__main__':

@@ -1,9 +1,10 @@
 import unittest
 
+from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.layout import build_defensive_layout
 from future_war_agent.strategy.policy import BuildPlan
 from future_war_agent.strategy.world import WorldGrid
-from tests.strategy_helpers import observation, unit
+from tests.strategy_helpers import observation, robot, unit
 
 
 class DefensiveLayoutTests(unittest.TestCase):
@@ -77,6 +78,65 @@ class DefensiveLayoutTests(unittest.TestCase):
             ('rocket', 'gatling'),
         )
         self.assertEqual(len(layout.wall_sites), 2)
+
+    def test_entrance_is_on_rear_side_and_stays_out_of_wall_plan(self) -> None:
+        world = WorldGrid.from_observation(
+            observation(our_units=(unit(10013, 5, 5, 'station', level=1),))
+        )
+
+        layout = build_defensive_layout(world)
+
+        self.assertEqual(layout.entrance, Position(3, 3))
+        self.assertNotIn(layout.entrance, layout.wall_sites)
+
+    def test_visible_east_attack_reorders_critical_walls(self) -> None:
+        world = WorldGrid.from_observation(
+            observation(
+                our_units=(unit(10013, 5, 5, 'station', level=1),),
+                robots=(robot(1, 12, 7), robot(2, 11, 8)),
+            )
+        )
+
+        layout = build_defensive_layout(world)
+
+        self.assertEqual(
+            layout.critical_wall_sites,
+            (Position(8, 8), Position(8, 7), Position(8, 6)),
+        )
+
+    def test_recent_east_attack_reorders_daytime_rebuild_sites(self) -> None:
+        world = WorldGrid.from_observation(
+            observation(our_units=(unit(10013, 5, 5, 'station', level=1),))
+        )
+
+        layout = build_defensive_layout(
+            world,
+            recent_threat_positions=(Position(12, 7), Position(11, 8)),
+        )
+
+        self.assertEqual(
+            layout.critical_wall_sites,
+            (Position(8, 8), Position(8, 7), Position(8, 6)),
+        )
+
+    def test_every_planned_weapon_keeps_a_distinct_controller_site(self) -> None:
+        world = WorldGrid.from_observation(
+            observation(our_units=(unit(10013, 5, 5, 'station', level=1),))
+        )
+
+        layout = build_defensive_layout(world)
+
+        self.assertEqual(len(layout.controller_sites), len(layout.weapon_sites))
+        self.assertEqual(len(set(layout.controller_sites)), len(layout.controller_sites))
+        self.assertTrue(set(layout.controller_sites).isdisjoint(layout.wall_sites))
+        for weapon_site, controller_site in zip(
+            layout.weapon_sites,
+            layout.controller_sites,
+        ):
+            self.assertEqual(
+                weapon_site.position.chebyshev_distance(controller_site),
+                1,
+            )
 
 
 if __name__ == "__main__":

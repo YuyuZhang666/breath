@@ -82,7 +82,9 @@ def generate_day_jobs(
         for site in layout.weapon_sites
         if (site.position, site.weapon_type) not in existing_weapon_sites
     ) if intent.build_plan.build_weapons else ()
-    occupied_weapon_sites = not missing_weapon_sites and bool(layout.weapon_sites)
+    defense_started = (
+        len(world.weapons) >= intent.build_plan.minimum_weapons_before_walls
+    )
     existing_wall_positions = {wall.position for wall in world.walls}
     missing_wall_sites = tuple(
         position
@@ -133,17 +135,29 @@ def generate_day_jobs(
                     )
 
         backpack = Counter(worker.backpack)
-        if occupied_weapon_sites and backpack[world.rules.wall_material] > 0:
-            for position in missing_wall_sites:
+        if defense_started and backpack[world.rules.wall_material] > 0:
+            critical_sites = set(layout.critical_wall_sites)
+            for wall_rank, position in enumerate(
+                missing_wall_sites[: intent.build_plan.max_wall_job_candidates]
+            ):
                 path = path_to_interaction(world, worker.position, position)
                 if path is not None:
+                    priority = priorities.build_wall
+                    if position in critical_sites:
+                        priority += intent.build_plan.critical_wall_priority_boost
+                    else:
+                        priority += max(
+                            0,
+                            intent.build_plan.threat_wall_priority_boost
+                            - wall_rank,
+                        )
                     result[worker.unit_id].append(
                         Job(
                             role_id=worker.unit_id,
                             kind=JobKind.BUILD_WALL,
                             target=position,
-                            priority=priorities.build_wall,
-                            value=-float(path.cost),
+                            priority=priority,
+                            value=-float(path.cost) - wall_rank / 1000,
                             name="wall",
                             quantity=world.rules.wall_material_cost,
                         )

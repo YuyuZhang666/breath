@@ -1,7 +1,7 @@
 import logging
 
 from future_war_agent.decision.decision import Decision
-from future_war_agent.protocol.models import Observation
+from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.time import Phase
 from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
@@ -27,6 +27,7 @@ def plan_turn(
     intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
     controller_assignments: tuple[ControllerAssignment, ...] | None = None,
     telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
+    fortification_threats: tuple[Position, ...] = (),
 ) -> Decision:
     world = WorldGrid.from_observation(observation, rules)
     if not world.friendly_roles:
@@ -67,7 +68,11 @@ def plan_turn(
             gold_reserve=intent.gold_reserve,
         )
 
-    layout = build_defensive_layout(world, intent.build_plan)
+    layout = build_defensive_layout(
+        world,
+        intent.build_plan,
+        recent_threat_positions=fortification_threats,
+    )
     jobs = generate_day_jobs(observation, world, layout, intent)
     candidates = {
         role.unit_id: candidates_for_jobs(

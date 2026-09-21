@@ -9,7 +9,7 @@ from future_war_agent.strategy.policy import (
     StrategicIntent,
 )
 from future_war_agent.strategy.world import WorldGrid
-from tests.strategy_helpers import observation, unit
+from tests.strategy_helpers import observation, robot, unit
 
 
 class DayJobTests(unittest.TestCase):
@@ -101,6 +101,108 @@ class DayJobTests(unittest.TestCase):
 
         mining = next(job for job in jobs[10010] if job.kind is JobKind.COLLECT)
         self.assertEqual(mining.name, "stone")
+
+    def test_first_weapon_precedes_walls(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            gold=75,
+        )
+
+        jobs = self.jobs(observed)
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
+        self.assertNotIn(
+            JobKind.BUILD_WALL,
+            {job.kind for job in jobs[10010]},
+        )
+
+    def test_critical_opening_walls_precede_remaining_weapons(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+                unit(10013, 5, 5, 'station', level=1),
+                unit(10020, 7, 7, 'gatling', level=1),
+            ),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+
+        jobs = generate_day_jobs(observed, world, layout)
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertIn(jobs[10010][0].target, layout.critical_wall_sites)
+        weapon_job = next(
+            job for job in jobs[10010] if job.kind is JobKind.BUILD_WEAPON
+        )
+        self.assertGreater(jobs[10010][0].priority, weapon_job.priority)
+
+    def test_after_critical_walls_remaining_weapon_build_resumes(self) -> None:
+        initial = observation(
+            our_units=(
+                unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+                unit(10013, 5, 5, 'station', level=1),
+                unit(10020, 7, 7, 'gatling', level=1),
+            ),
+            gold=75,
+        )
+        initial_world = WorldGrid.from_observation(initial)
+        initial_layout = build_defensive_layout(initial_world)
+        walls = tuple(
+            unit(10100 + index, site.x, site.y, 'wall')
+            for index, site in enumerate(initial_layout.critical_wall_sites)
+        )
+        observed = observation(
+            our_units=initial.our.units + walls,
+            gold=75,
+        )
+
+        jobs = self.jobs(observed)
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
+
+    def test_later_rebuild_prefers_attack_lane_over_nearer_rear_gap(self) -> None:
+        initial = observation(
+            our_units=(
+                unit(10010, 2, 4, 'worker', backpack=('stone',) * 5),
+                unit(10013, 5, 5, 'station', level=1),
+                unit(10020, 7, 7, 'gatling', level=1),
+                unit(10030, 4, 4, 'railgun', level=1),
+                unit(10040, 4, 7, 'rocket', level=1),
+            ),
+            robots=(robot(501, 12, 7), robot(502, 11, 8)),
+            gold=75,
+        )
+        initial_world = WorldGrid.from_observation(initial)
+        layout = build_defensive_layout(initial_world)
+        attack_lane_gap = layout.wall_sites[3]
+        rear_gap = layout.wall_sites[-1]
+        walls = tuple(
+            unit(10100 + index, site.x, site.y, 'wall')
+            for index, site in enumerate(layout.wall_sites)
+            if site not in {attack_lane_gap, rear_gap}
+        )
+        observed = observation(
+            our_units=initial.our.units + walls,
+            robots=initial.robots,
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world),
+        )
+
+        rebuilds = tuple(
+            job for job in jobs[10010] if job.kind is JobKind.BUILD_WALL
+        )
+        self.assertEqual(rebuilds[0].target, attack_lane_gap)
+        self.assertGreater(rebuilds[0].priority, rebuilds[1].priority)
 
     def test_price_per_distance_selects_mineral_after_defense(self) -> None:
         observed = observation(

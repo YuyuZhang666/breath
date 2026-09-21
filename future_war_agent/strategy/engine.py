@@ -5,7 +5,7 @@ from threading import RLock
 from time import monotonic
 
 from future_war_agent.decision.decision import Decision
-from future_war_agent.protocol.models import Observation
+from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.time import Phase
 from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
@@ -74,6 +74,10 @@ class StrategyEngine:
             phase2_planner,
             'telemetry',
         )
+        self._phase2_accepts_fortification_threats = _accepts_keyword(
+            phase2_planner,
+            'fortification_threats',
+        )
         self._night_searcher = night_searcher
         self._search_accepts_assignments = _accepts_keyword(
             night_searcher,
@@ -133,8 +137,9 @@ class StrategyEngine:
             self._telemetry.set(duplicate_request=True)
             return previous.decision
 
+        match_memory = None
         try:
-            self._memory.observe(observation)
+            match_memory = self._memory.observe(observation)
         except Exception:
             LOGGER.exception(
                 'Phase 6 memory update failed for team %s round %s',
@@ -193,6 +198,11 @@ class StrategyEngine:
             except Exception:
                 LOGGER.exception('Phase 4 fallback feature extraction failed')
                 features = None
+        fortification_threats = (
+            match_memory.recent_threat_positions
+            if match_memory is not None
+            else ()
+        )
         controller_assignments: tuple[ControllerAssignment, ...] | None = None
         if observation.time.phase is Phase.NIGHT:
             try:
@@ -293,6 +303,7 @@ class StrategyEngine:
                     observation,
                     intent,
                     controller_assignments,
+                    fortification_threats,
                 )
             except UnsupportedSimulation:
                 self._telemetry.increment('phase3_fallback_count')
@@ -307,6 +318,7 @@ class StrategyEngine:
                     observation,
                     intent,
                     controller_assignments,
+                    fortification_threats,
                 )
             except Exception:
                 self._telemetry.increment('phase3_fallback_count')
@@ -320,12 +332,14 @@ class StrategyEngine:
                     observation,
                     intent,
                     controller_assignments,
+                    fortification_threats,
                 )
         else:
             decision = self._plan_phase2(
                 observation,
                 intent,
                 controller_assignments,
+                fortification_threats,
             )
 
         task_state = (
@@ -389,6 +403,7 @@ class StrategyEngine:
         observation: Observation,
         intent: StrategicIntent,
         controller_assignments: tuple[ControllerAssignment, ...] | None = None,
+        fortification_threats: tuple[Position, ...] = (),
     ) -> Decision:
         kwargs: dict[str, object] = {}
         if self._phase2_accepts_intent:
@@ -397,6 +412,8 @@ class StrategyEngine:
             kwargs['controller_assignments'] = controller_assignments
         if self._phase2_accepts_telemetry:
             kwargs['telemetry'] = self._telemetry
+        if self._phase2_accepts_fortification_threats:
+            kwargs['fortification_threats'] = fortification_threats
         try:
             with self._telemetry.measure('phase2_ms'):
                 return self._phase2_planner(observation, **kwargs)

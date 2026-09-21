@@ -41,6 +41,7 @@ class MatchMemory:
     belief: OpponentBelief = OpponentBelief()
     zones: tuple[NormalizedZone, ...] = ()
     wave_summaries: tuple[WaveSummary, ...] = ()
+    recent_threat_positions: tuple[Position, ...] = ()
 
 
 class MatchMemoryStore:
@@ -132,6 +133,9 @@ def update_match_memory(
         )
     belief = prior.belief
     zones = prior.zones
+    recent_threat_positions = (
+        () if rollback else prior.recent_threat_positions
+    )
     if not same_observation:
         belief = update_opponent_belief(
             prior.belief,
@@ -156,6 +160,19 @@ def update_match_memory(
                 ),
             )[:MAX_NORMALIZED_ZONES]
         )
+        targeted_positions = {
+            robot.position
+            for robot in observation.robots
+            if robot.health > 0
+            and robot.target_team == observation.our.team_type
+        }
+        if targeted_positions:
+            recent_threat_positions = tuple(
+                sorted(
+                    targeted_positions,
+                    key=lambda position: (position.x, position.y),
+                )
+            )[:64]
 
     summaries = prior.wave_summaries
     if certificate is not None:
@@ -188,4 +205,5 @@ def update_match_memory(
         belief=belief,
         zones=zones,
         wave_summaries=summaries,
+        recent_threat_positions=recent_threat_positions,
     )

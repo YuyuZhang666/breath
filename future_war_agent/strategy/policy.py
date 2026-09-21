@@ -37,6 +37,11 @@ class BuildPlan:
     wall_site_limit: int | None = None
     build_weapons: bool = True
     build_walls: bool = True
+    minimum_weapons_before_walls: int = 1
+    opening_critical_wall_count: int = 3
+    critical_wall_priority_boost: int = 75
+    threat_wall_priority_boost: int = 30
+    max_wall_job_candidates: int = 4
 
     def __post_init__(self) -> None:
         if any(not name.strip() for name in self.weapon_loadout):
@@ -45,6 +50,16 @@ class BuildPlan:
             raise ValueError("weapon loadout entries must be unique")
         if self.wall_site_limit is not None and self.wall_site_limit < 0:
             raise ValueError("wall_site_limit cannot be negative")
+        if self.minimum_weapons_before_walls < 0:
+            raise ValueError('minimum_weapons_before_walls cannot be negative')
+        if self.opening_critical_wall_count < 0:
+            raise ValueError('opening_critical_wall_count cannot be negative')
+        if self.critical_wall_priority_boost < 0:
+            raise ValueError('critical_wall_priority_boost cannot be negative')
+        if self.threat_wall_priority_boost < 0:
+            raise ValueError('threat_wall_priority_boost cannot be negative')
+        if self.max_wall_job_candidates <= 0:
+            raise ValueError('max_wall_job_candidates must be positive')
 
 
 @dataclass(frozen=True, slots=True)
