@@ -34,6 +34,42 @@ def defended_observation(
 
 
 class StrategicDirectorTests(unittest.TestCase):
+    def test_day_one_missing_core_weapon_can_consume_economy_reserve(self) -> None:
+        observed = observation(
+            round_no=20,
+            our_units=(
+                unit(10, 5, 5, 'station', level=1),
+                unit(11, 2, 2, 'worker'),
+                unit(12, 3, 3, 'gatling', level=1),
+                unit(13, 4, 3, 'railgun', level=1),
+            ),
+            gold=25,
+        )
+
+        decision = StrategicDirector().select(observed)
+
+        self.assertIs(decision.intent.profile, StrategyProfile.ECONOMY)
+        self.assertEqual(decision.intent.gold_reserve, 25)
+        self.assertEqual(
+            decision.intent.reserve_eligible_actions,
+            frozenset({('build', 'rocket')}),
+        )
+
+    def test_opening_reserve_exception_does_not_extend_into_day_two(self) -> None:
+        observed = observation(
+            round_no=131,
+            our_units=(
+                unit(10, 5, 5, 'station', level=1),
+                unit(11, 2, 2, 'worker'),
+            ),
+            gold=75,
+        )
+
+        decision = StrategicDirector().select(observed)
+
+        self.assertEqual(decision.intent.gold_reserve, 25)
+        self.assertEqual(decision.intent.reserve_eligible_actions, frozenset())
+
     def test_selects_economy_until_defense_and_reserve_are_ready(self) -> None:
         observed = observation(
             round_no=20,

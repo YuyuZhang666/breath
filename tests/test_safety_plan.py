@@ -65,6 +65,46 @@ class SafetyPlanTests(unittest.TestCase):
         self.assertIs(plan.status, SafetyPlanStatus.UNKNOWN)
         self.assertEqual(plan.actions, ())
 
+    def test_incomplete_risk_forecast_is_unknown_not_unavailable(self) -> None:
+        observed = observation(round_no=71, gold=25)
+
+        for risk_level in (RiskLevel.WATCH, RiskLevel.CRITICAL):
+            with self.subTest(risk_level=risk_level):
+                forecast = self._forecast(
+                    risk_level=risk_level,
+                    predicted_damage=600,
+                    effective_hp=500,
+                    margin=-100,
+                    complete=False,
+                )
+
+                plan = find_cheapest_safe_plan(
+                    observed,
+                    forecast,
+                    BuildPlan(weapon_loadout=('gatling',)),
+                )
+
+                self.assertIs(plan.status, SafetyPlanStatus.UNKNOWN)
+                self.assertEqual(plan.actions, ())
+
+    def test_unverified_missing_railgun_keeps_plan_unknown(self) -> None:
+        observed = observation(round_no=20, gold=25)
+        forecast = self._forecast(
+            risk_level=RiskLevel.WATCH,
+            predicted_damage=20,
+            effective_hp=30,
+            margin=10,
+        )
+
+        plan = find_cheapest_safe_plan(
+            observed,
+            forecast,
+            BuildPlan(weapon_loadout=('railgun',), build_walls=False),
+        )
+
+        self.assertIs(plan.status, SafetyPlanStatus.UNKNOWN)
+        self.assertEqual(plan.actions, ())
+
     def test_safe_forecast_overrides_legacy_low_station_threshold(self) -> None:
         observed = observation(
             round_no=20,

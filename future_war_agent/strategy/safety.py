@@ -50,7 +50,7 @@ def find_cheapest_safe_plan(
 ) -> CheapestSafePlan | None:
     if forecast is None:
         return None
-    if forecast.risk_level is RiskLevel.UNKNOWN:
+    if forecast.risk_level is RiskLevel.UNKNOWN or not forecast.complete:
         return CheapestSafePlan(
             status=SafetyPlanStatus.UNKNOWN,
             actions=(),
@@ -69,7 +69,7 @@ def find_cheapest_safe_plan(
             source_forecast_round=forecast.generated_round,
         )
 
-    candidates = _verified_actions(
+    candidates, has_unverified_candidate = _verified_actions(
         observation,
         build_plan,
         rules=rules,
@@ -117,6 +117,15 @@ def find_cheapest_safe_plan(
             )
     if feasible:
         return min(feasible, key=lambda item: item[0])[1]
+    if has_unverified_candidate:
+        return CheapestSafePlan(
+            status=SafetyPlanStatus.UNKNOWN,
+            actions=(),
+            gold_cost=0,
+            projected_margin=forecast.survival_margin,
+            projected_risk_level=RiskLevel.UNKNOWN,
+            source_forecast_round=forecast.generated_round,
+        )
     return CheapestSafePlan(
         status=SafetyPlanStatus.UNAVAILABLE,
         actions=(),
@@ -133,21 +142,23 @@ def _verified_actions(
     *,
     rules: RulesConfig,
     config: Phase3Config,
-) -> tuple[SafetyPlanAction, ...]:
+) -> tuple[tuple[SafetyPlanAction, ...], bool]:
     if not build_plan.build_weapons:
-        return ()
+        return (), False
     living_counts = Counter(
         unit.role_type
         for unit in observation.our.units
         if unit.health > 0
     )
     actions: list[SafetyPlanAction] = []
+    has_unverified_candidate = False
     for weapon_type in build_plan.weapon_loadout:
         if living_counts[weapon_type] > 0:
             living_counts[weapon_type] -= 1
             continue
         gain = _verified_weapon_gain(observation, weapon_type, config)
         if gain <= 0:
+            has_unverified_candidate = True
             continue
         actions.append(
             SafetyPlanAction(
@@ -156,7 +167,7 @@ def _verified_actions(
                 defense_gain=gain,
             )
         )
-    return tuple(actions)
+    return tuple(actions), has_unverified_candidate
 
 
 def _verified_weapon_gain(
