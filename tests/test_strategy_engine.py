@@ -212,6 +212,12 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertEqual(search.calls[0]["weights"], UNIFORM_WEIGHTS)
         self.assertEqual(search.calls[0]["deadline"], 100.8)
         self.assertIs(search.calls[0]["clock"], engine._clock)
+        assignments = search.calls[0]['controller_assignments']
+        self.assertTrue(assignments)
+        self.assertEqual(
+            len({item.role_id for item in assignments}),
+            len(assignments),
+        )
 
     def test_duplicate_night_request_performs_one_search(self) -> None:
         engine, _, search = self.make_engine()
@@ -481,7 +487,7 @@ class StrategyEngineTests(unittest.TestCase):
                 self.assertIs(phase2.observations[1], self.night)
                 self.assertEqual(len(search.calls), 1)
 
-    def test_phase_2_exception_is_not_swallowed(self) -> None:
+    def test_phase_2_exception_falls_back_to_empty_legal_decision(self) -> None:
         def broken(
             _: Observation,
             *,
@@ -492,8 +498,9 @@ class StrategyEngineTests(unittest.TestCase):
 
         engine = StrategyEngine(phase2_planner=broken)
 
-        with self.assertRaisesRegex(ValueError, "phase 2 failure"):
-            engine.plan(self.day)
+        decision = engine.plan(self.day)
+
+        self.assertEqual(decision, Decision())
 
     def test_concurrent_duplicates_execute_one_search(self) -> None:
         engine, _, search = self.make_engine()

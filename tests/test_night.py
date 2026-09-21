@@ -1,8 +1,10 @@
 import unittest
+from dataclasses import replace
 
 from future_war_agent.decision.actions import ActionKind
 from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.night import (
+    ControllerAssignmentCache,
     assign_controllers,
     generate_night_candidates,
 )
@@ -87,9 +89,9 @@ class NightPolicyTests(unittest.TestCase):
         )
         self.assertEqual(attack.action.target_positions, (Position(3, 3),))
 
-    def test_cooldown_and_high_level_weapons_do_not_attack(self) -> None:
-        for level, cooldown in ((1, 2), (2, 0)):
-            with self.subTest(level=level, cooldown=cooldown):
+    def test_cooling_weapon_does_not_attack(self) -> None:
+        for role_type in ('gatling', 'railgun', 'rocket'):
+            with self.subTest(role_type=role_type):
                 observed = observation(
                     round_no=71,
                     our_units=(
@@ -98,9 +100,9 @@ class NightPolicyTests(unittest.TestCase):
                             10020,
                             5,
                             5,
-                            "gatling",
-                            level=level,
-                            cooldown=cooldown,
+                            role_type,
+                            level=2,
+                            cooldown=2,
                             attack_range=5,
                         ),
                     ),
@@ -116,6 +118,95 @@ class NightPolicyTests(unittest.TestCase):
                         for item in choices[10010]
                     )
                 )
+
+    def test_upgraded_gatling_emits_level_sized_targets(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 4, 5, 'worker'),
+                unit(10020, 5, 5, 'gatling', level=3, attack_range=6),
+            ),
+            robots=(
+                robot(30001, 7, 4),
+                robot(30002, 7, 5),
+                robot(30003, 7, 6),
+            ),
+        )
+        choices = generate_night_candidates(
+            observed,
+            WorldGrid.from_observation(observed),
+        )
+        attack = next(
+            item.action
+            for item in choices[10010]
+            if item.action and item.action.kind is ActionKind.ATTACK
+        )
+
+        self.assertEqual(len(attack.target_positions), 3)
+        self.assertEqual(len(set(attack.target_positions)), 3)
+
+    def test_upgraded_rocket_emits_level_sized_targets(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 4, 5, 'worker'),
+                unit(10020, 5, 5, 'rocket', level=2, attack_range=6),
+            ),
+            robots=(robot(30001, 7, 4), robot(30002, 7, 6)),
+        )
+        choices = generate_night_candidates(
+            observed,
+            WorldGrid.from_observation(observed),
+        )
+        attack = next(
+            item.action
+            for item in choices[10010]
+            if item.action and item.action.kind is ActionKind.ATTACK
+        )
+
+        self.assertEqual(len(attack.target_positions), 2)
+        self.assertEqual(len(set(attack.target_positions)), 2)
+
+    def test_assignment_cache_hits_and_invalidates_on_role_move(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 1, 1, 'worker'),
+                unit(10020, 5, 5, 'gatling', level=1, attack_range=5),
+            ),
+        )
+        cache = ControllerAssignmentCache()
+
+        first, first_hit = cache.resolve(
+            observed,
+            WorldGrid.from_observation(observed),
+            mode_key='economy',
+        )
+        second, second_hit = cache.resolve(
+            observed,
+            WorldGrid.from_observation(observed),
+            mode_key='economy',
+        )
+        moved = replace(
+            observed,
+            our=replace(
+                observed.our,
+                units=(
+                    replace(observed.our.units[0], position=Position(2, 1)),
+                    observed.our.units[1],
+                ),
+            ),
+        )
+        _, moved_hit = cache.resolve(
+            moved,
+            WorldGrid.from_observation(moved),
+            mode_key='economy',
+        )
+
+        self.assertFalse(first_hit)
+        self.assertTrue(second_hit)
+        self.assertIs(first, second)
+        self.assertFalse(moved_hit)
 
     def test_unassigned_role_gets_safe_defensive_candidate(self) -> None:
         observed = observation(

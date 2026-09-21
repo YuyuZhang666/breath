@@ -1,10 +1,16 @@
 from dataclasses import dataclass
 from itertools import combinations, permutations, product
+from threading import RLock
 from types import MappingProxyType
 from typing import Mapping
 
 from future_war_agent.decision.actions import Action
-from future_war_agent.protocol.models import Observation, Position, UnitState
+from future_war_agent.protocol.models import (
+    Observation,
+    Position,
+    RobotState,
+    UnitState,
+)
 
 from .jobs import Job, JobKind
 from .items import has_item
@@ -12,6 +18,7 @@ from .joint import TacticalCandidate, candidates_for_jobs
 from .pathfinding import shortest_path
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .rules import station_footprint
+from .simulation.geometry import is_legal_cone
 from .world import WorldGrid
 
 
@@ -21,6 +28,66 @@ class ControllerAssignment:
     weapon_id: int
     stand: Position
     distance: int
+
+
+@dataclass(frozen=True, slots=True)
+class _ControllerCacheEntry:
+    signature: tuple[object, ...]
+    assignments: tuple[ControllerAssignment, ...]
+
+
+class ControllerAssignmentCache:
+    def __init__(self) -> None:
+        self._entries: dict[str, _ControllerCacheEntry] = {}
+        self._lock = RLock()
+
+    def resolve(
+        self,
+        observation: Observation,
+        world: WorldGrid,
+        *,
+        mode_key: str,
+    ) -> tuple[tuple[ControllerAssignment, ...], bool]:
+        team_id = observation.our.team_id.strip()
+        signature = _assignment_signature(observation, world, mode_key)
+        if team_id:
+            with self._lock:
+                cached = self._entries.get(team_id)
+                if cached is not None and cached.signature == signature:
+                    return cached.assignments, True
+
+        assignments = assign_controllers(observation, world)
+        if team_id:
+            with self._lock:
+                self._entries[team_id] = _ControllerCacheEntry(
+                    signature,
+                    assignments,
+                )
+        return assignments, False
+
+
+def _assignment_signature(
+    observation: Observation,
+    world: WorldGrid,
+    mode_key: str,
+) -> tuple[object, ...]:
+    return (
+        observation.width,
+        observation.height,
+        observation.our.team_type,
+        mode_key,
+        tuple(
+            (role.unit_id, role.position.x, role.position.y)
+            for role in world.friendly_roles
+        ),
+        tuple(
+            (weapon.unit_id, weapon.position.x, weapon.position.y)
+            for weapon in world.weapons
+        ),
+        tuple(
+            sorted((position.x, position.y) for position in world.structure_cells)
+        ),
+    )
 
 
 def assign_controllers(
@@ -72,9 +139,16 @@ def generate_night_candidates(
     observation: Observation,
     world: WorldGrid,
     intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
+    *,
+    controller_assignments: tuple[ControllerAssignment, ...] | None = None,
 ) -> Mapping[int, tuple[TacticalCandidate, ...]]:
     assignments = {
-        item.role_id: item for item in assign_controllers(observation, world)
+        item.role_id: item
+        for item in (
+            assign_controllers(observation, world)
+            if controller_assignments is None
+            else controller_assignments
+        )
     }
     choices: dict[int, tuple[TacticalCandidate, ...]] = {}
     for role in world.friendly_roles:
@@ -165,35 +239,152 @@ def _assigned_candidates(
         return candidates_for_jobs(observation, world, role, (job,))
 
     candidates: list[TacticalCandidate] = []
-    if (
-        weapon is not None
-        and weapon.level == 1
-        and weapon.cooldown == 0
-        and weapon.attack_range > 0
-    ):
-        targets = tuple(
-            robot
-            for robot in observation.robots
-            if robot.health > 0
-            and weapon.position.chebyshev_distance(robot.position)
-            <= weapon.attack_range
-        )
+    if weapon is not None:
+        targets = _phase2_attack_targets(observation, world, weapon)
         if targets:
-            target = min(
-                targets,
-                key=lambda robot: _target_key(observation, world, weapon, robot),
-            )
             candidates.append(
                 TacticalCandidate.attack(
                     role_id=role.unit_id,
                     start=role.position,
                     weapon_id=weapon.unit_id,
-                    targets=(target.position,),
+                    targets=targets,
                     priority=500,
                 )
             )
     candidates.append(TacticalCandidate.wait(role.unit_id, role.position))
     return tuple(candidates)
+
+
+def _phase2_attack_targets(
+    observation: Observation,
+    world: WorldGrid,
+    weapon: UnitState,
+) -> tuple[Position, ...]:
+    if (
+        weapon.cooldown != 0
+        or weapon.attack_range <= 0
+        or weapon.level is None
+        or weapon.level <= 0
+    ):
+        return ()
+    living = tuple(robot for robot in observation.robots if robot.health > 0)
+    if not living:
+        return ()
+    if weapon.role_type == 'railgun':
+        in_range = tuple(
+            robot
+            for robot in living
+            if weapon.position.chebyshev_distance(robot.position)
+            <= weapon.attack_range
+        )
+        if not in_range:
+            return ()
+        target = min(
+            in_range,
+            key=lambda robot: _target_key(observation, world, weapon, robot),
+        )
+        return (target.position,)
+    if weapon.role_type == 'gatling':
+        return _gatling_targets(observation, world, weapon, living)
+    if weapon.role_type == 'rocket':
+        return _rocket_targets(observation, world, weapon, living)
+    return ()
+
+
+def _gatling_targets(
+    observation: Observation,
+    world: WorldGrid,
+    weapon: UnitState,
+    robots: tuple[RobotState, ...],
+) -> tuple[Position, ...]:
+    robots_by_cell: dict[Position, list[RobotState]] = {}
+    for robot in robots:
+        if weapon.position.chebyshev_distance(robot.position) <= weapon.attack_range:
+            robots_by_cell.setdefault(robot.position, []).append(robot)
+    ranked_cells = tuple(
+        sorted(
+            robots_by_cell,
+            key=lambda position: min(
+                _target_key(observation, world, weapon, robot)
+                for robot in robots_by_cell[position]
+            ),
+        )[:16]
+    )
+    if len(ranked_cells) < weapon.level:
+        return ()
+    return next(
+        (
+            group
+            for group in combinations(ranked_cells, weapon.level)
+            if is_legal_cone(weapon.position, group)
+        ),
+        (),
+    )
+
+
+def _rocket_targets(
+    observation: Observation,
+    world: WorldGrid,
+    weapon: UnitState,
+    robots: tuple[RobotState, ...],
+) -> tuple[Position, ...]:
+    candidate_cells = {
+        Position(robot.position.x + delta_x, robot.position.y + delta_y)
+        for robot in robots
+        for delta_x in (-1, 0, 1)
+        for delta_y in (-1, 0, 1)
+    }
+    ranked_cells = tuple(
+        sorted(
+            (
+                cell
+                for cell in candidate_cells
+                if world.in_bounds(cell)
+                and weapon.position.chebyshev_distance(cell)
+                <= weapon.attack_range
+            ),
+            key=lambda cell: _rocket_target_key(
+                observation,
+                world,
+                weapon,
+                robots,
+                cell,
+            ),
+        )
+    )
+    if len(ranked_cells) < weapon.level:
+        return ()
+    return ranked_cells[: weapon.level]
+
+
+def _rocket_target_key(
+    observation: Observation,
+    world: WorldGrid,
+    weapon: UnitState,
+    robots: tuple[RobotState, ...],
+    cell: Position,
+) -> tuple[object, ...]:
+    affected = tuple(
+        robot for robot in robots if cell.chebyshev_distance(robot.position) <= 1
+    )
+    targeted_count = sum(
+        robot.target_team == observation.our.team_type for robot in affected
+    )
+    best = min(
+        (
+            _target_key(observation, world, weapon, robot)
+            for robot in affected
+        ),
+        default=(True, 10**9, 10**9, 10**9),
+    )
+    return (
+        targeted_count == 0,
+        best,
+        -targeted_count,
+        -len(affected),
+        cell.x,
+        cell.y,
+    )
 
 
 def _target_key(observation, world, weapon, robot) -> tuple[object, ...]:

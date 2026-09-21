@@ -19,6 +19,8 @@ from .world import WorldGrid
 MAX_ANSWER_LENGTH = 2048
 MAX_PROMPT_LENGTH = 2048
 MAX_NEWS_LENGTH = 512
+MAX_COMMAND_LENGTH = 512
+MAX_COMMAND_RESULT_LENGTH = 4096
 MAX_SOPS = 16
 MAX_TASK_TYPE_LENGTH = 128
 
@@ -50,6 +52,9 @@ class TaskAgentState:
     pending_answer: str = ''
     pending_pioneer_id: int | None = None
     pending_round: int | None = None
+    command_step: int = 0
+    pending_command_round: int | None = None
+    last_command_result: str = ''
     sops: tuple[TaskSop, ...] = ()
     official_news: str = ''
     folk_legends: str = ''
@@ -67,6 +72,10 @@ class TaskAgentState:
             raise ValueError('official news capacity exceeded')
         if len(self.folk_legends) > MAX_NEWS_LENGTH:
             raise ValueError('folk legends capacity exceeded')
+        if self.command_step < 0:
+            raise ValueError('command_step cannot be negative')
+        if len(self.last_command_result) > MAX_COMMAND_RESULT_LENGTH:
+            raise ValueError('command result capacity exceeded')
 
 
 EMPTY_TASK_STATE = TaskAgentState()
@@ -96,6 +105,17 @@ class _TaskCandidate:
 
 
 class TaskAgent:
+    def __init__(self, *, execute_commands: tuple[str, ...] = ()) -> None:
+        normalized = tuple(command.strip() for command in execute_commands)
+        if any(
+            not command
+            or '\x00' in command
+            or len(command) > MAX_COMMAND_LENGTH
+            for command in normalized
+        ):
+            raise ValueError('execute commands must be bounded and nonblank')
+        self._execute_commands = normalized
+
     def apply(
         self,
         observation: Observation,
@@ -106,6 +126,7 @@ class TaskAgent:
     ) -> TaskAgentResult:
         state = previous_state if previous_state is not None else EMPTY_TASK_STATE
         state = _reconcile_feedback(observation, state)
+        state = _reconcile_command_result(observation, state)
         state = replace(
             state,
             official_news=_bounded(observation.world_news.official_news, MAX_NEWS_LENGTH),
@@ -130,6 +151,7 @@ class TaskAgent:
                 pioneer,
                 state,
                 task_text,
+                intent,
             )
 
         if (
@@ -186,6 +208,7 @@ class TaskAgent:
         pioneer: UnitState,
         state: TaskAgentState,
         task_text: str,
+        intent: StrategicIntent,
     ) -> TaskAgentResult:
         task_type = state.active_task_type or _task_key(task_text)
         fingerprint = sha256(task_text.encode('utf-8')).hexdigest()
@@ -220,17 +243,38 @@ class TaskAgent:
             )
             return TaskAgentResult(decision, next_state)
 
-        prompt = _build_prompt(task_type, task_text)
+        prompt = _build_prompt(
+            task_type,
+            task_text,
+            command_result=state.last_command_result,
+        )
+        execute_command = ''
+        next_state = state
+        if (
+            intent.feature_flags.enable_task_execute_commands
+            and state.pending_command_round is None
+            and state.command_step < len(self._execute_commands)
+        ):
+            execute_command = self._execute_commands[state.command_step]
+            next_state = replace(
+                state,
+                command_step=state.command_step + 1,
+                pending_command_round=observation.time.round_no,
+            )
         commands = {
             actor_id: action
             for actor_id, action in base_decision.commands.items()
             if actor_id != pioneer.unit_id
         }
-        decision = Decision(commands=commands, prompt=prompt, execute_command='')
+        decision = Decision(
+            commands=commands,
+            prompt=prompt,
+            execute_command=execute_command,
+        )
         return TaskAgentResult(
             decision,
             replace(
-                state,
+                next_state,
                 active_task_type=task_type,
                 last_prompt_fingerprint=fingerprint,
             ),
@@ -406,6 +450,28 @@ def _reconcile_feedback(
     )
 
 
+def _reconcile_command_result(
+    observation: Observation,
+    state: TaskAgentState,
+) -> TaskAgentState:
+    if (
+        state.pending_command_round is None
+        or observation.time.round_no <= state.pending_command_round
+    ):
+        return state
+    result = _bounded(
+        observation.last_command_result,
+        MAX_COMMAND_RESULT_LENGTH,
+    )
+    if not result:
+        return state
+    return replace(
+        state,
+        pending_command_round=None,
+        last_command_result=result,
+    )
+
+
 def _clear_task_lifecycle(state: TaskAgentState) -> TaskAgentState:
     return replace(
         state,
@@ -420,6 +486,9 @@ def _clear_task_lifecycle(state: TaskAgentState) -> TaskAgentState:
         pending_answer='',
         pending_pioneer_id=None,
         pending_round=None,
+        command_step=0,
+        pending_command_round=None,
+        last_command_result='',
     )
 
 
@@ -440,11 +509,20 @@ def _normalize_task_type(task_type: str) -> str:
     return normalized[:prefix_length] + ':' + digest
 
 
-def _build_prompt(task_type: str, task_text: str) -> str:
+def _build_prompt(
+    task_type: str,
+    task_text: str,
+    *,
+    command_result: str = '',
+) -> str:
+    sandbox_context = (
+        f'\nSandbox result:\n{command_result}' if command_result else ''
+    )
     prompt = (
         'Solve the game task below. Return only the final answer, with no '
         'explanation, markdown, or shell commands.\n'
         f'Task type: {task_type}\n'
         f'Task: {task_text}'
+        f'{sandbox_context}'
     )
     return prompt[:MAX_PROMPT_LENGTH]

@@ -1,11 +1,14 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
-from time import monotonic
+from time import monotonic, perf_counter_ns
 
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation
-from future_war_agent.strategy.night import assign_controllers
+from future_war_agent.strategy.night import (
+    ControllerAssignment,
+    assign_controllers,
+)
 from future_war_agent.strategy.world import WorldGrid
 
 from .candidates import RootAction, SimJointAction, generate_root_actions
@@ -34,6 +37,8 @@ class SearchStats:
     roots_evaluated: int
     scenarios_per_root: int
     maximum_steps: int
+    candidate_generation_ms: float = 0.0
+    simulation_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +57,7 @@ def search_night(
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
     clock: Callable[[], float] = monotonic,
     deadline: float | None = None,
+    controller_assignments: tuple[ControllerAssignment, ...] | None = None,
 ) -> SearchResult:
     _validate_weights(scenario_weights)
     effective_deadline = (
@@ -59,14 +65,22 @@ def search_night(
     )
     _check_deadline(clock, effective_deadline)
 
+    candidate_started_ns = perf_counter_ns()
     world = WorldGrid.from_observation(observation)
-    controller_assignments = assign_controllers(observation, world)
+    resolved_assignments = (
+        assign_controllers(observation, world)
+        if controller_assignments is None
+        else controller_assignments
+    )
     assignments = tuple(
         AssignedStand(item.role_id, item.weapon_id, item.stand)
-        for item in controller_assignments
+        for item in resolved_assignments
     )
     state = build_sim_state(observation, assignments, config)
     roots = generate_root_actions(observation, world, state, config)
+    candidate_generation_ms = (
+        perf_counter_ns() - candidate_started_ns
+    ) / 1_000_000
     _check_deadline(clock, effective_deadline)
     if not roots:
         raise UnsupportedSimulation("no legal Phase 3 root actions")
@@ -89,6 +103,7 @@ def search_night(
     initial_weapon_ids = frozenset(weapon.unit_id for weapon in state.weapons)
     non_key_weapon_ids = initial_weapon_ids - initial_key_weapon_ids
     evaluated: list[tuple[RootAction, RobotWaveSafetyCertificate]] = []
+    simulation_started_ns = perf_counter_ns()
 
     for root in roots:
         _check_deadline(clock, effective_deadline)
@@ -131,6 +146,8 @@ def search_night(
         )
         _check_deadline(clock, effective_deadline)
 
+    simulation_ms = (perf_counter_ns() - simulation_started_ns) / 1_000_000
+
     secured = tuple(item for item in evaluated if item[1].secured)
     if secured and objective.enable_score_band:
         pool = secured
@@ -155,6 +172,8 @@ def search_night(
             roots_evaluated=len(evaluated),
             scenarios_per_root=len(ALL_ROBOT_POLICIES),
             maximum_steps=horizon,
+            candidate_generation_ms=candidate_generation_ms,
+            simulation_ms=simulation_ms,
         ),
     )
 

@@ -4,7 +4,12 @@ from dataclasses import replace
 from future_war_agent.decision.actions import Action, ActionKind
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Position, TaskPointState, WorldNews
-from future_war_agent.strategy.policy import StrategyProfile, intent_for_profile
+from future_war_agent.protocol.time import TurnTime
+from future_war_agent.strategy.policy import (
+    RuleFeatureFlags,
+    StrategyProfile,
+    intent_for_profile,
+)
 from future_war_agent.strategy.task_agent import (
     MAX_TASK_TYPE_LENGTH,
     TaskAgent,
@@ -37,10 +42,22 @@ def task(
 
 
 SCORE_INTENT = intent_for_profile(StrategyProfile.SCORE, 'test')
+ECONOMY_INTENT = intent_for_profile(StrategyProfile.ECONOMY, 'test')
 SURVIVE_INTENT = intent_for_profile(StrategyProfile.SURVIVE, 'test')
 
 
 class TaskAgentTests(unittest.TestCase):
+    def test_economy_intent_accepts_available_task(self) -> None:
+        observed = observation(
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            tasks=(task('economy-task', 2, 2),),
+        )
+
+        result = TaskAgent().apply(observed, Decision(), ECONOMY_INTENT)
+
+        self.assertEqual(result.decision.commands[2].kind, ActionKind.ACCEPT_TASK)
+        self.assertEqual(result.state.active_task_type, 'economy-task')
+
     def test_selects_nearest_equal_value_task_and_moves_pioneer(self) -> None:
         observed = observation(
             our_units=(unit(2, 1, 1, 'pioneer'),),
@@ -149,6 +166,61 @@ class TaskAgentTests(unittest.TestCase):
         self.assertEqual(set(result.decision.commands), {1})
         self.assertEqual(result.decision.execute_command, '')
         self.assertEqual(result.state.official_news, 'official')
+
+    def test_execute_command_flow_requires_flag_and_consumes_next_round_result(
+        self,
+    ) -> None:
+        enabled = intent_for_profile(
+            StrategyProfile.ECONOMY,
+            'sandbox verified',
+            feature_flags=RuleFeatureFlags(enable_task_execute_commands=True),
+        )
+        agent = TaskAgent(execute_commands=('probe-one', 'probe-two'))
+        active = TaskAgentState(active_task_type='code')
+        first_observation = observation(
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            phase_task='Inspect the provided task files.',
+        )
+
+        first = agent.apply(
+            first_observation,
+            Decision(),
+            enabled,
+            previous_state=active,
+        )
+        second_observation = replace(
+            first_observation,
+            time=TurnTime.from_round(2),
+            last_command_result='task.md found',
+        )
+        second = agent.apply(
+            second_observation,
+            Decision(),
+            enabled,
+            previous_state=first.state,
+        )
+
+        self.assertEqual(first.decision.execute_command, 'probe-one')
+        self.assertEqual(second.decision.execute_command, 'probe-two')
+        self.assertIn('task.md found', second.decision.prompt)
+        self.assertEqual(second.state.command_step, 2)
+        self.assertEqual(second.state.pending_command_round, 2)
+
+    def test_execute_commands_remain_off_by_default(self) -> None:
+        agent = TaskAgent(execute_commands=('probe-one',))
+        observed = observation(
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            phase_task='Inspect the provided task files.',
+        )
+
+        result = agent.apply(
+            observed,
+            Decision(),
+            ECONOMY_INTENT,
+            previous_state=TaskAgentState(active_task_type='code'),
+        )
+
+        self.assertEqual(result.decision.execute_command, '')
 
     def test_successful_submission_becomes_exact_type_sop(self) -> None:
         agent = TaskAgent()

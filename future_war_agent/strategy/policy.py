@@ -23,6 +23,12 @@ class RuleFeatureFlags:
     enable_blind_fire: bool = False
     enable_rocket_structure_damage: bool = False
     enable_treasure_retry: bool = False
+    enable_attack_enemy_station: bool = False
+    enable_attack_enemy_role: bool = False
+    enable_cross_team_robot_attack: bool = False
+    enable_night_mining: bool = False
+    enable_controller_personal_action: bool = False
+    enable_task_execute_commands: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +117,7 @@ class StrategicIntent:
     gold_reserve: int = 0
     minimum_hold_rounds: int = 0
     allow_mining: bool = True
-    allow_tasks: bool = False
+    allow_tasks: bool = True
     allow_scouting: bool = False
     allow_pressure: bool = False
     night_objective: NightObjective = DEFAULT_NIGHT_OBJECTIVE
@@ -146,6 +152,7 @@ def intent_for_profile(
             feature_flags=flags,
             gold_reserve=100,
             minimum_hold_rounds=3,
+            allow_tasks=False,
             transition_reason=reason,
         )
     if profile is StrategyProfile.ECONOMY:
@@ -158,6 +165,7 @@ def intent_for_profile(
             feature_flags=flags,
             gold_reserve=25,
             minimum_hold_rounds=4,
+            allow_tasks=True,
             transition_reason=reason,
         )
     if profile is StrategyProfile.SCORE:

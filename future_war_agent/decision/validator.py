@@ -1,5 +1,6 @@
 from future_war_agent.protocol.models import Observation, Position, UnitState
 from future_war_agent.protocol.time import Phase
+from future_war_agent.strategy.simulation.geometry import is_legal_cone
 
 from .actions import Action, ActionKind
 from .decision import Decision
@@ -149,6 +150,32 @@ def _is_valid_personal_action(
     return True
 
 
+def _is_valid_attack(weapon: UnitState, action: Action) -> bool:
+    targets = action.target_positions
+    if (
+        weapon.cooldown != 0
+        or weapon.attack_range <= 0
+        or len(set(targets)) != len(targets)
+        or any(
+            weapon.position.chebyshev_distance(target) > weapon.attack_range
+            for target in targets
+        )
+    ):
+        return False
+    if weapon.role_type == 'railgun':
+        return len(targets) == 1
+    if weapon.level is None or weapon.level <= 0:
+        return False
+    if weapon.role_type == 'gatling':
+        return len(targets) == weapon.level and is_legal_cone(
+            weapon.position,
+            targets,
+        )
+    if weapon.role_type == 'rocket':
+        return len(targets) == weapon.level
+    return False
+
+
 def validate_decision(observation: Observation, decision: Decision) -> Decision:
     living_units = {
         unit.unit_id: unit for unit in observation.our.units if unit.health > 0
@@ -184,6 +211,8 @@ def validate_decision(observation: Observation, decision: Decision) -> Decision:
             controller_id = action.controller_id
             controller = living_units.get(controller_id)
             if weapon.role_type not in _WEAPON_ROLES:
+                continue
+            if not _is_valid_attack(weapon, action):
                 continue
             if controller is None or controller_id in used_controllers:
                 continue

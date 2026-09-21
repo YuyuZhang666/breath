@@ -23,7 +23,7 @@ class ValidatorTests(unittest.TestCase):
     def test_keeps_valid_night_attack(self) -> None:
         decision = Decision(
             commands={
-                10020: Action.attack(10010, (Position(4, 4),)),
+                10020: Action.attack(10010, (Position(6, 20),)),
             }
         )
 
@@ -53,7 +53,7 @@ class ValidatorTests(unittest.TestCase):
     def test_drops_attack_when_controller_has_personal_action(self) -> None:
         decision = Decision(
             commands={
-                10020: Action.attack(10010, (Position(4, 4),)),
+                10020: Action.attack(10010, (Position(6, 20),)),
                 10010: Action.move(Position(5, 24)),
             }
         )
@@ -62,6 +62,108 @@ class ValidatorTests(unittest.TestCase):
 
         self.assertNotIn(10020, validated.commands)
         self.assertIn(10010, validated.commands)
+
+    def test_upgraded_gatling_requires_exact_level_sized_cone(self) -> None:
+        weapon = next(
+            unit for unit in self.observed.our.units if unit.unit_id == 10020
+        )
+        observed = replace(
+            self.observed,
+            our=replace(
+                self.observed.our,
+                units=tuple(
+                    replace(unit, level=2)
+                    if unit.unit_id == weapon.unit_id
+                    else unit
+                    for unit in self.observed.our.units
+                ),
+            ),
+        )
+        legal = Decision(
+            commands={
+                10020: Action.attack(
+                    10010,
+                    (Position(6, 20), Position(7, 20)),
+                )
+            }
+        )
+        undersized = Decision(
+            commands={10020: Action.attack(10010, (Position(6, 20),))}
+        )
+
+        self.assertIn(10020, validate_decision(observed, legal).commands)
+        self.assertNotIn(10020, validate_decision(observed, undersized).commands)
+
+    def test_upgraded_rocket_uses_level_targets_and_railgun_stays_single(self) -> None:
+        weapon = next(
+            unit for unit in self.observed.our.units if unit.unit_id == 10020
+        )
+        cases = (
+            (
+                replace(weapon, role_type='rocket', level=3),
+                (Position(5, 20), Position(6, 20), Position(7, 20)),
+                True,
+            ),
+            (
+                replace(weapon, role_type='rocket', level=3),
+                (Position(6, 20),),
+                False,
+            ),
+            (
+                replace(weapon, role_type='railgun', level=3),
+                (Position(6, 20),),
+                True,
+            ),
+            (
+                replace(weapon, role_type='railgun', level=3),
+                (Position(6, 20), Position(7, 20)),
+                False,
+            ),
+        )
+        for changed, targets, expected in cases:
+            with self.subTest(role_type=changed.role_type, targets=targets):
+                observed = replace(
+                    self.observed,
+                    our=replace(
+                        self.observed.our,
+                        units=tuple(
+                            changed if unit.unit_id == weapon.unit_id else unit
+                            for unit in self.observed.our.units
+                        ),
+                    ),
+                )
+                retained = 10020 in validate_decision(
+                    observed,
+                    Decision(commands={10020: Action.attack(10010, targets)}),
+                ).commands
+                self.assertEqual(retained, expected)
+
+    def test_drops_attack_on_cooldown_or_outside_live_range(self) -> None:
+        weapon = next(
+            unit for unit in self.observed.our.units if unit.unit_id == 10020
+        )
+        decision = Decision(
+            commands={10020: Action.attack(10010, (Position(6, 20),))}
+        )
+        for changed in (
+            replace(weapon, cooldown=1),
+            replace(weapon, attack_range=2),
+        ):
+            with self.subTest(changed=changed):
+                observed = replace(
+                    self.observed,
+                    our=replace(
+                        self.observed.our,
+                        units=tuple(
+                            changed if unit.unit_id == weapon.unit_id else unit
+                            for unit in self.observed.our.units
+                        ),
+                    ),
+                )
+                self.assertNotIn(
+                    10020,
+                    validate_decision(observed, decision).commands,
+                )
 
     def test_drops_structurally_incomplete_action(self) -> None:
         decision = Decision(commands={10010: Action.move(Position(5, 24))})

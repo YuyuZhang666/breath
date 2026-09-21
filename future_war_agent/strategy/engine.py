@@ -7,11 +7,13 @@ from time import monotonic
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation
 from future_war_agent.protocol.time import Phase
+from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
 from .director import StrategicDirector
 from .features import extract_features
 from .items import has_item
 from .memory import MatchMemoryStore
+from .night import ControllerAssignment, ControllerAssignmentCache
 from .planner import plan_turn
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent, StrategyProfile
 from .reconcile import reconcile_scenario_weights, uniform_scenario_weights
@@ -32,6 +34,7 @@ from .simulation.search import (
     search_night,
 )
 from .task_agent import EMPTY_TASK_STATE, TaskAgent
+from .world import WorldGrid
 
 
 LOGGER = logging.getLogger(__name__)
@@ -57,11 +60,21 @@ class StrategyEngine:
         clock: Callable[[], float] = monotonic,
         session_store: SessionStore | None = None,
         scenario_reconciler: ScenarioReconciler = reconcile_scenario_weights,
+        controller_assignment_cache: ControllerAssignmentCache | None = None,
+        telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
     ) -> None:
         self._config = config
         self._phase2_planner = phase2_planner
         self._phase2_accepts_intent = _accepts_intent(phase2_planner)
+        self._phase2_accepts_assignments = _accepts_keyword(
+            phase2_planner,
+            'controller_assignments',
+        )
         self._night_searcher = night_searcher
+        self._search_accepts_assignments = _accepts_keyword(
+            night_searcher,
+            'controller_assignments',
+        )
         self._objective_provider = objective_provider
         self._director = director if director is not None else StrategicDirector()
         self._task_agent = task_agent if task_agent is not None else TaskAgent()
@@ -71,11 +84,26 @@ class StrategyEngine:
         self._clock = clock
         self._sessions = session_store if session_store is not None else SessionStore()
         self._scenario_reconciler = scenario_reconciler
+        self._controller_assignments = (
+            controller_assignment_cache
+            if controller_assignment_cache is not None
+            else ControllerAssignmentCache()
+        )
+        self._telemetry = telemetry
         self._lock = RLock()
 
     def plan(self, observation: Observation) -> Decision:
-        with self._lock:
-            return self._plan_locked(observation)
+        token = self._telemetry.begin()
+        self._telemetry.identify(
+            team_id=observation.our.team_id,
+            round_no=observation.time.round_no,
+            phase=observation.time.phase.value,
+        )
+        try:
+            with self._lock:
+                return self._plan_locked(observation)
+        finally:
+            self._telemetry.finish(token)
 
     def current_profile(self, team_id: str) -> StrategyProfile | None:
         with self._lock:
@@ -98,6 +126,7 @@ class StrategyEngine:
         if continuity is SessionContinuity.DUPLICATE:
             if previous is None:
                 raise AssertionError("duplicate continuity requires a session")
+            self._telemetry.set(duplicate_request=True)
             return previous.decision
 
         try:
@@ -123,29 +152,31 @@ class StrategyEngine:
         )
         director_failed = False
         try:
-            director_decision = self._director.select(
-                observation,
-                previous_state=(
-                    previous_for_director.director_state
-                    if previous_for_director is not None
-                    else None
-                ),
-                previous_observation=(
-                    previous_for_director.observation
-                    if previous_for_director is not None
-                    else None
-                ),
-                certificate=(
-                    previous_for_director.certificate
-                    if previous_for_director is not None
-                    else None
-                ),
-            )
+            with self._telemetry.measure('director_ms'):
+                director_decision = self._director.select(
+                    observation,
+                    previous_state=(
+                        previous_for_director.director_state
+                        if previous_for_director is not None
+                        else None
+                    ),
+                    previous_observation=(
+                        previous_for_director.observation
+                        if previous_for_director is not None
+                        else None
+                    ),
+                    certificate=(
+                        previous_for_director.certificate
+                        if previous_for_director is not None
+                        else None
+                    ),
+                )
             intent = director_decision.intent
             features = director_decision.features
             director_state = director_decision.state
         except Exception:
             director_failed = True
+            self._telemetry.set(fallback_used=True)
             LOGGER.exception(
                 'Phase 4 director failed; using default intent for team %s round %s',
                 team_id,
@@ -158,6 +189,25 @@ class StrategyEngine:
             except Exception:
                 LOGGER.exception('Phase 4 fallback feature extraction failed')
                 features = None
+        controller_assignments: tuple[ControllerAssignment, ...] | None = None
+        if observation.time.phase is Phase.NIGHT:
+            try:
+                controller_assignments, cache_hit = (
+                    self._controller_assignments.resolve(
+                        observation,
+                        WorldGrid.from_observation(observation),
+                        mode_key=intent.profile.value,
+                    )
+                )
+                self._telemetry.set(controller_cache_hit=cache_hit)
+            except Exception:
+                self._telemetry.set(fallback_used=True)
+                LOGGER.exception(
+                    'controller assignment cache failed for team %s round %s',
+                    team_id,
+                    observation.time.round_no,
+                )
+
         simulation_action = None
         fresh_certificate = None
         certificate = (
@@ -181,6 +231,7 @@ class StrategyEngine:
         )
 
         if phase3_eligible:
+            self._telemetry.set(phase3_level='legacy_full')
             try:
                 if continuity is SessionContinuity.CONSECUTIVE:
                     weights = self._scenario_reconciler(
@@ -194,35 +245,84 @@ class StrategyEngine:
                     if self._objective_provider is not None
                     else intent.night_objective
                 )
-                result = self._night_searcher(
-                    observation,
-                    weights,
-                    objective=objective,
-                    config=self._config,
-                    clock=self._clock,
-                    deadline=deadline,
-                )
+                search_kwargs = {
+                    'objective': objective,
+                    'config': self._config,
+                    'clock': self._clock,
+                    'deadline': deadline,
+                }
+                if self._search_accepts_assignments:
+                    search_kwargs['controller_assignments'] = (
+                        controller_assignments
+                    )
+                with self._telemetry.measure('phase3_ms'):
+                    result = self._night_searcher(
+                        observation,
+                        weights,
+                        **search_kwargs,
+                    )
+                stats = getattr(result, 'stats', None)
+                if stats is not None:
+                    self._telemetry.set(
+                        root_candidate_count=stats.roots_generated,
+                        scenario_count=stats.scenarios_per_root,
+                        simulation_count=(
+                            stats.roots_evaluated * stats.scenarios_per_root
+                        ),
+                        candidate_generation_ms=stats.candidate_generation_ms,
+                        simulation_ms=stats.simulation_ms,
+                    )
                 decision = result.decision
                 simulation_action = result.simulation_action
                 certificate = result.certificate
                 fresh_certificate = result.certificate
-            except (UnsupportedSimulation, DeadlineExceeded):
+            except DeadlineExceeded:
+                self._telemetry.increment('phase3_fallback_count')
+                self._telemetry.set(fallback_used=True, watchdog_hit=True)
+                LOGGER.warning(
+                    "Phase 3 watchdog expired; using Phase 2 for team %s round %s",
+                    team_id,
+                    observation.time.round_no,
+                    exc_info=True,
+                )
+                decision = self._plan_phase2(
+                    observation,
+                    intent,
+                    controller_assignments,
+                )
+            except UnsupportedSimulation:
+                self._telemetry.increment('phase3_fallback_count')
+                self._telemetry.set(fallback_used=True)
                 LOGGER.warning(
                     "Phase 3 unavailable; using Phase 2 for team %s round %s",
                     team_id,
                     observation.time.round_no,
                     exc_info=True,
                 )
-                decision = self._plan_phase2(observation, intent)
+                decision = self._plan_phase2(
+                    observation,
+                    intent,
+                    controller_assignments,
+                )
             except Exception:
+                self._telemetry.increment('phase3_fallback_count')
+                self._telemetry.set(fallback_used=True)
                 LOGGER.exception(
                     "Phase 3 failed; using Phase 2 for team %s round %s",
                     team_id,
                     observation.time.round_no,
                 )
-                decision = self._plan_phase2(observation, intent)
+                decision = self._plan_phase2(
+                    observation,
+                    intent,
+                    controller_assignments,
+                )
         else:
-            decision = self._plan_phase2(observation, intent)
+            decision = self._plan_phase2(
+                observation,
+                intent,
+                controller_assignments,
+            )
 
         task_state = (
             previous_for_director.task_state
@@ -230,15 +330,17 @@ class StrategyEngine:
             else EMPTY_TASK_STATE
         )
         try:
-            task_result = self._task_agent.apply(
-                observation,
-                decision,
-                intent,
-                previous_state=task_state,
-            )
+            with self._telemetry.measure('task_ms'):
+                task_result = self._task_agent.apply(
+                    observation,
+                    decision,
+                    intent,
+                    previous_state=task_state,
+                )
             decision = task_result.decision
             task_state = task_result.state
         except Exception:
+            self._telemetry.set(fallback_used=True)
             LOGGER.exception(
                 'Phase 5 task agent failed; using base decision for team %s round %s',
                 team_id,
@@ -282,19 +384,37 @@ class StrategyEngine:
         self,
         observation: Observation,
         intent: StrategicIntent,
+        controller_assignments: tuple[ControllerAssignment, ...] | None = None,
     ) -> Decision:
+        kwargs: dict[str, object] = {}
         if self._phase2_accepts_intent:
-            return self._phase2_planner(observation, intent=intent)
-        return self._phase2_planner(observation)
+            kwargs['intent'] = intent
+        if self._phase2_accepts_assignments:
+            kwargs['controller_assignments'] = controller_assignments
+        try:
+            with self._telemetry.measure('phase2_ms'):
+                return self._phase2_planner(observation, **kwargs)
+        except Exception:
+            self._telemetry.set(fallback_used=True)
+            LOGGER.exception(
+                'Phase 2 failed; using empty legal decision for team %s round %s',
+                observation.our.team_id,
+                observation.time.round_no,
+            )
+            return Decision()
 
 
 def _accepts_intent(planner: Phase2Planner) -> bool:
+    return _accepts_keyword(planner, 'intent')
+
+
+def _accepts_keyword(function: Callable[..., object], name: str) -> bool:
     try:
-        parameters = signature(planner).parameters.values()
+        parameters = signature(function).parameters.values()
     except (TypeError, ValueError):
         return False
     return any(
-        parameter.name == 'intent'
+        parameter.name == name
         or parameter.kind is Parameter.VAR_KEYWORD
         for parameter in parameters
     )
