@@ -13,6 +13,9 @@ class ComputeGovernorConfig:
     cooldown_rounds_after_watchdog: int = 10
     total_decision_budget_seconds: float = 3.0
     phase3_hard_stop_seconds: float = 0.350
+    forecast_watchdog_seconds: float = 0.100
+    forecast_full_watchdog_seconds: float = 0.750
+    night_full_forecast_enabled: bool = False
     emergency_reserve_seconds: float = 0.500
     budget_utilization: float = 0.80
 
@@ -31,6 +34,10 @@ class ComputeGovernorConfig:
             raise ValueError('total_decision_budget_seconds must be positive')
         if self.phase3_hard_stop_seconds <= 0:
             raise ValueError('phase3_hard_stop_seconds must be positive')
+        if self.forecast_watchdog_seconds <= 0:
+            raise ValueError('forecast_watchdog_seconds must be positive')
+        if self.forecast_full_watchdog_seconds <= 0:
+            raise ValueError('forecast_full_watchdog_seconds must be positive')
         if not 0 < self.emergency_reserve_seconds < self.total_decision_budget_seconds:
             raise ValueError('emergency reserve must fit inside the decision budget')
         if not 0 < self.budget_utilization <= 1:

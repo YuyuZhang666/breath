@@ -183,6 +183,10 @@ def search_night(
                         simulated_action,
                         policy,
                         config,
+                        deadline_check=lambda: _check_deadline(
+                            clock,
+                            effective_deadline,
+                        ),
                     )
                 except DeadlineExceeded:
                     deadline_hit = True

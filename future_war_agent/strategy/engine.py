@@ -4,6 +4,7 @@ from inspect import Parameter, signature
 from threading import RLock
 from time import monotonic, perf_counter_ns
 
+from future_war_agent.deadline import RequestBudget, RequestDeadlineExceeded
 from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation, Position
@@ -14,6 +15,7 @@ from .compute import ComputeGovernor, ComputeTurnUsage
 from .director import StrategicDirector
 from .features import extract_features
 from .forecast import (
+    ForecastUpdateKind,
     ForecastRefresh,
     NightForecast,
     RiskLevel,
@@ -149,6 +151,18 @@ class StrategyEngine:
             night_forecaster,
             'controller_assignments',
         )
+        self._forecast_accepts_clock = _accepts_keyword(
+            night_forecaster,
+            'clock',
+        )
+        self._forecast_accepts_deadline = _accepts_keyword(
+            night_forecaster,
+            'deadline',
+        )
+        self._forecast_accepts_allow_full = _accepts_keyword(
+            night_forecaster,
+            'allow_full',
+        )
         self._telemetry = telemetry
         self._compute_governor = (
             compute_governor
@@ -165,9 +179,21 @@ class StrategyEngine:
         observation: Observation,
         *,
         request_started_at: float | None = None,
+        request_budget: RequestBudget | None = None,
     ) -> Decision:
-        if request_started_at is None:
-            request_started_at = self._clock()
+        if request_budget is None:
+            if request_started_at is None:
+                request_started_at = self._clock()
+            config = self._compute_governor.config
+            request_budget = RequestBudget.start(
+                started_at=request_started_at,
+                response_budget_seconds=(
+                    config.total_decision_budget_seconds
+                    + config.emergency_reserve_seconds
+                ),
+                compute_budget_seconds=config.total_decision_budget_seconds,
+                clock=self._clock,
+            )
         compute_usage = ComputeTurnUsage()
         token = self._telemetry.begin()
         self._telemetry.identify(
@@ -180,7 +206,7 @@ class StrategyEngine:
                 try:
                     return self._plan_locked(
                         observation,
-                        request_started_at,
+                        request_budget,
                         compute_usage,
                     )
                 finally:
@@ -213,11 +239,25 @@ class StrategyEngine:
     def _plan_locked(
         self,
         observation: Observation,
-        request_started_at: float,
+        request_budget: RequestBudget,
         compute_usage: ComputeTurnUsage,
     ) -> Decision:
         team_id = observation.our.team_id
+        request_deadline = request_budget.compute_deadline
+        reserve = self._compute_governor.config.emergency_reserve_seconds
+        governor_emergency = request_budget.remaining_compute() <= reserve
+        self._telemetry.set(
+            safe_action_generated=True,
+            decision_source='safe',
+        )
         if not team_id.strip():
+            if governor_emergency:
+                self._telemetry.set(
+                    fallback_used=True,
+                    fallback_reason='deadline_low',
+                    timeout_prevented=True,
+                )
+                return Decision()
             return self._plan_phase2(observation, DEFAULT_STRATEGIC_INTENT)
 
         fingerprint = observation_fingerprint(observation)
@@ -349,6 +389,7 @@ class StrategyEngine:
             if previous_for_director is not None
             else None
         )
+        forecast_invalidation_reason: str | None = None
         if observation.time.phase is Phase.NIGHT:
             previous_observation = (
                 previous_for_director.observation
@@ -360,14 +401,32 @@ class StrategyEngine:
                 if previous_for_director is not None
                 else None
             )
-            invalidation_reason = forecast_recompute_reason(
+            forecast_invalidation_reason = forecast_recompute_reason(
                 observation,
                 previous_observation=previous_observation,
                 previous_forecast=night_forecast,
                 previous_decision=previous_decision,
             )
-            if invalidation_reason is not None:
+            if governor_emergency:
+                self._telemetry.set(
+                    compute_governor_action='emergency_reserve',
+                    forecast_mode=('cached' if night_forecast is not None else 'skipped'),
+                    forecast_reason='deadline_low',
+                    fallback_used=True,
+                    fallback_reason='deadline_low',
+                    timeout_prevented=True,
+                )
+                if night_forecast is not None:
+                    self._telemetry.set(
+                        forecast_update_kind=night_forecast.update_kind.value,
+                        forecast_cache_hit=True,
+                        night_risk_level=night_forecast.risk_level.value,
+                        risk_ratio=float(night_forecast.risk_ratio),
+                        survival_margin=night_forecast.survival_margin,
+                    )
+            elif forecast_invalidation_reason is not None:
                 try:
+                    request_budget.checkpoint('forecast controller assignment')
                     controller_assignments, cache_hit = (
                         self._controller_assignments.resolve(
                             observation,
@@ -390,39 +449,81 @@ class StrategyEngine:
                         team_id,
                         observation.time.round_no,
                     )
-            try:
-                forecast_kwargs = {
-                    'previous_observation': previous_observation,
-                    'previous_forecast': night_forecast,
-                    'previous_decision': previous_decision,
-                    'config': self._config,
-                }
-                if self._forecast_accepts_assignments:
-                    forecast_kwargs['controller_assignments'] = (
-                        controller_assignments
+            if not governor_emergency:
+                try:
+                    request_budget.checkpoint('night forecast')
+                    forecast_deadline = request_budget.child_deadline(
+                        (
+                            self._compute_governor.config.forecast_full_watchdog_seconds
+                            if self._compute_governor.config.night_full_forecast_enabled
+                            else self._compute_governor.config.forecast_watchdog_seconds
+                        )
                     )
-                with self._telemetry.measure('forecast_ms'):
-                    forecast_refresh = self._night_forecaster(
-                        observation,
-                        **forecast_kwargs,
+                    forecast_kwargs = {
+                        'previous_observation': previous_observation,
+                        'previous_forecast': night_forecast,
+                        'previous_decision': previous_decision,
+                        'config': self._config,
+                    }
+                    if self._forecast_accepts_assignments:
+                        forecast_kwargs['controller_assignments'] = (
+                            controller_assignments
+                        )
+                    if self._forecast_accepts_clock:
+                        forecast_kwargs['clock'] = request_budget.clock
+                    if self._forecast_accepts_deadline:
+                        forecast_kwargs['deadline'] = forecast_deadline
+                    if self._forecast_accepts_allow_full:
+                        forecast_kwargs['allow_full'] = (
+                            self._compute_governor.config.night_full_forecast_enabled
+                        )
+                    with self._telemetry.measure('forecast_ms'):
+                        forecast_refresh = self._night_forecaster(
+                            observation,
+                            **forecast_kwargs,
+                        )
+                    night_forecast = forecast_refresh.forecast
+                    self._telemetry.set(
+                        forecast_update_kind=night_forecast.update_kind.value,
+                        forecast_mode=night_forecast.update_kind.value,
+                        forecast_reason=forecast_refresh.reason,
+                        forecast_cache_hit=not forecast_refresh.recomputed,
+                        night_risk_level=night_forecast.risk_level.value,
+                        risk_ratio=float(night_forecast.risk_ratio),
+                        survival_margin=night_forecast.survival_margin,
                     )
-                night_forecast = forecast_refresh.forecast
-                self._telemetry.set(
-                    forecast_update_kind=night_forecast.update_kind.value,
-                    forecast_cache_hit=not forecast_refresh.recomputed,
-                    night_risk_level=night_forecast.risk_level.value,
-                    risk_ratio=float(night_forecast.risk_ratio),
-                    survival_margin=night_forecast.survival_margin,
-                )
-            except Exception:
-                self._telemetry.set(fallback_used=True)
-                if invalidation_reason is not None:
-                    night_forecast = None
-                LOGGER.exception(
-                    'NightForecast failed for team %s round %s',
-                    team_id,
-                    observation.time.round_no,
-                )
+                except (DeadlineExceeded, RequestDeadlineExceeded):
+                    compute_usage.watchdog_hit = True
+                    self._telemetry.set(
+                        fallback_used=True,
+                        fallback_reason='forecast_timeout',
+                        timeout_prevented=True,
+                        watchdog_hit=True,
+                        forecast_mode=(
+                            'cached' if night_forecast is not None else 'skipped'
+                        ),
+                        forecast_reason='forecast_timeout',
+                    )
+                    LOGGER.warning(
+                        'NightForecast watchdog expired for team %s round %s',
+                        team_id,
+                        observation.time.round_no,
+                        exc_info=True,
+                    )
+                except Exception:
+                    self._telemetry.set(
+                        fallback_used=True,
+                        fallback_reason='exception',
+                        forecast_mode=(
+                            'cached' if night_forecast is not None else 'skipped'
+                        ),
+                        forecast_reason='exception',
+                    )
+                    LOGGER.exception(
+                        'NightForecast failed for team %s round %s',
+                        team_id,
+                        observation.time.round_no,
+                    )
         elif night_forecast is not None:
             try:
                 night_forecast = rebase_day_forecast(
@@ -431,6 +532,8 @@ class StrategyEngine:
                 )
                 self._telemetry.set(
                     forecast_update_kind=night_forecast.update_kind.value,
+                    forecast_mode=night_forecast.update_kind.value,
+                    forecast_reason='day rebase',
                     forecast_cache_hit=True,
                     night_risk_level=night_forecast.risk_level.value,
                     risk_ratio=float(night_forecast.risk_ratio),
@@ -523,8 +626,10 @@ class StrategyEngine:
             if match_memory is not None
             else ()
         )
+        governor_emergency = request_budget.remaining_compute() <= reserve
         if (
             observation.time.phase is Phase.NIGHT
+            and not governor_emergency
             and (
                 controller_assignments is None
                 or controller_assignment_mode != intent.profile.value
@@ -573,49 +678,51 @@ class StrategyEngine:
         phase2_5_before = float(
             self._telemetry.current('phase2_5_ms', 0.0)
         )
-        decision = self._plan_phase2(
-            observation,
-            intent,
-            controller_assignments,
-            fortification_threats,
-            (
-                night_forecast.expected_wall_losses
-                if night_forecast is not None
-                else 0
-            ),
-            market_view,
-        )
+        if governor_emergency:
+            decision = Decision()
+            self._telemetry.set(
+                compute_governor_action='emergency_reserve',
+                phase3_level=Phase3Level.NONE.value,
+                fallback_used=True,
+                fallback_reason='deadline_low',
+                timeout_prevented=True,
+                decision_source='safe',
+            )
+        else:
+            decision = self._plan_phase2(
+                observation,
+                intent,
+                controller_assignments,
+                fortification_threats,
+                (
+                    night_forecast.expected_wall_losses
+                    if night_forecast is not None
+                    else 0
+                ),
+                market_view,
+            )
+            self._telemetry.set(decision_source='phase2')
         compute_usage.phase2_5_ms = max(0.0, float(
             self._telemetry.current('phase2_5_ms', 0.0)
         ) - phase2_5_before)
-        request_deadline = (
-            request_started_at
-            + self._compute_governor.config.total_decision_budget_seconds
-        )
-        governor_emergency = (
-            self._clock()
-            >= request_deadline
-            - self._compute_governor.config.emergency_reserve_seconds
-        )
+        governor_emergency = request_budget.remaining_compute() <= reserve
         if governor_emergency:
             self._telemetry.set(
                 compute_governor_action='emergency_reserve',
                 phase3_level=Phase3Level.NONE.value,
+                fallback_used=True,
+                fallback_reason='deadline_low',
+                timeout_prevented=True,
             )
 
         phase3_eligible = (
             not director_failed
             and observation.time.phase is Phase.NIGHT
             and previous is not None
-            and (
-                continuity is SessionContinuity.CONSECUTIVE
-                or (
-                    continuity is SessionContinuity.REVISION
-                    and previous.simulation_action is not None
-                )
-            )
+            and continuity is SessionContinuity.CONSECUTIVE
             and not _requires_emergency_medicine(observation, intent)
             and not governor_emergency
+            and not compute_usage.watchdog_hit
         )
 
         if phase3_eligible:
@@ -625,8 +732,15 @@ class StrategyEngine:
                 intent,
                 forecast=night_forecast,
             )
-            self._telemetry.set(phase3_level=trigger.level.value)
-            if trigger.level is not Phase3Level.NONE:
+            requested_level = trigger.level
+            if (
+                requested_level is Phase3Level.FULL
+                and night_forecast is not None
+                and night_forecast.update_kind is ForecastUpdateKind.LIGHTWEIGHT
+            ):
+                requested_level = Phase3Level.LITE
+            self._telemetry.set(phase3_level=requested_level.value)
+            if requested_level is not Phase3Level.NONE:
                 if continuity is SessionContinuity.CONSECUTIVE:
                     try:
                         weights = self._scenario_reconciler(
@@ -646,11 +760,11 @@ class StrategyEngine:
                 )
                 compute_plan = self._compute_governor.plan(
                     team_id,
-                    requested_level=trigger.level,
+                    requested_level=requested_level,
                     phase3_config=self._config,
                     round_no=observation.time.round_no,
                     day_no=observation.time.day_no,
-                    now=self._clock(),
+                    now=request_budget.clock(),
                     request_deadline=request_deadline,
                 )
                 governor_emergency = compute_plan.emergency_return
@@ -689,10 +803,10 @@ class StrategyEngine:
                     search_kwargs = {
                         'objective': objective,
                         'config': self._config,
-                        'clock': self._clock,
+                        'clock': request_budget.clock,
                         'deadline': min(
                             compute_plan.chain_deadline,
-                            self._clock() + budget.seconds,
+                            request_budget.clock() + budget.seconds,
                         ),
                     }
                     if self._search_accepts_budget:
@@ -707,8 +821,9 @@ class StrategyEngine:
                         search_kwargs['intent'] = intent
                     if self._search_accepts_baseline:
                         search_kwargs['baseline_decision'] = decision
+                    phase3_started_ns = perf_counter_ns()
                     try:
-                        phase3_started_ns = perf_counter_ns()
+                        request_budget.checkpoint('phase 3 search')
                         with self._telemetry.measure('phase3_ms'):
                             result = self._night_searcher(
                                 observation,
@@ -743,16 +858,19 @@ class StrategyEngine:
                                 self._telemetry.set(watchdog_hit=True)
                                 compute_usage.watchdog_hit = True
                         decision = result.decision
+                        self._telemetry.set(decision_source='phase3')
                         simulation_action = result.simulation_action
                         certificate = result.certificate
                         fresh_certificate = result.certificate
                         break
-                    except DeadlineExceeded:
+                    except (DeadlineExceeded, RequestDeadlineExceeded):
                         compute_usage.watchdog_hit = True
                         self._telemetry.increment('phase3_fallback_count')
                         self._telemetry.set(
                             fallback_used=True,
                             watchdog_hit=True,
+                            fallback_reason='phase3_timeout',
+                            timeout_prevented=True,
                         )
                         LOGGER.warning(
                             'Phase 3 %s watchdog expired for team %s round %s',
@@ -785,13 +903,14 @@ class StrategyEngine:
                             perf_counter_ns() - phase3_started_ns
                         ) / 1_000_000
 
-        if (
-            self._clock()
-            >= request_deadline
-            - self._compute_governor.config.emergency_reserve_seconds
-        ):
+        if request_budget.remaining_compute() <= reserve:
             governor_emergency = True
-            self._telemetry.set(compute_governor_action='emergency_reserve')
+            self._telemetry.set(
+                compute_governor_action='emergency_reserve',
+                fallback_used=True,
+                fallback_reason='deadline_low',
+                timeout_prevented=True,
+            )
 
         task_state = (
             previous_for_director.task_state
@@ -845,6 +964,7 @@ class StrategyEngine:
                     )
                 decision = task_result.decision
                 task_state = task_result.state
+                self._telemetry.set(decision_source='task')
                 pending_candidate = next(
                     (
                         candidate
@@ -867,35 +987,45 @@ class StrategyEngine:
                     team_id,
                     observation.time.round_no,
                 )
-            try:
-                with self._telemetry.measure('treasure_ms'):
-                    treasure_result = self._treasure_agent.apply(
-                        observation,
-                        decision,
-                        intent,
-                        previous_state=treasure_state,
-                        task_active=bool(
-                            task_state.active_task_type
-                            or observation.phase_task.strip()
-                        ),
-                    )
-                decision = treasure_result.decision
-                treasure_state = treasure_result.state
+            governor_emergency = request_budget.remaining_compute() <= reserve
+            if governor_emergency:
                 self._telemetry.set(
-                    treasure_candidate_count=len(treasure_state.candidates),
-                    treasure_attempted=any(
-                        action.kind is ActionKind.SUMMON_TREASURE
-                        for action in decision.commands.values()
-                    ),
-                    treasure_result=observation.last_summon_treasure_result,
+                    compute_governor_action='emergency_reserve',
+                    fallback_used=True,
+                    fallback_reason='deadline_low',
+                    timeout_prevented=True,
                 )
-            except Exception:
-                self._telemetry.set(fallback_used=True)
-                LOGGER.exception(
-                    'Phase 5 treasure agent failed; using task decision for team %s round %s',
-                    team_id,
-                    observation.time.round_no,
-                )
+            else:
+                try:
+                    with self._telemetry.measure('treasure_ms'):
+                        treasure_result = self._treasure_agent.apply(
+                            observation,
+                            decision,
+                            intent,
+                            previous_state=treasure_state,
+                            task_active=bool(
+                                task_state.active_task_type
+                                or observation.phase_task.strip()
+                            ),
+                        )
+                    decision = treasure_result.decision
+                    treasure_state = treasure_result.state
+                    self._telemetry.set(
+                        decision_source='treasure',
+                        treasure_candidate_count=len(treasure_state.candidates),
+                        treasure_attempted=any(
+                            action.kind is ActionKind.SUMMON_TREASURE
+                            for action in decision.commands.values()
+                        ),
+                        treasure_result=observation.last_summon_treasure_result,
+                    )
+                except Exception:
+                    self._telemetry.set(fallback_used=True)
+                    LOGGER.exception(
+                        'Phase 5 treasure agent failed; using task decision for team %s round %s',
+                        team_id,
+                        observation.time.round_no,
+                    )
 
         if fresh_certificate is not None or night_forecast is not None:
             try:
@@ -931,6 +1061,7 @@ class StrategyEngine:
                 market_state=market_state,
             )
         )
+        self._telemetry.set(response_action_count=len(decision.commands))
         return decision
 
     def _plan_phase2(

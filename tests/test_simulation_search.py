@@ -1,6 +1,8 @@
 import unittest
 from fractions import Fraction
+from unittest.mock import patch
 
+import future_war_agent.strategy.simulation.search as search_module
 from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.serializer import decision_to_payload
 from future_war_agent.protocol.models import Position
@@ -342,23 +344,32 @@ class SimulationSearchTests(unittest.TestCase):
             )
 
     def test_deadline_after_complete_root_returns_anytime_best(self) -> None:
-        class PrefixClock:
-            def __init__(self) -> None:
-                self.calls = 0
+        expired = False
+        original_project = search_module._projected_certificate
 
-            def __call__(self) -> float:
-                self.calls += 1
-                # Cooperative checks now cover candidates, joint-fire, BFS,
-                # exact steps and the TailEstimator. This boundary expires
-                # after one complete root instead of counting only outer loops.
-                return 0.0 if self.calls <= 200 else 1.0
+        def clock() -> float:
+            return 1.0 if expired else 0.0
 
-        result = search_night(
-            self._gatling_scenario(),
-            WEIGHTS,
-            clock=PrefixClock(),
-            deadline=0.5,
-        )
+        def expire_after_first_root(*args, **kwargs):
+            nonlocal expired
+            certificate = original_project(*args, **kwargs)
+            # Expire only after the first root has produced a complete
+            # certificate. This keeps the test independent of how many
+            # cooperative checkpoints exist inside one simulation step.
+            expired = True
+            return certificate
+
+        with patch.object(
+            search_module,
+            '_projected_certificate',
+            side_effect=expire_after_first_root,
+        ):
+            result = search_night(
+                self._gatling_scenario(),
+                WEIGHTS,
+                clock=clock,
+                deadline=0.5,
+            )
 
         self.assertTrue(result.stats.deadline_hit)
         self.assertGreaterEqual(result.stats.roots_evaluated, 1)

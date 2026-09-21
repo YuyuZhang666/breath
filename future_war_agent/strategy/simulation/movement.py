@@ -1,4 +1,5 @@
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
@@ -22,7 +23,11 @@ class MoveIntent:
 def resolve_simultaneous_moves(
     state: SimState,
     intents: tuple[MoveIntent, ...],
+    *,
+    deadline_check: Callable[[], None] | None = None,
 ) -> Mapping[ActorKey, Position]:
+    if deadline_check is not None:
+        deadline_check()
     actor_positions: dict[ActorKey, Position] = {
         ("role", role.unit_id): role.position
         for role in state.roles
@@ -37,6 +42,8 @@ def resolve_simultaneous_moves(
     )
     position_occupants: dict[Position, set[ActorKey]] = {}
     for actor, position in actor_positions.items():
+        if deadline_check is not None:
+            deadline_check()
         position_occupants.setdefault(position, set()).add(actor)
 
     actor_counts = Counter(
@@ -51,6 +58,8 @@ def resolve_simultaneous_moves(
 
     target_counts = Counter(intent.target for intent in intents)
     for actor, intent in intent_by_actor.items():
+        if deadline_check is not None:
+            deadline_check()
         if (
             actor not in actor_positions
             or actor_positions[actor] != intent.start
@@ -63,16 +72,24 @@ def resolve_simultaneous_moves(
 
     actors = tuple(sorted(intent_by_actor))
     for left_index, left_actor in enumerate(actors):
+        if deadline_check is not None:
+            deadline_check()
         left = intent_by_actor[left_actor]
         for right_actor in actors[left_index + 1 :]:
+            if deadline_check is not None:
+                deadline_check()
             right = intent_by_actor[right_actor]
             if left.target == right.start and right.target == left.start:
                 blocked.update((left_actor, right_actor))
 
     changed = True
     while changed:
+        if deadline_check is not None:
+            deadline_check()
         changed = False
         for actor, intent in intent_by_actor.items():
+            if deadline_check is not None:
+                deadline_check()
             if actor in blocked:
                 continue
             occupants = position_occupants.get(intent.target, set())
@@ -84,10 +101,11 @@ def resolve_simultaneous_moves(
                 blocked.add(actor)
                 changed = True
 
-    resolved = {
-        actor: intent.start if actor in blocked else intent.target
-        for actor, intent in sorted(intent_by_actor.items())
-    }
+    resolved: dict[ActorKey, Position] = {}
+    for actor, intent in sorted(intent_by_actor.items()):
+        if deadline_check is not None:
+            deadline_check()
+        resolved[actor] = intent.start if actor in blocked else intent.target
     return MappingProxyType(resolved)
 
 
