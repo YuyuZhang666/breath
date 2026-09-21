@@ -10,6 +10,9 @@ from textwrap import dedent
 ROOT = Path(__file__).resolve().parents[1]
 PACKAGE_NAME = "FutureWarAgent"
 RUNTIME_SOURCE = ROOT / "future_war_agent"
+KEY_FILE_NAME = "log_secret.key"
+MIN_KEY_BYTES = 32
+MAX_KEY_FILE_BYTES = 4096
 
 LAUNCHER = dedent(
     """\
@@ -44,11 +47,11 @@ LAUNCHER = dedent(
         os.chdir(root)
         sys.path.insert(0, str(root / "src"))
 
-        from future_war_agent.seclog import configure
+        from future_war_agent.seclog import KEY_FILE_NAME, configure
         from future_war_agent.server import serve
 
         port = parse_port(sys.argv[1:] if argv is None else argv)
-        configure(level=logging.INFO)
+        configure(level=logging.INFO, key_file=root / KEY_FILE_NAME)
         (serve if runner is None else runner)(port)
         return 0
 
@@ -79,14 +82,40 @@ PYPROJECT = dedent(
 )
 
 
-def build_submission(output_dir: Path) -> Path:
+def _validate_key_file(key_file: Path) -> None:
+    try:
+        raw = key_file.read_bytes()
+    except FileNotFoundError:
+        raise FileNotFoundError(
+            f"log encryption key file not found: {key_file}"
+        ) from None
+    if len(raw) > MAX_KEY_FILE_BYTES:
+        raise ValueError(f"log encryption key file is too large: {key_file}")
+    try:
+        key = raw.decode("utf-8").rstrip("\r\n")
+    except UnicodeDecodeError as error:
+        raise ValueError(
+            f"log encryption key file must be UTF-8: {key_file}"
+        ) from error
+    if "\r" in key or "\n" in key:
+        raise ValueError(f"log encryption key file must contain one line: {key_file}")
+    if len(key.encode("utf-8")) < MIN_KEY_BYTES:
+        raise ValueError(
+            f"log encryption key must contain at least {MIN_KEY_BYTES} "
+            f"UTF-8 bytes: {key_file}"
+        )
+
+
+def build_submission(output_dir: Path, key_file: Path) -> Path:
     output_dir = output_dir.resolve()
+    key_file = key_file.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_path = output_dir / f"{PACKAGE_NAME}.tar.gz"
     if archive_path.exists():
         raise FileExistsError(f"refusing to overwrite existing file: {archive_path}")
     if not RUNTIME_SOURCE.is_dir():
         raise FileNotFoundError(f"runtime package not found: {RUNTIME_SOURCE}")
+    _validate_key_file(key_file)
 
     with tempfile.TemporaryDirectory(prefix="future-war-submission-") as temp_dir:
         temp_path = Path(temp_dir)
@@ -99,6 +128,7 @@ def build_submission(output_dir: Path) -> Path:
         )
         (package_root / "main3.py").write_text(LAUNCHER, encoding="utf-8")
         (package_root / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
+        shutil.copy2(key_file, package_root / KEY_FILE_NAME)
 
         temporary_archive = temp_path / archive_path.name
         with tarfile.open(temporary_archive, "w:gz") as archive:
@@ -117,8 +147,14 @@ def main() -> int:
         type=Path,
         help="Directory that will receive FutureWarAgent.tar.gz",
     )
+    parser.add_argument(
+        "--key-file",
+        type=Path,
+        default=ROOT / KEY_FILE_NAME,
+        help=f"key file to include (default: {ROOT / KEY_FILE_NAME})",
+    )
     args = parser.parse_args()
-    archive_path = build_submission(args.output_dir)
+    archive_path = build_submission(args.output_dir, args.key_file)
     print(archive_path)
     return 0
 

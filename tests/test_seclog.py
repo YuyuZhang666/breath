@@ -1,6 +1,9 @@
 import binascii
 import io
 import logging
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -11,12 +14,19 @@ from future_war_agent.logtool import main as logtool_main
 from future_war_agent.seclog import (
     MARKER,
     EncryptingHandler,
+    KeyFileError,
     configure,
     decrypt,
     decrypt_lines,
     encrypt,
     is_encrypted,
+    load_key_file,
 )
+
+
+LEGACY_KEY = "future-war-agent-log-key-v1"
+TEST_KEY = "test-log-key-0123456789-abcdefghijklmnop"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class SecureLogTests(unittest.TestCase):
@@ -45,8 +55,8 @@ class SecureLogTests(unittest.TestCase):
 
         for plaintext, ciphertext in vectors:
             with self.subTest(plaintext=plaintext):
-                self.assertEqual(encrypt(plaintext), ciphertext)
-                self.assertEqual(decrypt(ciphertext), plaintext)
+                self.assertEqual(encrypt(plaintext, LEGACY_KEY), ciphertext)
+                self.assertEqual(decrypt(ciphertext, LEGACY_KEY), plaintext)
 
     def test_encrypt_is_deterministic_and_round_trips_utf8(self) -> None:
         plaintext = "turn_telemetry \u56de\u5408=7 \U0001f6e1"
@@ -61,19 +71,46 @@ class SecureLogTests(unittest.TestCase):
 
     def test_decrypt_passes_plaintext_through(self) -> None:
         self.assertFalse(is_encrypted("plain error"))
-        self.assertEqual(decrypt("plain error"), "plain error")
+        self.assertEqual(decrypt("plain error", TEST_KEY), "plain error")
 
     def test_decrypt_rejects_malformed_base64(self) -> None:
         with self.assertRaises(binascii.Error):
-            decrypt("ENC1:not-base64")
+            decrypt("ENC1:not-base64", TEST_KEY)
 
     def test_decrypt_lines_supports_mixed_logs_and_crlf(self) -> None:
-        encrypted = encrypt("routine")
+        encrypted = encrypt("routine", TEST_KEY)
 
         self.assertEqual(
-            decrypt_lines([encrypted + "\n", "plain error\r\n"]),
+            decrypt_lines(
+                [encrypted + "\n", "plain error\r\n"],
+                TEST_KEY,
+            ),
             "routine\nplain error",
         )
+
+    def test_load_key_file_requires_a_nontrivial_single_line_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "log_secret.key"
+            with self.assertRaises(KeyFileError):
+                load_key_file(path)
+
+            path.write_text("too-short\n", encoding="utf-8")
+            with self.assertRaises(KeyFileError):
+                load_key_file(path)
+
+            path.write_text(TEST_KEY + "\n", encoding="utf-8")
+            self.assertEqual(load_key_file(path), TEST_KEY)
+
+    def test_configure_loads_key_from_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "log_secret.key"
+            path.write_text(TEST_KEY + "\n", encoding="utf-8")
+            stream = io.StringIO()
+            configure(stream=stream, key_file=path)
+            logging.getLogger(f"{__name__}.key_file").info("protected")
+
+        line = stream.getvalue().strip()
+        self.assertIn("protected", decrypt(line, TEST_KEY))
 
     def test_configure_encrypts_through_warning_and_keeps_errors_plain(self) -> None:
         stream = io.StringIO()
@@ -100,7 +137,7 @@ class SecureLogTests(unittest.TestCase):
 
     def test_exception_traceback_is_plaintext_only(self) -> None:
         stream = io.StringIO()
-        configure(level=logging.INFO, stream=stream)
+        configure(level=logging.INFO, key=TEST_KEY, stream=stream)
         logger = logging.getLogger(f"{__name__}.exception")
 
         try:
@@ -116,8 +153,8 @@ class SecureLogTests(unittest.TestCase):
     def test_reconfigure_replaces_handlers_without_duplicate_output(self) -> None:
         first_stream = io.StringIO()
         second_stream = io.StringIO()
-        configure(stream=first_stream)
-        configure(stream=second_stream)
+        configure(key=TEST_KEY, stream=first_stream)
+        configure(key=TEST_KEY, stream=second_stream)
 
         logging.getLogger(f"{__name__}.repeat").info("one record")
 
@@ -126,7 +163,7 @@ class SecureLogTests(unittest.TestCase):
 
     def test_concurrent_records_remain_complete_lines(self) -> None:
         stream = io.StringIO()
-        configure(stream=stream)
+        configure(key=TEST_KEY, stream=stream)
         logger = logging.getLogger(f"{__name__}.concurrent")
 
         with ThreadPoolExecutor(max_workers=8) as executor:
@@ -135,7 +172,7 @@ class SecureLogTests(unittest.TestCase):
         lines = stream.getvalue().splitlines()
         self.assertEqual(len(lines), 100)
         self.assertTrue(all(line.startswith(MARKER) for line in lines))
-        plaintext = [decrypt(line) for line in lines]
+        plaintext = [decrypt(line, TEST_KEY) for line in lines]
         for value in range(100):
             self.assertTrue(
                 any(f"record-{value:03d}" in line for line in plaintext),
@@ -150,7 +187,7 @@ class SecureLogTests(unittest.TestCase):
             def flush(self) -> None:
                 raise OSError("broken")
 
-        handler = EncryptingHandler(BrokenStream())
+        handler = EncryptingHandler(BrokenStream(), TEST_KEY)
         stderr = io.StringIO()
         record = logging.LogRecord(
             "secure",
@@ -171,31 +208,83 @@ class SecureLogTests(unittest.TestCase):
     def test_logtool_decrypts_file_and_preserves_plaintext_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "agent.log"
+            key_path = Path(temp_dir) / "log_secret.key"
+            key_path.write_text(TEST_KEY + "\n", encoding="utf-8")
             path.write_text(
-                encrypt("secret turn") + "\nplain error\n",
+                encrypt("secret turn", TEST_KEY) + "\nplain error\n",
                 encoding="utf-8",
             )
             output = io.StringIO()
 
             with redirect_stdout(output):
-                result = logtool_main(["decrypt", str(path)])
+                result = logtool_main(
+                    ["decrypt", str(path), "--key-file", str(key_path)]
+                )
 
         self.assertEqual(result, 0)
         self.assertEqual(output.getvalue(), "secret turn\nplain error\n")
 
-    def test_logtool_accepts_an_explicit_key(self) -> None:
+    def test_logtool_runs_standalone_on_another_computer(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "agent.log"
-            path.write_text(encrypt("secret", "other-key"), encoding="utf-8")
+            temp_path = Path(temp_dir)
+            for name in ("seclog.py", "logtool.py"):
+                shutil.copy2(ROOT / "future_war_agent" / name, temp_path / name)
+            (temp_path / "log_secret.key").write_text(
+                TEST_KEY + "\n",
+                encoding="utf-8",
+            )
+            (temp_path / "agent.log").write_text(
+                encrypt("cross-computer", TEST_KEY) + "\nplain error\n",
+                encoding="utf-8",
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "logtool.py",
+                    "decrypt",
+                    "agent.log",
+                    "--key-file",
+                    "log_secret.key",
+                ],
+                cwd=temp_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "cross-computer\nplain error\n")
+
+    def test_logtool_generates_and_rotates_a_key_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            key_path = Path(temp_dir) / "log_secret.key"
             output = io.StringIO()
 
             with redirect_stdout(output):
                 result = logtool_main(
-                    ["decrypt", str(path), "--key", "other-key"]
+                    ["generate-key", "--key-file", str(key_path)]
                 )
+            first_key = load_key_file(key_path)
+            with redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    logtool_main(
+                        ["generate-key", "--key-file", str(key_path)]
+                    )
+            with redirect_stdout(io.StringIO()):
+                result = logtool_main(
+                    [
+                        "generate-key",
+                        "--key-file",
+                        str(key_path),
+                        "--force",
+                    ]
+                )
+            second_key = load_key_file(key_path)
 
         self.assertEqual(result, 0)
-        self.assertEqual(output.getvalue(), "secret")
+        self.assertIn(str(key_path), output.getvalue())
+        self.assertNotEqual(first_key, second_key)
 
 
 if __name__ == "__main__":
