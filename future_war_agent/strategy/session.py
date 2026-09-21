@@ -7,6 +7,7 @@ from future_war_agent.protocol.models import Observation, Position, UnitState
 
 from .director import DirectorState
 from .features import StrategyFeatures
+from .forecast import NightForecast
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .simulation.candidates import SimJointAction
 from .simulation.certificate import RobotWaveSafetyCertificate
@@ -36,6 +37,7 @@ class StrategySession:
     director_state: DirectorState | None = None
     intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT
     task_state: TaskAgentState = EMPTY_TASK_STATE
+    night_forecast: NightForecast | None = None
 
 
 class SessionStore:

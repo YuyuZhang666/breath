@@ -24,6 +24,8 @@ class TurnTelemetry:
     phase2_ms: float = 0.0
     phase2_5_ms: float = 0.0
     phase3_ms: float = 0.0
+    forecast_ms: float = 0.0
+    tail_estimator_ms: float = 0.0
     candidate_generation_ms: float = 0.0
     simulation_ms: float = 0.0
     validation_ms: float = 0.0
@@ -33,6 +35,13 @@ class TurnTelemetry:
     scenario_count: int = 0
     simulation_count: int = 0
     phase3_level: str = 'none'
+    forecast_update_kind: str = 'none'
+    night_risk_level: str = 'unknown'
+    risk_ratio: float = 0.0
+    survival_margin: int = 0
+    safety_plan_status: str = 'unknown'
+    safety_plan_cost: int = 0
+    effective_gold_reserve: int = 0
     phase3_fallback_count: int = 0
     phase2_5_fallback_count: int = 0
     phase2_5_combination_count: int = 0
@@ -41,6 +50,7 @@ class TurnTelemetry:
     watchdog_hit: bool = False
     controller_cache_hit: bool = False
     duplicate_request: bool = False
+    forecast_cache_hit: bool = False
 
 
 @dataclass(slots=True)
@@ -55,6 +65,8 @@ class _ActiveTurn:
     phase2_ms: float = 0.0
     phase2_5_ms: float = 0.0
     phase3_ms: float = 0.0
+    forecast_ms: float = 0.0
+    tail_estimator_ms: float = 0.0
     candidate_generation_ms: float = 0.0
     simulation_ms: float = 0.0
     validation_ms: float = 0.0
@@ -63,6 +75,13 @@ class _ActiveTurn:
     scenario_count: int = 0
     simulation_count: int = 0
     phase3_level: str = 'none'
+    forecast_update_kind: str = 'none'
+    night_risk_level: str = 'unknown'
+    risk_ratio: float = 0.0
+    survival_margin: int = 0
+    safety_plan_status: str = 'unknown'
+    safety_plan_cost: int = 0
+    effective_gold_reserve: int = 0
     phase3_fallback_count: int = 0
     phase2_5_fallback_count: int = 0
     phase2_5_combination_count: int = 0
@@ -71,6 +90,7 @@ class _ActiveTurn:
     watchdog_hit: bool = False
     controller_cache_hit: bool = False
     duplicate_request: bool = False
+    forecast_cache_hit: bool = False
 
 
 class TelemetryRecorder:
@@ -151,6 +171,8 @@ class TelemetryRecorder:
             phase2_ms=active.phase2_ms,
             phase2_5_ms=active.phase2_5_ms,
             phase3_ms=active.phase3_ms,
+            forecast_ms=active.forecast_ms,
+            tail_estimator_ms=active.tail_estimator_ms,
             candidate_generation_ms=active.candidate_generation_ms,
             simulation_ms=active.simulation_ms,
             validation_ms=active.validation_ms,
@@ -160,6 +182,13 @@ class TelemetryRecorder:
             scenario_count=active.scenario_count,
             simulation_count=active.simulation_count,
             phase3_level=active.phase3_level,
+            forecast_update_kind=active.forecast_update_kind,
+            night_risk_level=active.night_risk_level,
+            risk_ratio=active.risk_ratio,
+            survival_margin=active.survival_margin,
+            safety_plan_status=active.safety_plan_status,
+            safety_plan_cost=active.safety_plan_cost,
+            effective_gold_reserve=active.effective_gold_reserve,
             phase3_fallback_count=active.phase3_fallback_count,
             phase2_5_fallback_count=active.phase2_5_fallback_count,
             phase2_5_combination_count=active.phase2_5_combination_count,
@@ -168,6 +197,7 @@ class TelemetryRecorder:
             watchdog_hit=active.watchdog_hit,
             controller_cache_hit=active.controller_cache_hit,
             duplicate_request=active.duplicate_request,
+            forecast_cache_hit=active.forecast_cache_hit,
         )
         self._active.reset(token)
         with self._lock:

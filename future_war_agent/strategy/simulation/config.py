@@ -63,6 +63,11 @@ class Phase3Config:
     rocket_splash_damage: int = 10
     rocket_cooldown_rounds: int = 3
     max_weapon_candidates: int = 3
+    use_tail_estimator: bool = True
+    forecast_exact_horizon: int = 4
+    tail_visible_roster_complete: bool = False
+    tail_late_wave_damage_multiplier: Fraction = Fraction(1)
+    tail_late_wave_calibration_source: str = ''
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_root_actions <= 8:
@@ -81,6 +86,12 @@ class Phase3Config:
             raise ValueError("lite_horizon must be between one and two")
         if self.lite_watchdog_seconds <= 0:
             raise ValueError("lite_watchdog_seconds must be positive")
+        if not 1 <= self.forecast_exact_horizon <= 4:
+            raise ValueError("forecast_exact_horizon must be between one and four")
+        if self.tail_late_wave_damage_multiplier < 1:
+            raise ValueError(
+                "tail_late_wave_damage_multiplier cannot reduce visible risk"
+            )
 
     def budget_for(self, level: Phase3Level) -> Phase3Budget:
         if level is Phase3Level.LITE:

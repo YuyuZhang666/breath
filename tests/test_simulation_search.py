@@ -63,6 +63,57 @@ class SimulationSearchTests(unittest.TestCase):
         )
         self.assertFalse(result.certificate.secured)
 
+    def test_complete_tail_replaces_short_horizon_unknown(self) -> None:
+        result = search_night(
+            self._gatling_scenario(),
+            WEIGHTS,
+            level=Phase3Level.LITE,
+            config=Phase3Config(tail_visible_roster_complete=True),
+            clock=lambda: 0.0,
+            deadline=1.0,
+        )
+
+        self.assertTrue(result.certificate.outcomes[0].tail_estimated)
+        self.assertTrue(result.certificate.projection_complete)
+        self.assertIsNot(
+            result.certificate.classification,
+            WaveClassification.UNKNOWN,
+        )
+
+    def test_tail_detects_lethal_damage_beyond_four_rounds(self) -> None:
+        observed = observation(
+            round_no=71,
+            width=16,
+            height=16,
+            our_units=(
+                unit(1, 1, 1, 'worker', health=100),
+                unit(2, 14, 14, 'station', health=100, level=1),
+            ),
+            robots=(
+                robot(
+                    9,
+                    0,
+                    0,
+                    role_type='bossRobot',
+                    health=800,
+                ),
+            ),
+        )
+
+        result = search_night(
+            observed,
+            WEIGHTS,
+            config=Phase3Config(tail_visible_roster_complete=True),
+            clock=lambda: 0.0,
+            deadline=1.0,
+        )
+
+        self.assertIs(
+            result.certificate.classification,
+            WaveClassification.WAVE_UNSAFE,
+        )
+        self.assertLess(result.certificate.worst_survival_margin, 0)
+
     def test_stable_ties_return_byte_equivalent_decisions(self) -> None:
         observed = self._gatling_scenario()
 

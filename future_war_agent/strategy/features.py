@@ -5,6 +5,8 @@ from future_war_agent.protocol.models import Observation, UnitState
 from future_war_agent.protocol.time import Phase
 
 from .policy import DEFAULT_BUILD_PLAN, BuildPlan
+from .forecast import NightForecast, RiskLevel
+from .safety import CheapestSafePlan
 from .rules import DEFAULT_RULES, station_footprint
 from .simulation.certificate import (
     RobotWaveSafetyCertificate,
@@ -42,6 +44,10 @@ class StrategyFeatures:
     defense_complete: bool
     wave_classification: WaveClassification
     wave_secured: bool | None
+    night_risk_level: RiskLevel | None
+    risk_ratio: float | None
+    survival_margin: int | None
+    safety_plan_cost: int | None
 
 
 def extract_features(
@@ -49,6 +55,8 @@ def extract_features(
     *,
     previous_observation: Observation | None = None,
     certificate: RobotWaveSafetyCertificate | None = None,
+    forecast: NightForecast | None = None,
+    safety_plan: CheapestSafePlan | None = None,
     build_plan: BuildPlan = DEFAULT_BUILD_PLAN,
 ) -> StrategyFeatures:
     station = _station(observation.our.units)
@@ -128,6 +136,18 @@ def extract_features(
             else WaveClassification.UNKNOWN
         ),
         wave_secured=certificate.secured if certificate is not None else None,
+        night_risk_level=(
+            forecast.risk_level if forecast is not None else None
+        ),
+        risk_ratio=(
+            float(forecast.risk_ratio) if forecast is not None else None
+        ),
+        survival_margin=(
+            forecast.survival_margin if forecast is not None else None
+        ),
+        safety_plan_cost=(
+            safety_plan.gold_cost if safety_plan is not None else None
+        ),
     )
 
 

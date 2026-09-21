@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from future_war_agent.protocol.models import Observation, UnitState
 from future_war_agent.protocol.time import Phase
 from future_war_agent.strategy.policy import StrategicIntent, StrategyProfile
+from future_war_agent.strategy.forecast import NightForecast, RiskLevel
 from future_war_agent.strategy.rules import DEFAULT_RULES, station_footprint
 
 from .certificate import RobotWaveSafetyCertificate
@@ -47,12 +48,22 @@ def select_phase3_level(
     intent: StrategicIntent,
     *,
     certificate: RobotWaveSafetyCertificate | None = None,
+    forecast: NightForecast | None = None,
     config: Phase3TriggerConfig = DEFAULT_PHASE3_TRIGGER_CONFIG,
 ) -> Phase3Trigger:
     del certificate
     if observation.time.phase is not Phase.NIGHT:
         return Phase3Trigger(Phase3Level.NONE, 'day phase')
 
+    if forecast is not None:
+        if forecast.risk_level in {RiskLevel.CRITICAL, RiskLevel.LETHAL}:
+            return Phase3Trigger(Phase3Level.FULL, 'forecast critical risk')
+        if forecast.risk_level is RiskLevel.WATCH:
+            return Phase3Trigger(Phase3Level.LITE, 'forecast watch risk')
+
+    forecast_safe = (
+        forecast is not None and forecast.risk_level is RiskLevel.SAFE
+    )
     if intent.profile is StrategyProfile.DESPERATION:
         return Phase3Trigger(Phase3Level.FULL, 'desperation mode')
     station = _living_unit(observation, 'station')
@@ -72,14 +83,23 @@ def select_phase3_level(
             ).attack_range
         )
         if immediate_damage >= station.health:
-            return Phase3Trigger(Phase3Level.FULL, 'visible lethal station threat')
+            return Phase3Trigger(
+                Phase3Level.LITE if forecast_safe else Phase3Level.FULL,
+                'visible lethal station threat',
+            )
 
     if previous is not None:
         if _station_health_loss(previous, observation) > 0:
-            return Phase3Trigger(Phase3Level.FULL, 'station took damage')
+            return Phase3Trigger(
+                Phase3Level.LITE if forecast_safe else Phase3Level.FULL,
+                'station took damage',
+            )
         lost_kind = _lost_critical_kind(previous, observation)
         if lost_kind is not None:
-            return Phase3Trigger(Phase3Level.FULL, f'{lost_kind} destroyed')
+            return Phase3Trigger(
+                Phase3Level.LITE if forecast_safe else Phase3Level.FULL,
+                f'{lost_kind} destroyed',
+            )
         previous_targeted = tuple(
             robot
             for robot in previous.robots
@@ -91,7 +111,10 @@ def select_phase3_level(
             count_delta >= config.large_wave_count_delta
             or power_delta >= config.large_wave_attack_power_delta
         ):
-            return Phase3Trigger(Phase3Level.FULL, 'large wave increase')
+            return Phase3Trigger(
+                Phase3Level.LITE if forecast_safe else Phase3Level.FULL,
+                'large wave increase',
+            )
         if _rocket_became_ready(previous, observation):
             return Phase3Trigger(Phase3Level.LITE, 'rocket became ready')
 
@@ -223,7 +246,10 @@ def _nearest_station_distance(
 
 def _robot_spec(role_type: str) -> RobotSpec:
     normalized = role_type.replace('_', '').replace('-', '').lower()
-    return _ROBOT_SPECS_BY_NORMALIZED_NAME.get(
-        normalized,
-        RobotSpec(0, 0, 0, 0),
+    known = _ROBOT_SPECS_BY_NORMALIZED_NAME.get(normalized)
+    if known is not None:
+        return known
+    return max(
+        _ROBOT_SPECS_BY_NORMALIZED_NAME.values(),
+        key=lambda spec: (spec.attack_power, spec.attack_range, spec.max_health),
     )

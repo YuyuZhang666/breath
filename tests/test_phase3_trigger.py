@@ -1,7 +1,13 @@
 import unittest
 from dataclasses import replace
+from fractions import Fraction
 
 from future_war_agent.protocol.time import TurnTime
+from future_war_agent.strategy.forecast import (
+    ForecastUpdateKind,
+    NightForecast,
+    RiskLevel,
+)
 from future_war_agent.strategy.policy import (
     DEFAULT_STRATEGIC_INTENT,
     StrategyProfile,
@@ -144,6 +150,91 @@ class Phase3TriggerTests(unittest.TestCase):
                 intent_for_profile(StrategyProfile.DESPERATION, 'test'),
             ).level,
             Phase3Level.FULL,
+        )
+
+    def test_forecast_risk_drives_none_lite_and_full(self) -> None:
+        current = replace(self.previous, time=TurnTime.from_round(72))
+        expected = (
+            (RiskLevel.SAFE, Phase3Level.NONE),
+            (RiskLevel.WATCH, Phase3Level.LITE),
+            (RiskLevel.CRITICAL, Phase3Level.FULL),
+            (RiskLevel.LETHAL, Phase3Level.FULL),
+        )
+        for risk, level in expected:
+            with self.subTest(risk=risk):
+                self.assertIs(
+                    select_phase3_level(
+                        current,
+                        self.previous,
+                        DEFAULT_STRATEGIC_INTENT,
+                        forecast=self._forecast(risk),
+                    ).level,
+                    level,
+                )
+
+    def test_unknown_robot_uses_conservative_visible_threat(self) -> None:
+        low_station_units = tuple(
+            replace(item, health=30) if item.unit_id == 2 else item
+            for item in self.previous.our.units
+        )
+        previous = replace(
+            self.previous,
+            our=replace(self.previous.our, units=low_station_units),
+        )
+        current = replace(
+            previous,
+            time=TurnTime.from_round(72),
+            robots=(
+                robot(
+                    10,
+                    7,
+                    7,
+                    role_type='unknownRobot',
+                    target_team='challenger',
+                ),
+            ),
+        )
+
+        self.assertIs(
+            select_phase3_level(
+                current,
+                previous,
+                DEFAULT_STRATEGIC_INTENT,
+            ).level,
+            Phase3Level.FULL,
+        )
+
+    @staticmethod
+    def _forecast(risk: RiskLevel) -> NightForecast:
+        ratio = {
+            RiskLevel.SAFE: Fraction(1, 10),
+            RiskLevel.WATCH: Fraction(3, 5),
+            RiskLevel.CRITICAL: Fraction(9, 10),
+            RiskLevel.LETHAL: Fraction(2),
+        }[risk]
+        return NightForecast(
+            expected_station_hp_at_dawn=500,
+            predicted_damage_before_dawn=int(ratio * 100),
+            effective_defense_hp=100,
+            future_firepower=0,
+            survival_margin=100 - int(ratio * 100),
+            risk_ratio=ratio,
+            risk_level=risk,
+            expected_wall_losses=0,
+            expected_weapon_losses=0,
+            expected_role_losses=0,
+            lethal_round=72 if risk is RiskLevel.LETHAL else None,
+            critical_robot_ids=(),
+            critical_wall_ids=(),
+            generated_round=71,
+            updated_round=71,
+            day_no=1,
+            model_version='night-forecast-v1',
+            update_kind=ForecastUpdateKind.FULL,
+            complete=True,
+            uncertainty_reasons=(),
+            observed_station_hp=1000,
+            expected_next_station_hp=1000,
         )
 
 

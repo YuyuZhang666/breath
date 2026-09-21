@@ -4,6 +4,7 @@ from fractions import Fraction
 from future_war_agent.protocol.models import Observation, Position
 
 from .belief import OpponentBelief, update_opponent_belief
+from .forecast import NightForecast
 from .session import observation_fingerprint
 from .simulation.certificate import (
     RobotWaveSafetyCertificate,
@@ -42,6 +43,7 @@ class MatchMemory:
     zones: tuple[NormalizedZone, ...] = ()
     wave_summaries: tuple[WaveSummary, ...] = ()
     recent_threat_positions: tuple[Position, ...] = ()
+    night_forecast: NightForecast | None = None
 
 
 class MatchMemoryStore:
@@ -58,6 +60,7 @@ class MatchMemoryStore:
         observation: Observation,
         *,
         certificate: RobotWaveSafetyCertificate | None = None,
+        forecast: NightForecast | None = None,
     ) -> MatchMemory:
         team_id = observation.our.team_id
         previous = self.get(team_id)
@@ -66,12 +69,14 @@ class MatchMemoryStore:
             previous is not None
             and previous.last_fingerprint == fingerprint
             and certificate is None
+            and forecast is None
         ):
             return previous
         memory = update_match_memory(
             previous,
             observation,
             certificate=certificate,
+            forecast=forecast,
         )
         if team_id.strip():
             self._by_team[team_id] = memory
@@ -109,6 +114,7 @@ def update_match_memory(
     observation: Observation,
     *,
     certificate: RobotWaveSafetyCertificate | None = None,
+    forecast: NightForecast | None = None,
 ) -> MatchMemory:
     team_id = observation.our.team_id
     prior = previous if previous is not None else MatchMemory(team_id=team_id)
@@ -206,4 +212,7 @@ def update_match_memory(
         zones=zones,
         wave_summaries=summaries,
         recent_threat_positions=recent_threat_positions,
+        night_forecast=(
+            forecast if forecast is not None else prior.night_forecast
+        ),
     )

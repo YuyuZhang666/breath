@@ -214,6 +214,7 @@ def step_simulation(
         weapons=weapons,
         robots=robots,
         owned_kill_score=state.owned_kill_score + score_gain,
+        day_no=state.day_no,
     )
 
 

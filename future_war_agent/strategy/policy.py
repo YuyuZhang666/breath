@@ -130,6 +130,7 @@ class StrategicIntent:
     item_policy: ItemPolicy = DEFAULT_ITEM_POLICY
     feature_flags: RuleFeatureFlags = field(default_factory=RuleFeatureFlags)
     gold_reserve: int = 0
+    reserve_eligible_actions: frozenset[tuple[str, str]] = frozenset()
     minimum_hold_rounds: int = 0
     allow_mining: bool = True
     allow_tasks: bool = True

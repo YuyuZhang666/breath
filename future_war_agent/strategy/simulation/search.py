@@ -1,3 +1,4 @@
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from fractions import Fraction
@@ -31,6 +32,11 @@ from .kernel import step_simulation
 from .objective import DEFAULT_NIGHT_OBJECTIVE, NightObjective
 from .robots import ALL_ROBOT_POLICIES, RobotPolicy
 from .state import AssignedStand, SimState, build_sim_state
+from .tail import TailEstimate, estimate_tail
+
+
+LOGGER = logging.getLogger(__name__)
+LOGGER.addHandler(logging.NullHandler())
 
 
 ScenarioWeights = tuple[Fraction, Fraction, Fraction, Fraction]
@@ -44,6 +50,7 @@ class SearchStats:
     maximum_steps: int
     candidate_generation_ms: float = 0.0
     simulation_ms: float = 0.0
+    tail_estimator_ms: float = 0.0
     level: Phase3Level = Phase3Level.FULL
     deadline_hit: bool = False
 
@@ -129,6 +136,7 @@ def search_night(
     non_key_weapon_ids = initial_weapon_ids - initial_key_weapon_ids
     evaluated: list[tuple[RootAction, RobotWaveSafetyCertificate]] = []
     simulation_started_ns = perf_counter_ns()
+    tail_estimator_ms = 0.0
 
     deadline_hit = False
     for root in roots:
@@ -167,6 +175,19 @@ def search_night(
                     break
             if not complete_root:
                 break
+            tail_estimate = None
+            if config.use_tail_estimator and simulated.remaining_night_turns > 0:
+                tail_started_ns = perf_counter_ns()
+                try:
+                    tail_estimate = estimate_tail(simulated, config)
+                except Exception:
+                    LOGGER.exception(
+                        'TailEstimator failed; retaining bounded certificate'
+                    )
+                finally:
+                    tail_estimator_ms += (
+                        perf_counter_ns() - tail_started_ns
+                    ) / 1_000_000
             outcomes.append(
                 _scenario_outcome(
                     simulated,
@@ -177,6 +198,7 @@ def search_night(
                     initial_wall_ids=initial_wall_ids,
                     initial_weapon_ids=initial_weapon_ids,
                     non_key_weapon_ids=non_key_weapon_ids,
+                    tail_estimate=tail_estimate,
                 )
             )
         if not complete_root:
@@ -184,7 +206,7 @@ def search_night(
         evaluated.append(
             (
                 root,
-                _bounded_horizon_certificate(tuple(outcomes), objective),
+                _projected_certificate(tuple(outcomes), objective),
             )
         )
     if not evaluated:
@@ -217,20 +239,24 @@ def search_night(
             maximum_steps=horizon,
             candidate_generation_ms=candidate_generation_ms,
             simulation_ms=simulation_ms,
+            tail_estimator_ms=tail_estimator_ms,
             level=level,
             deadline_hit=deadline_hit,
         ),
     )
 
 
-def _bounded_horizon_certificate(
+def _projected_certificate(
     outcomes: tuple[ScenarioOutcome, ...],
     objective: NightObjective,
 ) -> RobotWaveSafetyCertificate:
     certificate = build_certificate(outcomes, objective)
     if (
         certificate.classification is not WaveClassification.WAVE_SAFE
-        or all(outcome.ended_with_night for outcome in outcomes)
+        or all(
+            outcome.ended_with_night or outcome.projection_complete
+            for outcome in outcomes
+        )
     ):
         return certificate
     return replace(
@@ -273,13 +299,21 @@ def _scenario_outcome(
     initial_wall_ids: frozenset[int],
     initial_weapon_ids: frozenset[int],
     non_key_weapon_ids: frozenset[int],
+    tail_estimate: TailEstimate | None = None,
 ) -> ScenarioOutcome:
     surviving_role_ids = frozenset(role.unit_id for role in state.roles)
     surviving_wall_ids = frozenset(wall.unit_id for wall in state.walls)
     surviving_weapon_ids = frozenset(weapon.unit_id for weapon in state.weapons)
+    exact_wall_losses = len(initial_wall_ids - surviving_wall_ids)
+    exact_weapon_losses = len(initial_weapon_ids - surviving_weapon_ids)
+    projected_station_health = (
+        tail_estimate.expected_station_hp_at_dawn
+        if tail_estimate is not None
+        else state.station.health
+    )
     return ScenarioOutcome(
         weight=weight,
-        station_health=state.station.health,
+        station_health=projected_station_health,
         surviving_controlled_role_count=len(
             initial_controlled_role_ids & surviving_role_ids
         ),
@@ -291,8 +325,28 @@ def _scenario_outcome(
             initial_key_weapon_ids & surviving_weapon_ids
         ),
         key_weapon_losses=len(initial_key_weapon_ids - surviving_weapon_ids),
-        wall_losses=len(initial_wall_ids - surviving_wall_ids),
-        weapon_losses=len(initial_weapon_ids - surviving_weapon_ids),
+        wall_losses=(
+            exact_wall_losses
+            + (
+                min(
+                    len(surviving_wall_ids),
+                    tail_estimate.expected_wall_losses,
+                )
+                if tail_estimate is not None
+                else 0
+            )
+        ),
+        weapon_losses=(
+            exact_weapon_losses
+            + (
+                min(
+                    len(surviving_weapon_ids),
+                    tail_estimate.expected_weapon_losses,
+                )
+                if tail_estimate is not None
+                else 0
+            )
+        ),
         minimum_controlled_role_health=min(
             (
                 role.health
@@ -310,13 +364,46 @@ def _scenario_outcome(
             )
         ),
         owned_kill_score=state.owned_kill_score,
-        remaining_threat=sum(
-            robot.attack_power * robot.health for robot in state.robots
+        remaining_threat=(
+            tail_estimate.incoming_damage
+            if tail_estimate is not None
+            else sum(
+                robot.attack_power * robot.health for robot in state.robots
+            )
         ),
-        remaining_one_turn_damage=sum(
-            robot.attack_power for robot in state.robots
+        remaining_one_turn_damage=(
+            0
+            if tail_estimate is not None
+            else sum(robot.attack_power for robot in state.robots)
         ),
         ended_with_night=state.remaining_night_turns == 0,
+        tail_estimated=tail_estimate is not None,
+        projection_complete=(
+            tail_estimate.complete if tail_estimate is not None else False
+        ),
+        tail_survival_margin=(
+            tail_estimate.survival_margin
+            if tail_estimate is not None
+            else None
+        ),
+        tail_risk_ratio=(
+            Fraction(
+                tail_estimate.incoming_damage,
+                max(1, tail_estimate.effective_hp),
+            )
+            if tail_estimate is not None
+            else None
+        ),
+        tail_lethal_round=(
+            tail_estimate.lethal_round
+            if tail_estimate is not None
+            else None
+        ),
+        uncertainty_reasons=(
+            tail_estimate.uncertainty_reasons
+            if tail_estimate is not None
+            else ()
+        ),
     )
 
 

@@ -29,6 +29,7 @@ class TacticalCandidate:
     progress: int = 0
     gold_cost: int = 0
     stone_cost: int = 0
+    reserve_eligible: bool = False
 
     @classmethod
     def wait(cls, role_id: int, start: Position) -> "TacticalCandidate":
@@ -50,6 +51,7 @@ class TacticalCandidate:
         priority: int,
         gold_cost: int = 0,
         stone_cost: int = 0,
+        reserve_eligible: bool = False,
     ) -> "TacticalCandidate":
         kind = JobKind.BUILD_WALL if name == "wall" else JobKind.BUILD_WEAPON
         return cls(
@@ -64,6 +66,7 @@ class TacticalCandidate:
             progress=1,
             gold_cost=gold_cost,
             stone_cost=stone_cost,
+            reserve_eligible=reserve_eligible,
         )
 
     @classmethod
@@ -159,6 +162,7 @@ def candidates_for_jobs(
                                 if job.kind is JobKind.BUILD_WALL
                                 else 0
                             ),
+                            reserve_eligible=job.reserve_eligible,
                         )
                     )
             else:
@@ -281,9 +285,13 @@ def is_valid_joint(
         return False
     if gold_reserve < 0:
         return False
-    if sum(item.gold_cost for item in joint) > max(
-        0, observation.our.gold - gold_reserve
-    ):
+    total_gold_cost = sum(item.gold_cost for item in joint)
+    if total_gold_cost > observation.our.gold:
+        return False
+    discretionary_gold_cost = sum(
+        item.gold_cost for item in joint if not item.reserve_eligible
+    )
+    if discretionary_gold_cost > max(0, observation.our.gold - gold_reserve):
         return False
     for item in joint:
         if item.stone_cost:

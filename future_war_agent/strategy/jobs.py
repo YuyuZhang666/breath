@@ -35,6 +35,7 @@ class Job:
     name: str | None = None
     quantity: int | None = None
     weapon_id: int | None = None
+    reserve_eligible: bool = False
 
     @property
     def sort_key(self) -> tuple[object, ...]:
@@ -119,8 +120,18 @@ def generate_day_jobs(
             priority=priorities.recall,
         )
         spendable_gold = max(0, observation.our.gold - intent.gold_reserve)
-        if spendable_gold >= world.rules.weapon_build_cost:
-            for site in missing_weapon_sites:
+        for site in missing_weapon_sites:
+            reserve_eligible = (
+                ('build', site.weapon_type)
+                in intent.reserve_eligible_actions
+            )
+            if (
+                spendable_gold >= world.rules.weapon_build_cost
+                or (
+                    reserve_eligible
+                    and observation.our.gold >= world.rules.weapon_build_cost
+                )
+            ):
                 path = path_to_interaction(world, worker.position, site.position)
                 if path is not None:
                     result[worker.unit_id].append(
@@ -131,6 +142,7 @@ def generate_day_jobs(
                             priority=priorities.build_weapon,
                             value=-float(path.cost),
                             name=site.weapon_type,
+                            reserve_eligible=reserve_eligible,
                         )
                     )
 

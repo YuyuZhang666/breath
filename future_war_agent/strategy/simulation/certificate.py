@@ -29,6 +29,12 @@ class ScenarioOutcome:
     remaining_threat: int
     remaining_one_turn_damage: int
     ended_with_night: bool
+    tail_estimated: bool = False
+    projection_complete: bool = False
+    tail_survival_margin: int | None = None
+    tail_risk_ratio: Fraction | None = None
+    tail_lethal_round: int | None = None
+    uncertainty_reasons: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +58,11 @@ class RobotWaveSafetyCertificate:
     expected_remaining_threat: Fraction
     maximum_remaining_one_turn_damage: int
     outcomes: tuple[ScenarioOutcome, ...]
+    worst_survival_margin: int | None
+    maximum_risk_ratio: Fraction | None
+    earliest_lethal_round: int | None
+    projection_complete: bool
+    uncertainty_reasons: tuple[str, ...]
 
 
 def build_certificate(
@@ -130,6 +141,43 @@ def build_certificate(
             outcome.remaining_one_turn_damage for outcome in outcomes
         ),
         outcomes=outcomes,
+        worst_survival_margin=min(
+            (
+                outcome.tail_survival_margin
+                for outcome in outcomes
+                if outcome.tail_survival_margin is not None
+            ),
+            default=None,
+        ),
+        maximum_risk_ratio=max(
+            (
+                outcome.tail_risk_ratio
+                for outcome in outcomes
+                if outcome.tail_risk_ratio is not None
+            ),
+            default=None,
+        ),
+        earliest_lethal_round=min(
+            (
+                outcome.tail_lethal_round
+                for outcome in outcomes
+                if outcome.tail_lethal_round is not None
+            ),
+            default=None,
+        ),
+        projection_complete=all(
+            outcome.ended_with_night or outcome.projection_complete
+            for outcome in outcomes
+        ),
+        uncertainty_reasons=tuple(
+            sorted(
+                {
+                    reason
+                    for outcome in outcomes
+                    for reason in outcome.uncertainty_reasons
+                }
+            )
+        ),
     )
 
 
@@ -138,6 +186,18 @@ def survival_rank_key(
     root_stable_key: tuple[object, ...],
 ) -> tuple[object, ...]:
     return (
+        certificate.earliest_lethal_round is not None,
+        -(certificate.earliest_lethal_round or 0),
+        -(
+            certificate.worst_survival_margin
+            if certificate.worst_survival_margin is not None
+            else -10**12
+        ),
+        (
+            certificate.maximum_risk_ratio
+            if certificate.maximum_risk_ratio is not None
+            else Fraction(10**12)
+        ),
         -certificate.station_survival_probability,
         -certificate.p10_station_health,
         -certificate.worst_station_health,
@@ -169,6 +229,12 @@ def _outcome_is_secured(
     outcome: ScenarioOutcome,
     objective: NightObjective,
 ) -> bool:
+    if outcome.tail_estimated and (
+        not outcome.projection_complete
+        or outcome.tail_survival_margin is None
+        or outcome.tail_survival_margin < 0
+    ):
+        return False
     if outcome.station_health < objective.minimum_station_health:
         return False
     if objective.protect_all_controllers and outcome.controller_losses != 0:

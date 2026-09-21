@@ -11,6 +11,13 @@ from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
 from .director import StrategicDirector
 from .features import extract_features
+from .forecast import (
+    ForecastRefresh,
+    NightForecast,
+    forecast_recompute_reason,
+    rebase_day_forecast,
+    refresh_night_forecast,
+)
 from .items import has_item
 from .memory import MatchMemoryStore
 from .night import ControllerAssignment, ControllerAssignmentCache
@@ -49,6 +56,7 @@ Phase2Planner = Callable[..., Decision]
 NightSearcher = Callable[..., SearchResult]
 ObjectiveProvider = Callable[[Observation], NightObjective]
 ScenarioReconciler = Callable[..., ScenarioWeights]
+NightForecaster = Callable[..., ForecastRefresh]
 
 
 class StrategyEngine:
@@ -66,6 +74,7 @@ class StrategyEngine:
         session_store: SessionStore | None = None,
         scenario_reconciler: ScenarioReconciler = reconcile_scenario_weights,
         controller_assignment_cache: ControllerAssignmentCache | None = None,
+        night_forecaster: NightForecaster = refresh_night_forecast,
         telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
     ) -> None:
         self._config = config
@@ -107,6 +116,11 @@ class StrategyEngine:
             controller_assignment_cache
             if controller_assignment_cache is not None
             else ControllerAssignmentCache()
+        )
+        self._night_forecaster = night_forecaster
+        self._forecast_accepts_assignments = _accepts_keyword(
+            night_forecaster,
+            'controller_assignments',
         )
         self._telemetry = telemetry
         self._lock = RLock()
@@ -170,6 +184,102 @@ class StrategyEngine:
             and continuity is not SessionContinuity.DISCONTINUITY
             else None
         )
+        controller_assignments: tuple[ControllerAssignment, ...] | None = None
+        controller_assignment_mode: str | None = None
+        night_forecast: NightForecast | None = (
+            previous_for_director.night_forecast
+            if previous_for_director is not None
+            else None
+        )
+        if observation.time.phase is Phase.NIGHT:
+            previous_observation = (
+                previous_for_director.observation
+                if previous_for_director is not None
+                else None
+            )
+            previous_decision = (
+                previous_for_director.decision
+                if previous_for_director is not None
+                else None
+            )
+            invalidation_reason = forecast_recompute_reason(
+                observation,
+                previous_observation=previous_observation,
+                previous_forecast=night_forecast,
+                previous_decision=previous_decision,
+            )
+            if invalidation_reason is not None:
+                try:
+                    controller_assignments, cache_hit = (
+                        self._controller_assignments.resolve(
+                            observation,
+                            WorldGrid.from_observation(observation),
+                            mode_key=StrategyProfile.SURVIVE.value,
+                        )
+                    )
+                    controller_assignment_mode = StrategyProfile.SURVIVE.value
+                    self._telemetry.set(controller_cache_hit=cache_hit)
+                except Exception:
+                    self._telemetry.set(fallback_used=True)
+                    LOGGER.exception(
+                        'forecast controller assignment failed for team %s round %s',
+                        team_id,
+                        observation.time.round_no,
+                    )
+            try:
+                forecast_kwargs = {
+                    'previous_observation': previous_observation,
+                    'previous_forecast': night_forecast,
+                    'previous_decision': previous_decision,
+                    'config': self._config,
+                }
+                if self._forecast_accepts_assignments:
+                    forecast_kwargs['controller_assignments'] = (
+                        controller_assignments
+                    )
+                with self._telemetry.measure('forecast_ms'):
+                    forecast_refresh = self._night_forecaster(
+                        observation,
+                        **forecast_kwargs,
+                    )
+                night_forecast = forecast_refresh.forecast
+                self._telemetry.set(
+                    forecast_update_kind=night_forecast.update_kind.value,
+                    forecast_cache_hit=not forecast_refresh.recomputed,
+                    night_risk_level=night_forecast.risk_level.value,
+                    risk_ratio=float(night_forecast.risk_ratio),
+                    survival_margin=night_forecast.survival_margin,
+                )
+            except Exception:
+                self._telemetry.set(fallback_used=True)
+                if invalidation_reason is not None:
+                    night_forecast = None
+                LOGGER.exception(
+                    'NightForecast failed for team %s round %s',
+                    team_id,
+                    observation.time.round_no,
+                )
+        elif night_forecast is not None:
+            try:
+                night_forecast = rebase_day_forecast(
+                    observation,
+                    night_forecast,
+                )
+                self._telemetry.set(
+                    forecast_update_kind=night_forecast.update_kind.value,
+                    forecast_cache_hit=True,
+                    night_risk_level=night_forecast.risk_level.value,
+                    risk_ratio=float(night_forecast.risk_ratio),
+                    survival_margin=night_forecast.survival_margin,
+                )
+            except Exception:
+                night_forecast = None
+                self._telemetry.set(fallback_used=True)
+                LOGGER.exception(
+                    'day forecast rebase failed for team %s round %s',
+                    team_id,
+                    observation.time.round_no,
+                )
         director_failed = False
         try:
             with self._telemetry.measure('director_ms'):
@@ -190,10 +300,25 @@ class StrategyEngine:
                         if previous_for_director is not None
                         else None
                     ),
+                    forecast=night_forecast,
                 )
             intent = director_decision.intent
             features = director_decision.features
             director_state = director_decision.state
+            # Keep custom/test Director implementations source-compatible while
+            # the built-in Director exposes the richer Stage 3 result.
+            safety_plan = getattr(director_decision, 'safety_plan', None)
+            self._telemetry.set(
+                safety_plan_status=(
+                    safety_plan.status.value
+                    if safety_plan is not None
+                    else 'unknown'
+                ),
+                safety_plan_cost=(
+                    safety_plan.gold_cost if safety_plan is not None else 0
+                ),
+                effective_gold_reserve=intent.gold_reserve,
+            )
         except Exception:
             director_failed = True
             self._telemetry.set(fallback_used=True)
@@ -204,8 +329,12 @@ class StrategyEngine:
             )
             intent = DEFAULT_STRATEGIC_INTENT
             director_state = None
+            safety_plan = None
             try:
-                features = extract_features(observation)
+                features = extract_features(
+                    observation,
+                    forecast=night_forecast,
+                )
             except Exception:
                 LOGGER.exception('Phase 4 fallback feature extraction failed')
                 features = None
@@ -214,8 +343,13 @@ class StrategyEngine:
             if match_memory is not None
             else ()
         )
-        controller_assignments: tuple[ControllerAssignment, ...] | None = None
-        if observation.time.phase is Phase.NIGHT:
+        if (
+            observation.time.phase is Phase.NIGHT
+            and (
+                controller_assignments is None
+                or controller_assignment_mode != intent.profile.value
+            )
+        ):
             try:
                 controller_assignments, cache_hit = (
                     self._controller_assignments.resolve(
@@ -224,6 +358,7 @@ class StrategyEngine:
                         mode_key=intent.profile.value,
                     )
                 )
+                controller_assignment_mode = intent.profile.value
                 self._telemetry.set(controller_cache_hit=cache_hit)
             except Exception:
                 self._telemetry.set(fallback_used=True)
@@ -267,6 +402,7 @@ class StrategyEngine:
                 observation,
                 previous_for_director.observation,
                 intent,
+                forecast=night_forecast,
             )
             self._telemetry.set(phase3_level=trigger.level.value)
             if trigger.level is not Phase3Level.NONE:
@@ -338,6 +474,7 @@ class StrategyEngine:
                                     stats.candidate_generation_ms
                                 ),
                                 simulation_ms=stats.simulation_ms,
+                                tail_estimator_ms=stats.tail_estimator_ms,
                             )
                             if getattr(stats, 'deadline_hit', False):
                                 self._telemetry.set(watchdog_hit=True)
@@ -403,11 +540,12 @@ class StrategyEngine:
             )
             task_state = EMPTY_TASK_STATE
 
-        if fresh_certificate is not None:
+        if fresh_certificate is not None or night_forecast is not None:
             try:
                 self._memory.observe(
                     observation,
                     certificate=fresh_certificate,
+                    forecast=night_forecast,
                 )
             except Exception:
                 LOGGER.exception(
@@ -431,6 +569,7 @@ class StrategyEngine:
                 director_state=director_state,
                 intent=intent,
                 task_state=task_state,
+                night_forecast=night_forecast,
             )
         )
         return decision

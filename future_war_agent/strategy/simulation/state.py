@@ -81,6 +81,7 @@ class SimState:
     weapons: tuple[SimWeapon, ...]
     robots: tuple[SimRobot, ...]
     owned_kill_score: int = 0
+    day_no: int = 1
 
 
 def build_sim_state(
@@ -236,6 +237,7 @@ def build_sim_state(
         walls=walls,
         weapons=weapons,
         robots=tuple(sim_robots),
+        day_no=observation.time.day_no,
     )
 
 
