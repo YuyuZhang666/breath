@@ -70,6 +70,10 @@ class StrategyEngine:
             phase2_planner,
             'controller_assignments',
         )
+        self._phase2_accepts_telemetry = _accepts_keyword(
+            phase2_planner,
+            'telemetry',
+        )
         self._night_searcher = night_searcher
         self._search_accepts_assignments = _accepts_keyword(
             night_searcher,
@@ -391,6 +395,8 @@ class StrategyEngine:
             kwargs['intent'] = intent
         if self._phase2_accepts_assignments:
             kwargs['controller_assignments'] = controller_assignments
+        if self._phase2_accepts_telemetry:
+            kwargs['telemetry'] = self._telemetry
         try:
             with self._telemetry.measure('phase2_ms'):
                 return self._phase2_planner(observation, **kwargs)

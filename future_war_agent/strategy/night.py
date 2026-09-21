@@ -1,3 +1,4 @@
+from collections import deque
 from dataclasses import dataclass
 from itertools import combinations, permutations, product
 from threading import RLock
@@ -15,7 +16,6 @@ from future_war_agent.protocol.models import (
 from .jobs import Job, JobKind
 from .items import has_item
 from .joint import TacticalCandidate, candidates_for_jobs
-from .pathfinding import shortest_path
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .rules import station_footprint
 from .simulation.geometry import is_legal_cone
@@ -56,7 +56,11 @@ class ControllerAssignmentCache:
                 if cached is not None and cached.signature == signature:
                     return cached.assignments, True
 
-        assignments = assign_controllers(observation, world)
+        assignments = assign_controllers(
+            observation,
+            world,
+            mode_key=mode_key,
+        )
         if team_id:
             with self._lock:
                 self._entries[team_id] = _ControllerCacheEntry(
@@ -81,7 +85,16 @@ def _assignment_signature(
             for role in world.friendly_roles
         ),
         tuple(
-            (weapon.unit_id, weapon.position.x, weapon.position.y)
+            (
+                weapon.unit_id,
+                weapon.position.x,
+                weapon.position.y,
+                weapon.health,
+                weapon.attack_power,
+                weapon.attack_range,
+                weapon.level,
+                weapon.cooldown,
+            )
             for weapon in world.weapons
         ),
         tuple(
@@ -93,10 +106,24 @@ def _assignment_signature(
 def assign_controllers(
     observation: Observation,
     world: WorldGrid,
+    *,
+    mode_key: str = 'economy',
 ) -> tuple[ControllerAssignment, ...]:
-    del observation
     roles = tuple(sorted(world.friendly_roles, key=lambda value: value.unit_id))
     weapons = tuple(sorted(world.weapons, key=lambda value: value.unit_id))
+    distances_by_role = {
+        role.unit_id: _distance_map(world, role.position) for role in roles
+    }
+    options_by_pair = {
+        (role.unit_id, weapon.unit_id): _assignment_options(
+            world,
+            role,
+            weapon,
+            distances_by_role[role.unit_id],
+        )
+        for role in roles
+        for weapon in weapons
+    }
     for size in range(min(len(roles), len(weapons)), 0, -1):
         best: tuple[ControllerAssignment, ...] | None = None
         best_score: tuple[object, ...] | None = None
@@ -104,7 +131,7 @@ def assign_controllers(
             for selected_roles in permutations(roles, size):
                 pair_options: list[tuple[ControllerAssignment, ...]] = []
                 for role, weapon in zip(selected_roles, selected_weapons):
-                    options = _assignment_options(world, role, weapon)
+                    options = options_by_pair[(role.unit_id, weapon.unit_id)]
                     if not options:
                         break
                     pair_options.append(options)
@@ -115,8 +142,34 @@ def assign_controllers(
                         ordered = tuple(
                             sorted(possible, key=lambda value: value.role_id)
                         )
+                        weapon_by_id = {
+                            weapon.unit_id: weapon for weapon in selected_weapons
+                        }
+                        role_position_by_id = {
+                            role.unit_id: role.position for role in selected_roles
+                        }
+                        ready_now = sum(
+                            item.stand == role_position_by_id[item.role_id]
+                            and weapon_by_id[item.weapon_id].cooldown == 0
+                            and weapon_by_id[item.weapon_id].attack_range > 0
+                            for item in ordered
+                        )
+                        attack_value = sum(
+                            _assignment_weapon_value(
+                                weapon_by_id[item.weapon_id],
+                                mode_key,
+                            )
+                            for item in ordered
+                        )
+                        operator_risk = sum(
+                            _operator_risk(observation, item.stand)
+                            for item in ordered
+                        )
                         score: tuple[object, ...] = (
+                            -ready_now,
+                            -attack_value,
                             sum(item.distance for item in ordered),
+                            operator_risk,
                             tuple(
                                 (
                                     item.role_id,
@@ -145,7 +198,11 @@ def generate_night_candidates(
     assignments = {
         item.role_id: item
         for item in (
-            assign_controllers(observation, world)
+            assign_controllers(
+                observation,
+                world,
+                mode_key=intent.profile.value,
+            )
             if controller_assignments is None
             else controller_assignments
         )
@@ -161,6 +218,7 @@ def generate_night_candidates(
                 role,
                 weapon,
                 assignment,
+                intent,
             )
         else:
             role_choices = _safe_candidates(observation, world, role)
@@ -195,17 +253,21 @@ def _assignment_options(
     world: WorldGrid,
     role: UnitState,
     weapon: UnitState,
+    distances: Mapping[Position, int] | None = None,
 ) -> tuple[ControllerAssignment, ...]:
+    resolved_distances = (
+        _distance_map(world, role.position) if distances is None else distances
+    )
     options: list[ControllerAssignment] = []
     for stand in world.interaction_cells(weapon.position):
-        path = shortest_path(world, role.position, (stand,))
-        if path is not None:
+        distance = resolved_distances.get(stand)
+        if distance is not None:
             options.append(
                 ControllerAssignment(
                     role_id=role.unit_id,
                     weapon_id=weapon.unit_id,
                     stand=stand,
-                    distance=path.cost,
+                    distance=distance,
                 )
             )
     return tuple(
@@ -226,6 +288,7 @@ def _assigned_candidates(
     role: UnitState,
     weapon: UnitState | None,
     assignment: ControllerAssignment,
+    intent: StrategicIntent,
 ) -> tuple[TacticalCandidate, ...]:
     if role.position != assignment.stand:
         job = Job(
@@ -240,7 +303,14 @@ def _assigned_candidates(
 
     candidates: list[TacticalCandidate] = []
     if weapon is not None:
-        targets = _phase2_attack_targets(observation, world, weapon)
+        targets = _phase2_attack_targets(
+            observation,
+            world,
+            weapon,
+            allow_cross_team=(
+                intent.feature_flags.enable_cross_team_robot_attack
+            ),
+        )
         if targets:
             candidates.append(
                 TacticalCandidate.attack(
@@ -259,6 +329,8 @@ def _phase2_attack_targets(
     observation: Observation,
     world: WorldGrid,
     weapon: UnitState,
+    *,
+    allow_cross_team: bool = False,
 ) -> tuple[Position, ...]:
     if (
         weapon.cooldown != 0
@@ -267,7 +339,15 @@ def _phase2_attack_targets(
         or weapon.level <= 0
     ):
         return ()
-    living = tuple(robot for robot in observation.robots if robot.health > 0)
+    living = tuple(
+        robot
+        for robot in observation.robots
+        if robot.health > 0
+        and (
+            allow_cross_team
+            or robot.target_team == observation.our.team_type
+        )
+    )
     if not living:
         return ()
     if weapon.role_type == 'railgun':
@@ -289,6 +369,67 @@ def _phase2_attack_targets(
     if weapon.role_type == 'rocket':
         return _rocket_targets(observation, world, weapon, living)
     return ()
+
+
+def _assignment_weapon_value(weapon: UnitState, mode_key: str) -> int:
+    base = {
+        'gatling': 300,
+        'railgun': 280,
+        'rocket': 260,
+    }.get(weapon.role_type, 0)
+    if mode_key in {'survive', 'desperation'}:
+        base += {'rocket': 90, 'railgun': 60, 'gatling': 30}.get(
+            weapon.role_type,
+            0,
+        )
+    elif mode_key == 'score':
+        base += {'gatling': 90, 'railgun': 50, 'rocket': 30}.get(
+            weapon.role_type,
+            0,
+        )
+    ready_bonus = 100 if weapon.cooldown == 0 and weapon.attack_range > 0 else 0
+    level_bonus = max(0, weapon.level or 0) * 10
+    return base + ready_bonus + level_bonus
+
+
+def _operator_risk(observation: Observation, stand: Position) -> int:
+    targeted = tuple(
+        robot
+        for robot in observation.robots
+        if robot.health > 0 and robot.target_team == observation.our.team_type
+    )
+    if not targeted:
+        return 0
+    nearest = min(
+        stand.chebyshev_distance(robot.position) for robot in targeted
+    )
+    return max(0, 6 - nearest)
+
+
+def _distance_map(
+    world: WorldGrid,
+    start: Position,
+) -> Mapping[Position, int]:
+    distances = {start: 0}
+    frontier = deque((start,))
+    while frontier:
+        current = frontier.popleft()
+        next_distance = distances[current] + 1
+        for delta_x in (-1, 0, 1):
+            for delta_y in (-1, 0, 1):
+                if delta_x == 0 and delta_y == 0:
+                    continue
+                neighbor = Position(
+                    current.x + delta_x,
+                    current.y + delta_y,
+                )
+                if neighbor in distances or (
+                    neighbor != start and not world.can_traverse(neighbor)
+                ):
+                    continue
+                distances[neighbor] = next_distance
+                frontier.append(neighbor)
+    return MappingProxyType(distances)
 
 
 def _gatling_targets(

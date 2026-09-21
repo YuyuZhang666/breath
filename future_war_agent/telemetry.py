@@ -22,6 +22,7 @@ class TurnTelemetry:
     director_ms: float = 0.0
     task_ms: float = 0.0
     phase2_ms: float = 0.0
+    phase2_5_ms: float = 0.0
     phase3_ms: float = 0.0
     candidate_generation_ms: float = 0.0
     simulation_ms: float = 0.0
@@ -33,6 +34,9 @@ class TurnTelemetry:
     simulation_count: int = 0
     phase3_level: str = 'none'
     phase3_fallback_count: int = 0
+    phase2_5_fallback_count: int = 0
+    phase2_5_combination_count: int = 0
+    phase2_5_active_weapon_count: int = 0
     fallback_used: bool = False
     watchdog_hit: bool = False
     controller_cache_hit: bool = False
@@ -49,6 +53,7 @@ class _ActiveTurn:
     director_ms: float = 0.0
     task_ms: float = 0.0
     phase2_ms: float = 0.0
+    phase2_5_ms: float = 0.0
     phase3_ms: float = 0.0
     candidate_generation_ms: float = 0.0
     simulation_ms: float = 0.0
@@ -59,6 +64,9 @@ class _ActiveTurn:
     simulation_count: int = 0
     phase3_level: str = 'none'
     phase3_fallback_count: int = 0
+    phase2_5_fallback_count: int = 0
+    phase2_5_combination_count: int = 0
+    phase2_5_active_weapon_count: int = 0
     fallback_used: bool = False
     watchdog_hit: bool = False
     controller_cache_hit: bool = False
@@ -141,6 +149,7 @@ class TelemetryRecorder:
             director_ms=active.director_ms,
             task_ms=active.task_ms,
             phase2_ms=active.phase2_ms,
+            phase2_5_ms=active.phase2_5_ms,
             phase3_ms=active.phase3_ms,
             candidate_generation_ms=active.candidate_generation_ms,
             simulation_ms=active.simulation_ms,
@@ -152,6 +161,9 @@ class TelemetryRecorder:
             simulation_count=active.simulation_count,
             phase3_level=active.phase3_level,
             phase3_fallback_count=active.phase3_fallback_count,
+            phase2_5_fallback_count=active.phase2_5_fallback_count,
+            phase2_5_combination_count=active.phase2_5_combination_count,
+            phase2_5_active_weapon_count=active.phase2_5_active_weapon_count,
             fallback_used=active.fallback_used,
             watchdog_hit=active.watchdog_hit,
             controller_cache_hit=active.controller_cache_hit,

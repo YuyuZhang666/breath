@@ -105,6 +105,25 @@ class TelemetryTests(unittest.TestCase):
         self.assertGreaterEqual(sample.candidate_generation_ms, 0)
         self.assertGreater(sample.simulation_ms, 0)
 
+    def test_phase2_5_records_joint_fire_counts_and_time(self) -> None:
+        night = parse_observation(
+            json.loads(
+                (FIXTURES / 'phase3_night_request.json').read_text(
+                    encoding='utf-8'
+                )
+            )
+        )
+        recorder = TelemetryRecorder()
+        engine = StrategyEngine(telemetry=recorder)
+
+        engine.plan(night)
+
+        sample = recorder.snapshot()[-1]
+        self.assertGreater(sample.phase2_5_ms, 0)
+        self.assertEqual(sample.phase2_5_fallback_count, 0)
+        self.assertGreater(sample.phase2_5_combination_count, 0)
+        self.assertGreater(sample.phase2_5_active_weapon_count, 0)
+
     def test_phase3_deadline_records_watchdog_and_fallback(self) -> None:
         day = parse_observation(
             json.loads(
