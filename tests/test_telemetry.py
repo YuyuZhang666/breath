@@ -6,13 +6,60 @@ from future_war_agent.controller import handle_payload
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.strategy.engine import StrategyEngine
 from future_war_agent.strategy.simulation.errors import DeadlineExceeded
-from future_war_agent.telemetry import TelemetryRecorder
+from future_war_agent.telemetry import TelemetryRecorder, TurnTelemetry
 
 
 FIXTURES = Path(__file__).parent / 'fixtures'
 
 
 class TelemetryTests(unittest.TestCase):
+    def test_observability_fields_have_backward_compatible_defaults(self) -> None:
+        sample = TurnTelemetry()
+
+        self.assertEqual(sample.request_total_ms, 0.0)
+        self.assertEqual(sample.remaining_deadline_ms, 0.0)
+        self.assertEqual(sample.forecast_mode, 'none')
+        self.assertEqual(sample.forecast_reason, '')
+        self.assertFalse(sample.safe_action_generated)
+        self.assertEqual(sample.fallback_reason, 'normal')
+        self.assertFalse(sample.timeout_prevented)
+        self.assertEqual(sample.decision_source, 'safe')
+        self.assertEqual(sample.response_action_count, 0)
+
+    def test_observability_fields_are_finished_and_logged(self) -> None:
+        ticks = iter((0, 4_000_000))
+        recorder = TelemetryRecorder(clock=lambda: next(ticks))
+        token = recorder.begin()
+        recorder.set(
+            request_total_ms=3.5,
+            remaining_deadline_ms=496.5,
+            forecast_mode='lightweight',
+            forecast_reason='critical_risk',
+            safe_action_generated=True,
+            fallback_reason='deadline_low',
+            timeout_prevented=True,
+            decision_source='phase2',
+            response_action_count=2,
+        )
+
+        with self.assertLogs('future_war_agent.telemetry', level='INFO') as logs:
+            sample = recorder.finish(token)
+
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample.request_total_ms, 3.5)
+        self.assertEqual(sample.remaining_deadline_ms, 496.5)
+        self.assertEqual(sample.forecast_mode, 'lightweight')
+        self.assertEqual(sample.forecast_reason, 'critical_risk')
+        self.assertTrue(sample.safe_action_generated)
+        self.assertEqual(sample.fallback_reason, 'deadline_low')
+        self.assertTrue(sample.timeout_prevented)
+        self.assertEqual(sample.decision_source, 'phase2')
+        self.assertEqual(sample.response_action_count, 2)
+        payload = json.loads(logs.output[0].split('turn_telemetry ', 1)[1])
+        self.assertEqual(payload['forecast_mode'], 'lightweight')
+        self.assertEqual(payload['fallback_reason'], 'deadline_low')
+        self.assertEqual(payload['response_action_count'], 2)
+
     def test_nested_context_produces_one_bounded_sample(self) -> None:
         ticks = iter((0, 1_000_000, 3_000_000, 5_000_000))
         recorder = TelemetryRecorder(clock=lambda: next(ticks), max_samples=1)

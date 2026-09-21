@@ -1,4 +1,6 @@
 from collections import deque
+from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
 from fractions import Fraction
@@ -50,23 +52,49 @@ _DIRECTIONS = (
     (1, 1),
 )
 
+_DEADLINE_CHECK: ContextVar[Callable[[], None] | None] = ContextVar(
+    'robot_deadline_check',
+    default=None,
+)
+
+
+def _deadline_checkpoint() -> None:
+    check = _DEADLINE_CHECK.get()
+    if check is not None:
+        check()
+
 
 def choose_robot_intents(
     state: SimState,
     policy: RobotPolicy,
+    *,
+    deadline_check: Callable[[], None] | None = None,
 ) -> tuple[RobotIntent, ...]:
-    if state.station.health <= 0:
-        return ()
-    navigation_state = _navigation_state(state)
-    targets = _attack_targets(navigation_state)
-    return tuple(
-        _choose_robot_intent(navigation_state, robot, targets, policy)
+    token = _DEADLINE_CHECK.set(deadline_check)
+    try:
+        _deadline_checkpoint()
+        if state.station.health <= 0:
+            return ()
+        navigation_state = _navigation_state(state)
+        targets = _attack_targets(navigation_state)
+        intents: list[RobotIntent] = []
         for robot in sorted(
             navigation_state.robots,
             key=lambda item: item.robot_id,
-        )
-        if robot.health > 0
-    )
+        ):
+            _deadline_checkpoint()
+            if robot.health > 0:
+                intents.append(
+                    _choose_robot_intent(
+                        navigation_state,
+                        robot,
+                        targets,
+                        policy,
+                    )
+                )
+        return tuple(intents)
+    finally:
+        _DEADLINE_CHECK.reset(token)
 
 
 def _navigation_state(state: SimState) -> SimState:
@@ -98,6 +126,7 @@ def _choose_robot_intent(
     targets: tuple[_AttackTarget, ...],
     policy: RobotPolicy,
 ) -> RobotIntent:
+    _deadline_checkpoint()
     if robot.waits_this_turn:
         return RobotIntent(robot.robot_id)
 
@@ -157,10 +186,12 @@ def _maximum_progress_intent(
     robot: SimRobot,
     targets: tuple[_AttackTarget, ...],
 ) -> RobotIntent:
+    _deadline_checkpoint()
     baseline = _station_distance(state, robot.position, robot, None)
     candidates: list[tuple[tuple[object, ...], RobotIntent]] = []
 
     for target in targets:
+        _deadline_checkpoint()
         damage_fraction = Fraction(
             min(robot.attack_power, target.health),
             target.health,
@@ -189,6 +220,7 @@ def _maximum_progress_intent(
 
     unreachable = state.width * state.height
     for target in _legal_moves(state, robot):
+        _deadline_checkpoint()
         after = _station_distance(state, target, robot, None)
         if after is None:
             progress = -unreachable
@@ -209,9 +241,11 @@ def _maximum_progress_intent(
 
 
 def _legal_moves(state: SimState, robot: SimRobot) -> tuple[Position, ...]:
+    _deadline_checkpoint()
     occupied = _dynamic_occupied(state) - {robot.position}
     moves: list[Position] = []
     for delta_x, delta_y in _DIRECTIONS:
+        _deadline_checkpoint()
         target = Position(
             robot.position.x + delta_x,
             robot.position.y + delta_y,
@@ -226,6 +260,7 @@ def _legal_moves(state: SimState, robot: SimRobot) -> tuple[Position, ...]:
 
 
 def _attack_targets(state: SimState) -> tuple[_AttackTarget, ...]:
+    _deadline_checkpoint()
     targets: list[_AttackTarget] = [
         _AttackTarget(
             "role",
@@ -236,6 +271,7 @@ def _attack_targets(state: SimState) -> tuple[_AttackTarget, ...]:
         for role in state.roles
         if role.health > 0
     ]
+    _deadline_checkpoint()
     targets.append(
         _AttackTarget(
             "station",
@@ -244,11 +280,13 @@ def _attack_targets(state: SimState) -> tuple[_AttackTarget, ...]:
             state.station.health,
         )
     )
+    _deadline_checkpoint()
     targets.extend(
         _AttackTarget("wall", wall.unit_id, wall.occupied_cells, wall.health)
         for wall in state.walls
         if wall.health > 0
     )
+    _deadline_checkpoint()
     targets.extend(
         _AttackTarget(
             "weapon",
@@ -273,8 +311,10 @@ def _attack_targets(state: SimState) -> tuple[_AttackTarget, ...]:
 
 
 def _best_move(state: SimState, robot: SimRobot) -> Position | None:
+    _deadline_checkpoint()
     options: list[tuple[int, int, int, int, Position]] = []
     for target in _legal_moves(state, robot):
+        _deadline_checkpoint()
         distance = _station_distance(state, target, robot, None)
         fallback = min(
             target.chebyshev_distance(cell)
@@ -310,23 +350,28 @@ def _station_distance_map(
     robot: SimRobot,
     removed: _AttackTarget | None,
 ) -> dict[Position, int]:
+    _deadline_checkpoint()
     blocked = set(state.static_blocked)
     blocked.update(_dynamic_occupied(state))
     blocked.discard(robot.position)
     if removed is not None:
         blocked.difference_update(removed.cells)
 
-    goals = frozenset(
-        Position(x, y)
-        for x in range(state.width)
-        for y in range(state.height)
-        if Position(x, y) not in blocked
-        and min(
-            Position(x, y).chebyshev_distance(cell)
-            for cell in state.station.occupied_cells
-        )
-        <= robot.attack_range
-    )
+    goals_set: set[Position] = set()
+    for x in range(state.width):
+        _deadline_checkpoint()
+        for y in range(state.height):
+            position = Position(x, y)
+            if (
+                position not in blocked
+                and min(
+                    position.chebyshev_distance(cell)
+                    for cell in state.station.occupied_cells
+                )
+                <= robot.attack_range
+            ):
+                goals_set.add(position)
+    goals = frozenset(goals_set)
     return _distance_map(
         state.width,
         state.height,
@@ -341,6 +386,7 @@ def _candidate_route_cells(
     robot: SimRobot,
     targets: tuple[_AttackTarget, ...],
 ) -> frozenset[Position]:
+    _deadline_checkpoint()
     attackable_cells = set().union(*(target.cells for target in targets))
     blocked = set(state.static_blocked) - attackable_cells
     blocked.update(
@@ -354,6 +400,7 @@ def _candidate_route_cells(
         frozenset({robot.position}),
         frozenset(blocked),
     )
+    _deadline_checkpoint()
     from_station = _distance_map(
         state.width,
         state.height,
@@ -385,6 +432,7 @@ def _distance_map(
     starts: frozenset[Position],
     blocked: frozenset[Position],
 ) -> dict[Position, int]:
+    _deadline_checkpoint()
     valid_starts = tuple(
         sorted(
             (
@@ -398,8 +446,10 @@ def _distance_map(
     distances = {cell: 0 for cell in valid_starts}
     queue = deque(valid_starts)
     while queue:
+        _deadline_checkpoint()
         current = queue.popleft()
         for delta_x, delta_y in _DIRECTIONS:
+            _deadline_checkpoint()
             neighbor = Position(current.x + delta_x, current.y + delta_y)
             if (
                 neighbor in distances
@@ -417,6 +467,7 @@ def _ideal_station_route(
     state: SimState,
     robot: SimRobot,
 ) -> tuple[Position, ...]:
+    _deadline_checkpoint()
     attackable_cells = set().union(
         *(target.cells for target in _attack_targets(state))
     )
@@ -441,14 +492,17 @@ def _bfs_path(
     goals: frozenset[Position],
     blocked: frozenset[Position],
 ) -> tuple[Position, ...]:
+    _deadline_checkpoint()
     if start in goals:
         return (start,)
     queue = deque([start])
     parent: dict[Position, Position | None] = {start: None}
     found: Position | None = None
     while queue and found is None:
+        _deadline_checkpoint()
         current = queue.popleft()
         for delta_x, delta_y in _DIRECTIONS:
+            _deadline_checkpoint()
             neighbor = Position(current.x + delta_x, current.y + delta_y)
             if (
                 neighbor in parent
@@ -465,6 +519,7 @@ def _bfs_path(
         return ()
     reversed_path = [found]
     while parent[reversed_path[-1]] is not None:
+        _deadline_checkpoint()
         reversed_path.append(parent[reversed_path[-1]])
     return tuple(reversed(reversed_path))
 

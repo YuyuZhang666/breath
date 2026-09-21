@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 
 from future_war_agent.protocol.models import Position
@@ -28,7 +29,11 @@ def step_simulation(
     action: SimJointAction,
     robot_policy: RobotPolicy,
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
+    *,
+    deadline_check: Callable[[], None] | None = None,
 ) -> SimState:
+    if deadline_check is not None:
+        deadline_check()
     ledger = DamageLedger.empty()
     living_roles = {role.unit_id: role for role in state.roles if role.health > 0}
     living_weapons = {
@@ -42,6 +47,8 @@ def step_simulation(
         action.weapon_attacks,
         key=lambda item: item.stable_key,
     ):
+        if deadline_check is not None:
+            deadline_check()
         weapon = living_weapons.get(attack.weapon_id)
         controller = living_roles.get(attack.controller_id)
         if (
@@ -61,19 +68,29 @@ def step_simulation(
         if weapon.role_type == "rocket":
             fired_rockets.add(weapon.unit_id)
 
-    robot_intents = choose_robot_intents(state, robot_policy)
+    if deadline_check is not None:
+        deadline_check()
+    robot_intents = choose_robot_intents(
+        state,
+        robot_policy,
+        deadline_check=deadline_check,
+    )
     role_by_id = {role.unit_id: role for role in state.roles if role.health > 0}
     robot_by_id = {
         robot.robot_id: robot for robot in state.robots if robot.health > 0
     }
     move_intents: list[MoveIntent] = []
     for move in action.role_moves:
+        if deadline_check is not None:
+            deadline_check()
         role = role_by_id.get(move.role_id)
         if role is not None:
             move_intents.append(
                 MoveIntent("role", role.unit_id, role.position, move.target)
             )
     for intent in robot_intents:
+        if deadline_check is not None:
+            deadline_check()
         robot = robot_by_id.get(intent.robot_id)
         if robot is not None and intent.move_target is not None:
             move_intents.append(
@@ -84,9 +101,15 @@ def step_simulation(
                     intent.move_target,
                 )
             )
-    resolved_positions = resolve_simultaneous_moves(state, tuple(move_intents))
+    resolved_positions = resolve_simultaneous_moves(
+        state,
+        tuple(move_intents),
+        deadline_check=deadline_check,
+    )
 
     for intent in robot_intents:
+        if deadline_check is not None:
+            deadline_check()
         robot = robot_by_id.get(intent.robot_id)
         if (
             robot is None
@@ -110,6 +133,8 @@ def step_simulation(
         ):
             _add_damage(ledger.structure_damage, target_id, robot.attack_power)
 
+    if deadline_check is not None:
+        deadline_check()
     roles = tuple(
         updated
         for role in state.roles
@@ -125,6 +150,8 @@ def step_simulation(
         ).health
         > 0
     )
+    if deadline_check is not None:
+        deadline_check()
     station = replace(
         state.station,
         health=max(
@@ -133,6 +160,8 @@ def step_simulation(
             - ledger.structure_damage.get(state.station.unit_id, 0),
         ),
     )
+    if deadline_check is not None:
+        deadline_check()
     walls = tuple(
         updated
         for wall in state.walls
@@ -147,6 +176,8 @@ def step_simulation(
         ).health
         > 0
     )
+    if deadline_check is not None:
+        deadline_check()
     weapons = tuple(
         updated
         for weapon in state.weapons
@@ -170,6 +201,8 @@ def step_simulation(
     score_gain = 0
     robots_list: list[SimRobot] = []
     for robot in state.robots:
+        if deadline_check is not None:
+            deadline_check()
         health = max(
             0,
             robot.health - ledger.robot_damage_by_us.get(robot.robot_id, 0),
@@ -195,6 +228,8 @@ def step_simulation(
 
     remaining_night_turns = max(0, state.remaining_night_turns - 1)
     robots = tuple(robots_list) if remaining_night_turns > 0 else ()
+    if deadline_check is not None:
+        deadline_check()
     static_blocked = _updated_static_blocked(
         state,
         station,

@@ -3,6 +3,7 @@ from collections.abc import Callable
 from inspect import Parameter, signature
 from time import monotonic
 
+from future_war_agent.deadline import RequestBudget, RequestDeadlineExceeded
 from future_war_agent.decision.decision import Decision
 from future_war_agent.decision.serializer import decision_to_payload
 from future_war_agent.decision.validator import validate_decision
@@ -18,6 +19,9 @@ LOGGER.addHandler(logging.NullHandler())
 
 Planner = Callable[..., Decision]
 
+RESPONSE_BUDGET_SECONDS = 3.5
+COMPUTE_BUDGET_SECONDS = 3.0
+
 DEFAULT_STRATEGY_ENGINE = StrategyEngine()
 
 
@@ -25,13 +29,24 @@ def default_planner(
     observation: Observation,
     *,
     request_started_at: float | None = None,
+    request_budget: RequestBudget | None = None,
 ) -> Decision:
-    if request_started_at is None:
-        return DEFAULT_STRATEGY_ENGINE.plan(observation)
-    return DEFAULT_STRATEGY_ENGINE.plan(
-        observation,
-        request_started_at=request_started_at,
-    )
+    if request_budget is not None:
+        if _accepts_keyword(DEFAULT_STRATEGY_ENGINE.plan, 'request_budget'):
+            return DEFAULT_STRATEGY_ENGINE.plan(
+                observation,
+                request_budget=request_budget,
+            )
+        request_started_at = request_budget.started_at
+    if request_started_at is not None and _accepts_keyword(
+        DEFAULT_STRATEGY_ENGINE.plan,
+        'request_started_at',
+    ):
+        return DEFAULT_STRATEGY_ENGINE.plan(
+            observation,
+            request_started_at=request_started_at,
+        )
+    return DEFAULT_STRATEGY_ENGINE.plan(observation)
 
 
 def handle_payload(
@@ -39,10 +54,22 @@ def handle_payload(
     planner: Planner = default_planner,
     *,
     telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
+    request_started_at: float | None = None,
+    clock: Callable[[], float] = monotonic,
 ) -> dict[str, object]:
-    request_started_at = monotonic()
+    fallback_payload = safe_payload()
+    request_budget = RequestBudget.start(
+        started_at=request_started_at,
+        response_budget_seconds=RESPONSE_BUDGET_SECONDS,
+        compute_budget_seconds=COMPUTE_BUDGET_SECONDS,
+        clock=clock,
+    )
     token = telemetry.begin()
+    telemetry.set(safe_action_generated=True)
     try:
+        if request_budget.compute_exhausted():
+            _record_deadline_fallback(telemetry)
+            return fallback_payload
         with telemetry.measure('parser_ms'):
             observation = parse_observation(payload)
         telemetry.identify(
@@ -50,22 +77,55 @@ def handle_payload(
             round_no=observation.time.round_no,
             phase=observation.time.phase.value,
         )
+        if request_budget.compute_exhausted():
+            _record_deadline_fallback(telemetry)
+            return fallback_payload
+        planner_kwargs: dict[str, object] = {}
+        if _accepts_keyword(planner, 'request_budget'):
+            planner_kwargs['request_budget'] = request_budget
         if _accepts_keyword(planner, 'request_started_at'):
-            decision = planner(
-                observation,
-                request_started_at=request_started_at,
-            )
-        else:
-            decision = planner(observation)
+            planner_kwargs['request_started_at'] = request_budget.started_at
+        decision = planner(observation, **planner_kwargs)
+        if request_budget.compute_exhausted():
+            _record_deadline_fallback(telemetry)
+            return fallback_payload
         with telemetry.measure('validation_ms'):
             validated = validate_decision(observation, decision)
+        if request_budget.response_exhausted():
+            _record_deadline_fallback(telemetry)
+            return fallback_payload
         with telemetry.measure('serialization_ms'):
-            return decision_to_payload(validated)
+            response = decision_to_payload(validated)
+        if request_budget.response_exhausted():
+            _record_deadline_fallback(telemetry)
+            return fallback_payload
+        telemetry.set(response_action_count=len(validated.commands))
+        return response
+    except RequestDeadlineExceeded:
+        _record_deadline_fallback(telemetry)
+        LOGGER.warning('turn handling reached the request deadline', exc_info=True)
+        return fallback_payload
     except Exception:
-        telemetry.set(fallback_used=True)
+        telemetry.set(
+            fallback_used=True,
+            fallback_reason='exception',
+            decision_source='safe',
+            response_action_count=0,
+        )
         LOGGER.exception("turn handling failed")
-        return safe_payload()
+        return fallback_payload
     finally:
+        finished_at = clock()
+        telemetry.set(
+            request_total_ms=max(
+                0.0,
+                (finished_at - request_budget.started_at) * 1000,
+            ),
+            remaining_deadline_ms=max(
+                0.0,
+                request_budget.response_deadline - finished_at,
+            ) * 1000,
+        )
         telemetry.finish(token)
 
 
@@ -78,4 +138,14 @@ def _accepts_keyword(function: Planner, name: str) -> bool:
         parameter.name == name
         or parameter.kind is Parameter.VAR_KEYWORD
         for parameter in parameters
+    )
+
+
+def _record_deadline_fallback(telemetry: TelemetryRecorder) -> None:
+    telemetry.set(
+        fallback_used=True,
+        fallback_reason='deadline_low',
+        timeout_prevented=True,
+        decision_source='safe',
+        response_action_count=0,
     )

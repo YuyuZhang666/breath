@@ -5,16 +5,132 @@ from fractions import Fraction
 from future_war_agent.strategy.forecast import (
     ForecastUpdateKind,
     RiskLevel,
+    build_lightweight_forecast,
     build_night_forecast,
     classify_risk,
     rebase_day_forecast,
     refresh_night_forecast,
 )
 from future_war_agent.strategy.simulation.config import Phase3Config
+from future_war_agent.strategy.simulation.errors import DeadlineExceeded
 from tests.strategy_helpers import observation, robot, unit
 
 
 class NightForecastTests(unittest.TestCase):
+    def test_full_forecast_honors_expired_deadline(self) -> None:
+        with self.assertRaises(DeadlineExceeded):
+            build_night_forecast(
+                self._quiet_night(71),
+                clock=lambda: 1.0,
+                deadline=1.0,
+            )
+
+    def test_full_forecast_can_be_interrupted_during_work(self) -> None:
+        calls = 0
+
+        def clock() -> float:
+            nonlocal calls
+            calls += 1
+            return 0.0 if calls < 8 else 2.0
+
+        observed = observation(
+            round_no=71,
+            width=32,
+            height=32,
+            our_units=(
+                unit(1, 1, 1, 'worker'),
+                unit(2, 20, 20, 'station', health=500, level=1),
+            ),
+            robots=(robot(9, 0, 0, role_type='bossRobot'),),
+        )
+
+        with self.assertRaises(DeadlineExceeded):
+            build_night_forecast(observed, clock=clock, deadline=1.0)
+        self.assertGreaterEqual(calls, 8)
+
+    def test_lightweight_forecast_reports_conservative_critical_risk(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(1, 1, 1, 'worker'),
+                unit(2, 10, 10, 'station', health=100, level=1),
+            ),
+            robots=(robot(9, 0, 0, role_type='bossRobot'),),
+        )
+
+        forecast = build_lightweight_forecast(observed)
+
+        self.assertIs(forecast.update_kind, ForecastUpdateKind.LIGHTWEIGHT)
+        self.assertFalse(forecast.complete)
+        self.assertLess(forecast.survival_margin, 0)
+        self.assertIs(forecast.risk_level, RiskLevel.CRITICAL)
+        self.assertIn(
+            'lightweight_conservative_estimate',
+            forecast.uncertainty_reasons,
+        )
+
+    def test_full_disabled_uses_lightweight_without_cache(self) -> None:
+        refreshed = refresh_night_forecast(
+            self._quiet_night(71),
+            allow_full=False,
+        )
+
+        self.assertTrue(refreshed.recomputed)
+        self.assertIs(
+            refreshed.forecast.update_kind,
+            ForecastUpdateKind.LIGHTWEIGHT,
+        )
+        self.assertIn('full forecast disabled', refreshed.reason)
+
+    def test_full_disabled_corrects_invalid_cache_with_lightweight(self) -> None:
+        first = self._quiet_night(
+            71,
+            extra_units=(unit(20, 6, 6, 'wall', health=40, level=1),),
+        )
+        second = self._quiet_night(72)
+        initial = refresh_night_forecast(first)
+
+        refreshed = refresh_night_forecast(
+            second,
+            previous_observation=first,
+            previous_forecast=initial.forecast,
+            allow_full=False,
+        )
+
+        self.assertTrue(refreshed.recomputed)
+        self.assertIs(
+            refreshed.forecast.update_kind,
+            ForecastUpdateKind.LIGHTWEIGHT,
+        )
+        self.assertIn(
+            'incremental_cache_lightweight_correction',
+            refreshed.forecast.uncertainty_reasons,
+        )
+
+    def test_expired_lightweight_correction_keeps_incremental_cache(self) -> None:
+        first = self._quiet_night(
+            71,
+            extra_units=(unit(20, 6, 6, 'wall', health=40, level=1),),
+        )
+        second = self._quiet_night(72)
+        initial = refresh_night_forecast(first)
+
+        refreshed = refresh_night_forecast(
+            second,
+            previous_observation=first,
+            previous_forecast=initial.forecast,
+            allow_full=False,
+            clock=lambda: 1.0,
+            deadline=1.0,
+        )
+
+        self.assertFalse(refreshed.recomputed)
+        self.assertIs(
+            refreshed.forecast.update_kind,
+            ForecastUpdateKind.INCREMENTAL,
+        )
+        self.assertIn('deadline expired', refreshed.reason)
+
     def test_risk_threshold_boundaries_are_exact(self) -> None:
         self.assertIs(
             classify_risk(Fraction(11, 20), 1, None, 71),

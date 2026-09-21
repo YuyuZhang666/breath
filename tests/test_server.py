@@ -3,11 +3,13 @@ import socket
 import threading
 import time
 import unittest
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from urllib.request import Request, urlopen
 
 from future_war_agent.fallback import safe_payload
-from future_war_agent.server import create_server
+from future_war_agent.server import _handler_for, create_server
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "request.json"
@@ -98,6 +100,55 @@ class ServerTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+    def test_request_start_precedes_body_read_and_reaches_controller(self) -> None:
+        body = FIXTURE.read_bytes()
+        body_read_at: list[float] = []
+        controller_starts: list[float] = []
+
+        class RecordingBody(BytesIO):
+            def read(self, size: int = -1) -> bytes:
+                body_read_at.append(time.monotonic())
+                return super().read(size)
+
+        def controller(
+            _: object,
+            *,
+            request_started_at: float,
+        ) -> dict[str, object]:
+            controller_starts.append(request_started_at)
+            return safe_payload()
+
+        request = SimpleNamespace(
+            headers={"Content-Length": str(len(body))},
+            rfile=RecordingBody(body),
+            wfile=BytesIO(),
+            send_response=lambda *_: None,
+            send_header=lambda *_: None,
+            end_headers=lambda: None,
+        )
+
+        _handler_for(controller).do_POST(request)
+
+        self.assertEqual(len(controller_starts), 1)
+        self.assertEqual(len(body_read_at), 1)
+        self.assertLessEqual(controller_starts[0], body_read_at[0])
+
+    def test_client_disconnect_during_response_is_contained(self) -> None:
+        class DisconnectingWriter:
+            def write(self, _: bytes) -> None:
+                raise BrokenPipeError("client disconnected")
+
+        request = SimpleNamespace(
+            headers={"Content-Length": "2"},
+            rfile=BytesIO(b"{}"),
+            wfile=DisconnectingWriter(),
+            send_response=lambda *_: None,
+            send_header=lambda *_: None,
+            end_headers=lambda: None,
+        )
+
+        _handler_for(lambda _: safe_payload()).do_POST(request)
 
     def test_oversized_body_is_rejected_before_controller_runs(self) -> None:
         received: list[object] = []

@@ -13,7 +13,7 @@ from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.protocol.time import TurnTime
-from future_war_agent.strategy.compute import ComputeGovernor
+from future_war_agent.strategy.compute import ComputeGovernor, ComputeGovernorConfig
 from future_war_agent.strategy.engine import StrategyEngine
 from future_war_agent.strategy.director import StrategicDirector
 from future_war_agent.strategy.forecast import (
@@ -401,6 +401,9 @@ class StrategyEngineTests(unittest.TestCase):
             night_searcher=searcher,
             clock=lambda: 100.0,
             telemetry=telemetry,
+            compute_governor=ComputeGovernor(
+                ComputeGovernorConfig(night_full_forecast_enabled=True)
+            ),
         )
         station_id = next(
             item.unit_id for item in self.night.our.units if item.role_type == 'station'

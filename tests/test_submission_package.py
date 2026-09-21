@@ -43,6 +43,10 @@ class SubmissionPackageTests(unittest.TestCase):
             f"{PACKAGE_ROOT}/src/future_war_agent/logtool.py",
             names,
         )
+        self.assertIn(
+            f'{PACKAGE_ROOT}/src/future_war_agent/deadline.py',
+            names,
+        )
         self.assertTrue(
             all(
                 name == PACKAGE_ROOT

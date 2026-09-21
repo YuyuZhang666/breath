@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from future_war_agent.controller import default_planner, handle_payload
+from future_war_agent.deadline import RequestBudget, RequestDeadlineExceeded
 from future_war_agent.decision.actions import Action
 from future_war_agent.decision.decision import Decision
 from future_war_agent.fallback import safe_payload
@@ -13,6 +14,7 @@ from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.strategy.engine import StrategyEngine
 from future_war_agent.strategy.simulation.candidates import SimJointAction
+from future_war_agent.telemetry import TelemetryRecorder
 
 
 STRATEGY_FIXTURE = Path(__file__).parent / "fixtures" / "strategy_request.json"
@@ -72,6 +74,90 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(starts), 1)
         self.assertGreater(starts[0], 0)
 
+    def test_external_request_start_reaches_budget_aware_planner(self) -> None:
+        budgets: list[RequestBudget] = []
+
+        def planner(
+            observed: Observation,
+            *,
+            request_budget: RequestBudget,
+        ) -> Decision:
+            self.assertEqual(observed.time.round_no, 85)
+            budgets.append(request_budget)
+            return Decision()
+
+        response = handle_payload(
+            self.payload,
+            planner=planner,
+            request_started_at=12.5,
+            clock=lambda: 12.75,
+        )
+
+        self.assertEqual(response, safe_payload())
+        self.assertEqual(len(budgets), 1)
+        self.assertEqual(budgets[0].started_at, 12.5)
+        self.assertEqual(budgets[0].compute_deadline, 15.5)
+        self.assertEqual(budgets[0].response_deadline, 16.0)
+
+    def test_expired_external_request_skips_parser_and_planner(self) -> None:
+        called = False
+
+        def planner(_: Observation) -> Decision:
+            nonlocal called
+            called = True
+            return Decision(prompt="too-late")
+
+        with patch(
+            "future_war_agent.controller.parse_observation"
+        ) as parser:
+            response = handle_payload(
+                self.payload,
+                planner=planner,
+                request_started_at=1.0,
+                clock=lambda: 4.1,
+            )
+
+        self.assertEqual(response, safe_payload())
+        self.assertFalse(called)
+        parser.assert_not_called()
+
+    def test_validation_is_skipped_when_planner_uses_compute_budget(self) -> None:
+        times = iter((10.0, 10.0, 13.1, 13.1))
+
+        def planner(_: Observation) -> Decision:
+            return Decision(prompt="late")
+
+        with patch(
+            "future_war_agent.controller.validate_decision"
+        ) as validator:
+            response = handle_payload(
+                self.payload,
+                planner=planner,
+                request_started_at=10.0,
+                clock=lambda: next(times),
+            )
+
+        self.assertEqual(response, safe_payload())
+        validator.assert_not_called()
+
+    def test_request_budget_helpers_use_absolute_deadlines(self) -> None:
+        now = [2.0]
+        budget = RequestBudget.start(
+            started_at=1.0,
+            response_budget_seconds=4.0,
+            compute_budget_seconds=3.0,
+            clock=lambda: now[0],
+        )
+
+        self.assertEqual(budget.remaining_compute(), 2.0)
+        self.assertEqual(budget.remaining_response(), 3.0)
+        self.assertEqual(budget.child_deadline(0.5), 2.5)
+        now[0] = 4.0
+        self.assertTrue(budget.compute_exhausted())
+        self.assertFalse(budget.response_exhausted())
+        with self.assertRaises(RequestDeadlineExceeded):
+            budget.checkpoint("planner")
+
     def test_invalid_payload_returns_safe_payload(self) -> None:
         self.assertEqual(handle_payload({}), safe_payload())
 
@@ -80,6 +166,25 @@ class ControllerTests(unittest.TestCase):
             raise RuntimeError("private failure detail")
 
         self.assertEqual(handle_payload(self.payload, planner=broken), safe_payload())
+
+
+    def test_planner_deadline_returns_safe_payload_with_timeout_reason(self) -> None:
+        telemetry = TelemetryRecorder()
+
+        def expired(_: Observation) -> Decision:
+            raise RequestDeadlineExceeded('synthetic planner deadline')
+
+        response = handle_payload(
+            self.payload,
+            planner=expired,
+            telemetry=telemetry,
+        )
+
+        self.assertEqual(response, safe_payload())
+        sample = telemetry.snapshot()[-1]
+        self.assertEqual(sample.fallback_reason, 'deadline_low')
+        self.assertTrue(sample.timeout_prevented)
+        self.assertEqual(sample.decision_source, 'safe')
 
 
 class Phase3ControllerIntegrationTests(unittest.TestCase):

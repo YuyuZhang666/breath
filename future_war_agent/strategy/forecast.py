@@ -1,6 +1,8 @@
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from fractions import Fraction
+from time import monotonic
 
 from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.decision import Decision
@@ -9,7 +11,9 @@ from future_war_agent.protocol.time import NIGHT_ROUNDS, Phase
 
 from .night import ControllerAssignment, assign_controllers
 from .policy import StrategyProfile
+from .rules import station_footprint
 from .simulation.config import DEFAULT_PHASE3_CONFIG, Phase3Config, ROBOT_SPECS
+from .simulation.errors import DeadlineExceeded
 from .simulation.future import choose_future_action
 from .simulation.kernel import step_simulation
 from .simulation.robots import RobotPolicy
@@ -34,6 +38,7 @@ class RiskLevel(StrEnum):
 class ForecastUpdateKind(StrEnum):
     FULL = 'full'
     INCREMENTAL = 'incremental'
+    LIGHTWEIGHT = 'lightweight'
     REBASED_DAY = 'rebased_day'
 
 
@@ -79,6 +84,9 @@ def refresh_night_forecast(
     previous_decision: Decision | None = None,
     controller_assignments: tuple[ControllerAssignment, ...] | None = None,
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
+    clock: Callable[[], float] = monotonic,
+    deadline: float | None = None,
+    allow_full: bool = True,
 ) -> ForecastRefresh:
     if observation.time.phase is not Phase.NIGHT:
         raise ValueError('NightForecast requires a night observation')
@@ -89,11 +97,50 @@ def refresh_night_forecast(
         previous_decision=previous_decision,
     )
     if reason is not None:
+        if not allow_full:
+            incremental = None
+            if (
+                previous_forecast is not None
+                and previous_forecast.model_version == MODEL_VERSION
+                and previous_forecast.day_no == observation.time.day_no
+            ):
+                incremental = update_forecast_incrementally(
+                    observation,
+                    previous_forecast,
+                    previous_decision=previous_decision,
+                )
+            try:
+                lightweight = build_lightweight_forecast(
+                    observation,
+                    config=config,
+                    clock=clock,
+                    deadline=deadline,
+                )
+            except DeadlineExceeded:
+                if incremental is None:
+                    raise
+                return ForecastRefresh(
+                    forecast=incremental,
+                    recomputed=False,
+                    reason=f'{reason}; lightweight forecast deadline expired',
+                )
+            if incremental is not None:
+                lightweight = _more_conservative_forecast(
+                    incremental,
+                    lightweight,
+                )
+            return ForecastRefresh(
+                forecast=lightweight,
+                recomputed=True,
+                reason=f'{reason}; full forecast disabled',
+            )
         return ForecastRefresh(
             forecast=build_night_forecast(
                 observation,
                 controller_assignments=controller_assignments,
                 config=config,
+                clock=clock,
+                deadline=deadline,
             ),
             recomputed=True,
             reason=reason,
@@ -116,8 +163,16 @@ def build_night_forecast(
     *,
     controller_assignments: tuple[ControllerAssignment, ...] | None = None,
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
+    clock: Callable[[], float] = monotonic,
+    deadline: float | None = None,
 ) -> NightForecast:
+    def check_deadline() -> None:
+        if deadline is not None and clock() >= deadline:
+            raise DeadlineExceeded('NightForecast deadline expired')
+
+    check_deadline()
     world = WorldGrid.from_observation(observation)
+    check_deadline()
     assignments = tuple(
         AssignedStand(item.role_id, item.weapon_id, item.stand)
         for item in (
@@ -126,7 +181,9 @@ def build_night_forecast(
             else controller_assignments
         )
     )
+    check_deadline()
     state = build_sim_state(observation, assignments, config)
+    check_deadline()
     initial_station_hp = state.station.health
     initial_wall_ids = frozenset(wall.unit_id for wall in state.walls)
     initial_weapon_ids = frozenset(weapon.unit_id for weapon in state.weapons)
@@ -142,12 +199,14 @@ def build_night_forecast(
             state,
             config,
             profile=StrategyProfile.SURVIVE,
+            deadline_check=check_deadline,
         )
         state = step_simulation(
             state,
             action,
             RobotPolicy.MAXIMUM_STATION_PROGRESS,
             config,
+            deadline_check=check_deadline,
         )
         if step_index == 0:
             expected_next_hp = state.station.health
@@ -155,7 +214,13 @@ def build_night_forecast(
             lethal_round = state.round_no
             break
 
-    tail = estimate_tail(state, config)
+    check_deadline()
+    tail = estimate_tail(
+        state,
+        config,
+        clock=clock,
+        deadline=deadline,
+    )
     if lethal_round is None:
         lethal_round = tail.lethal_round
     exact_station_damage = max(0, initial_station_hp - state.station.health)
@@ -210,6 +275,161 @@ def build_night_forecast(
         uncertainty_reasons=tail.uncertainty_reasons,
         observed_station_hp=initial_station_hp,
         expected_next_station_hp=expected_next_hp,
+    )
+
+
+def build_lightweight_forecast(
+    observation: Observation,
+    *,
+    config: Phase3Config = DEFAULT_PHASE3_CONFIG,
+    clock: Callable[[], float] = monotonic,
+    deadline: float | None = None,
+) -> NightForecast:
+    '''Build a conservative O(units + robots) night-risk estimate.'''
+
+    def check_deadline() -> None:
+        if deadline is not None and clock() >= deadline:
+            raise DeadlineExceeded('Lightweight NightForecast deadline expired')
+
+    if observation.time.phase is not Phase.NIGHT:
+        raise ValueError('NightForecast requires a night observation')
+    check_deadline()
+    station = _living_unit(observation, 'station')
+    station_hp = station.health if station is not None else 0
+    station_cells = station_footprint(station.position) if station else ()
+    remaining_turns = max(
+        0,
+        NIGHT_ROUNDS - observation.time.round_in_phase + 1,
+    )
+    incoming_damage = 0
+    next_damage = 0
+    critical_robots: list[tuple[int, int]] = []
+    for robot in observation.robots:
+        check_deadline()
+        if robot.health <= 0 or robot.target_team != observation.our.team_type:
+            continue
+        spec = ROBOT_SPECS.get(robot.role_type)
+        attack_power = (
+            spec.attack_power
+            if spec is not None
+            else max(item.attack_power for item in ROBOT_SPECS.values())
+        )
+        attack_range = (
+            spec.attack_range
+            if spec is not None
+            else max(item.attack_range for item in ROBOT_SPECS.values())
+        )
+        distance = (
+            min(
+                robot.position.chebyshev_distance(cell)
+                for cell in station_cells
+            )
+            if station_cells
+            else 0
+        )
+        turns_to_attack = max(0, distance - attack_range)
+        if robot.abnormal_state.casefold() == 'dizzy':
+            turns_to_attack += 1
+        attack_turns = max(0, remaining_turns - turns_to_attack)
+        contribution = attack_power * attack_turns
+        incoming_damage += contribution
+        if turns_to_attack == 0:
+            next_damage += attack_power
+        if contribution > 0:
+            critical_robots.append((contribution, robot.robot_id))
+
+    effective_defense = station_hp
+    survival_margin = effective_defense - incoming_damage
+    risk_ratio = Fraction(incoming_damage, max(1, effective_defense))
+    lethal_round = (
+        observation.time.round_no + 1
+        if station_hp <= 0 or next_damage >= station_hp
+        else None
+    )
+    uncertainty = ['lightweight_conservative_estimate']
+    if not config.tail_visible_roster_complete:
+        uncertainty.append('future_robot_roster_unconfirmed')
+    if (
+        observation.time.day_no >= 3
+        and not config.tail_late_wave_calibration_source.strip()
+    ):
+        uncertainty.append('d3_calibration_unavailable')
+    critical_robots.sort(key=lambda item: (-item[0], item[1]))
+    risk_level = classify_risk(
+        risk_ratio,
+        survival_margin,
+        lethal_round,
+        observation.time.round_no,
+        complete=False,
+    )
+    return NightForecast(
+        expected_station_hp_at_dawn=max(0, station_hp - incoming_damage),
+        predicted_damage_before_dawn=incoming_damage,
+        effective_defense_hp=effective_defense,
+        future_firepower=0,
+        survival_margin=survival_margin,
+        risk_ratio=risk_ratio,
+        risk_level=risk_level,
+        expected_wall_losses=0,
+        expected_weapon_losses=0,
+        expected_role_losses=0,
+        lethal_round=lethal_round,
+        critical_robot_ids=tuple(item[1] for item in critical_robots[:8]),
+        critical_wall_ids=(),
+        generated_round=observation.time.round_no,
+        updated_round=observation.time.round_no,
+        day_no=observation.time.day_no,
+        model_version=MODEL_VERSION,
+        update_kind=ForecastUpdateKind.LIGHTWEIGHT,
+        complete=False,
+        uncertainty_reasons=tuple(uncertainty),
+        observed_station_hp=station_hp,
+        expected_next_station_hp=max(0, station_hp - next_damage),
+    )
+
+
+def _more_conservative_forecast(
+    incremental: NightForecast,
+    lightweight: NightForecast,
+) -> NightForecast:
+    selected = (
+        lightweight
+        if lightweight.survival_margin <= incremental.survival_margin
+        else incremental
+    )
+    risk_order = {
+        RiskLevel.SAFE: 0,
+        RiskLevel.UNKNOWN: 1,
+        RiskLevel.WATCH: 2,
+        RiskLevel.CRITICAL: 3,
+        RiskLevel.LETHAL: 4,
+    }
+    risk_level = max(
+        (incremental.risk_level, lightweight.risk_level),
+        key=risk_order.__getitem__,
+    )
+    lethal_rounds = tuple(
+        value
+        for value in (incremental.lethal_round, lightweight.lethal_round)
+        if value is not None
+    )
+    uncertainty = tuple(
+        dict.fromkeys(
+            (
+                *selected.uncertainty_reasons,
+                *lightweight.uncertainty_reasons,
+                'incremental_cache_lightweight_correction',
+            )
+        )
+    )
+    return replace(
+        selected,
+        update_kind=ForecastUpdateKind.LIGHTWEIGHT,
+        complete=False,
+        risk_level=risk_level,
+        lethal_round=min(lethal_rounds) if lethal_rounds else None,
+        uncertainty_reasons=uncertainty,
+        updated_round=lightweight.updated_round,
     )
 
 
