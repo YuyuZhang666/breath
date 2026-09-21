@@ -8,6 +8,7 @@ from future_war_agent.strategy.jobs import (
 )
 from future_war_agent.strategy.layout import build_defensive_layout
 from future_war_agent.strategy.policy import (
+    BuildPlan,
     DayPriorities,
     ItemPolicy,
     StrategicIntent,
@@ -225,7 +226,7 @@ class DayJobTests(unittest.TestCase):
             {job.kind for job in jobs[10010]},
         )
 
-    def test_critical_opening_walls_precede_remaining_weapons(self) -> None:
+    def test_remaining_core_weapons_precede_opening_walls(self) -> None:
         observed = observation(
             our_units=(
                 unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
@@ -239,12 +240,65 @@ class DayJobTests(unittest.TestCase):
 
         jobs = generate_day_jobs(observed, world, layout)
 
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
+        self.assertNotIn(
+            JobKind.BUILD_WALL,
+            {job.kind for job in jobs[10010]},
+        )
+
+    def test_critical_opening_walls_start_after_core_weapons(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+                unit(10013, 5, 5, 'station', level=1),
+                unit(10020, 7, 7, 'gatling', level=1),
+                unit(10030, 4, 4, 'railgun', level=1),
+                unit(10040, 4, 7, 'rocket', level=1),
+            ),
+            gold=0,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+
+        jobs = generate_day_jobs(observed, world, layout)
+
         self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
         self.assertIn(jobs[10010][0].target, layout.critical_wall_sites)
-        weapon_job = next(
-            job for job in jobs[10010] if job.kind is JobKind.BUILD_WEAPON
+
+    def test_custom_short_loadout_opens_walls_after_its_last_weapon(self) -> None:
+        plan = BuildPlan(
+            weapon_loadout=('gatling',),
+            minimum_weapons_before_walls=3,
         )
-        self.assertGreater(jobs[10010][0].priority, weapon_job.priority)
+        initial = observation(
+            our_units=(
+                unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            gold=0,
+        )
+        initial_world = WorldGrid.from_observation(initial)
+        layout = build_defensive_layout(initial_world, plan)
+        site = layout.weapon_sites[0]
+        observed = observation(
+            our_units=initial.our.units + (
+                unit(10020, site.position.x, site.position.y, 'gatling'),
+            ),
+            gold=0,
+        )
+        world = WorldGrid.from_observation(observed)
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world, plan),
+            StrategicIntent(build_plan=plan),
+        )
+
+        self.assertIn(
+            JobKind.BUILD_WALL,
+            {job.kind for job in jobs[10010]},
+        )
 
     def test_after_critical_walls_remaining_weapon_build_resumes(self) -> None:
         initial = observation(
@@ -357,6 +411,53 @@ class DayJobTests(unittest.TestCase):
         )
 
         self.assertNotIn(JobKind.BUILD_WEAPON, {job.kind for job in jobs[10010]})
+
+    def test_last_core_weapon_can_consume_opening_reserve(self) -> None:
+        initial = observation(
+            round_no=20,
+            our_units=(
+                unit(10010, 3, 3, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            gold=25,
+        )
+        initial_world = WorldGrid.from_observation(initial)
+        layout = build_defensive_layout(initial_world)
+        built = tuple(
+            unit(
+                10020 + index,
+                site.position.x,
+                site.position.y,
+                site.weapon_type,
+                level=1,
+            )
+            for index, site in enumerate(layout.weapon_sites[:2])
+        )
+        observed = observation(
+            round_no=20,
+            our_units=initial.our.units + built,
+            gold=25,
+        )
+        world = WorldGrid.from_observation(observed)
+        missing_type = layout.weapon_sites[2].weapon_type
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world),
+            StrategicIntent(
+                gold_reserve=25,
+                reserve_eligible_actions=frozenset(
+                    {('build', missing_type)}
+                ),
+            ),
+        )
+
+        build = next(
+            job for job in jobs[10010] if job.kind is JobKind.BUILD_WEAPON
+        )
+        self.assertEqual(build.name, missing_type)
+        self.assertTrue(build.reserve_eligible)
 
     def test_intent_priorities_flow_into_generated_jobs(self) -> None:
         observed = observation(

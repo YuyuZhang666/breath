@@ -87,8 +87,15 @@ def generate_day_jobs(
         for site in layout.weapon_sites
         if (site.position, site.weapon_type) not in existing_weapon_sites
     ) if intent.build_plan.build_weapons else ()
+    built_planned_weapon_count = len(layout.weapon_sites) - len(
+        missing_weapon_sites
+    )
+    required_weapons_before_walls = min(
+        intent.build_plan.minimum_weapons_before_walls,
+        len(layout.weapon_sites),
+    )
     defense_started = (
-        len(world.weapons) >= intent.build_plan.minimum_weapons_before_walls
+        built_planned_weapon_count >= required_weapons_before_walls
     )
     existing_wall_positions = {wall.position for wall in world.walls}
     missing_wall_sites = tuple(

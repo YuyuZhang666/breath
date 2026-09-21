@@ -1,8 +1,12 @@
+import copy
 import json
 import unittest
 from dataclasses import replace
+from math import ceil
 from pathlib import Path
+from time import perf_counter
 
+from future_war_agent.controller import handle_payload
 from future_war_agent.deadline import RequestBudget, RequestDeadlineExceeded
 from future_war_agent.decision.decision import Decision
 from future_war_agent.decision.serializer import decision_to_payload
@@ -263,6 +267,60 @@ class DeadlineNightReplayTests(unittest.TestCase):
                 for decision in decisions
             )
         )
+
+    def test_round_1_to_130_controller_path_meets_deadline_baseline(self) -> None:
+        day_payload = json.loads(DAY_FIXTURE.read_text(encoding='utf-8'))
+        night_payload = json.loads(NIGHT_FIXTURE.read_text(encoding='utf-8'))
+        telemetry = TelemetryRecorder()
+        engine = StrategyEngine(telemetry=telemetry)
+        elapsed_seconds: list[float] = []
+        night_forecast_modes: list[str] = []
+
+        for round_no in range(1, 131):
+            payload = copy.deepcopy(
+                day_payload if round_no <= 70 else night_payload
+            )
+            payload['roundNo'] = round_no
+            started = perf_counter()
+            response = handle_payload(
+                payload,
+                planner=engine.plan,
+                telemetry=telemetry,
+            )
+            elapsed_seconds.append(perf_counter() - started)
+            sample = telemetry.snapshot()[-1]
+
+            self.assertEqual(
+                set(response),
+                {'roleCommandMap', 'prompt', 'executeCmd'},
+            )
+            friendly_ids = {
+                str(item['id']) for item in payload['teamOur']['roles']
+            }
+            self.assertTrue(set(response['roleCommandMap']) <= friendly_ids)
+            self.assertLess(sample.request_total_ms, 5_000)
+            if round_no >= 71:
+                night_forecast_modes.append(sample.forecast_mode)
+
+        samples = telemetry.snapshot()
+        ordered = sorted(elapsed_seconds)
+        p99 = ordered[ceil(0.99 * len(ordered)) - 1]
+        self.assertEqual(len(samples), 130)
+        self.assertEqual(
+            tuple(sample.round_no for sample in samples),
+            tuple(range(1, 131)),
+        )
+        self.assertTrue(
+            all(sample.fallback_reason == 'normal' for sample in samples)
+        )
+        self.assertFalse(any(sample.watchdog_hit for sample in samples))
+        self.assertFalse(any(sample.timeout_prevented for sample in samples))
+        self.assertTrue(
+            all(sample.forecast_mode == 'none' for sample in samples[:70])
+        )
+        self.assertLess(max(elapsed_seconds), 5.0)
+        self.assertLess(p99, 3.0)
+        self.assertNotIn(ForecastUpdateKind.FULL.value, night_forecast_modes)
 
 
 if __name__ == '__main__':

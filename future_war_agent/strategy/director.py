@@ -1,3 +1,4 @@
+from collections import Counter
 from dataclasses import dataclass, replace
 
 from future_war_agent.protocol.models import Observation
@@ -124,6 +125,7 @@ class StrategicDirector:
                 forecast,
                 safety_plan,
             )
+            intent = _apply_opening_defense_reserve(intent, observation)
             state = DirectorState(
                 profile=previous_state.profile,
                 since_round=previous_state.since_round,
@@ -165,6 +167,7 @@ class StrategicDirector:
             forecast,
             safety_plan,
         )
+        intent = _apply_opening_defense_reserve(intent, observation)
         state = DirectorState(
             profile=profile,
             since_round=since_round,
@@ -337,4 +340,37 @@ def _apply_dynamic_reserve(
         intent,
         gold_reserve=observation.our.gold,
         reserve_eligible_actions=frozenset(),
+    )
+
+
+def _apply_opening_defense_reserve(
+    intent: StrategicIntent,
+    observation: Observation,
+) -> StrategicIntent:
+    if (
+        observation.time.day_no != 1
+        or observation.time.phase is not Phase.DAY
+        or not intent.build_plan.build_weapons
+        or intent.profile is StrategyProfile.DESPERATION
+    ):
+        return intent
+
+    living_counts = Counter(
+        unit.role_type
+        for unit in observation.our.units
+        if unit.health > 0
+    )
+    missing: set[tuple[str, str]] = set()
+    for weapon_type in intent.build_plan.weapon_loadout:
+        if living_counts[weapon_type] > 0:
+            living_counts[weapon_type] -= 1
+        else:
+            missing.add(('build', weapon_type))
+    if not missing:
+        return intent
+    return replace(
+        intent,
+        reserve_eligible_actions=(
+            intent.reserve_eligible_actions | frozenset(missing)
+        ),
     )
