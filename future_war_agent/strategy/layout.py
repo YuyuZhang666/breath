@@ -98,7 +98,7 @@ def build_defensive_layout(
         if robot.health > 0
         and robot.target_team == world.observation.our.team_type
     )
-    threat_positions = current_threats or recent_threat_positions
+    threat_positions = recent_threat_positions or current_threats
     if not threat_positions:
         threat_positions = (
             Position(round(map_center[0]), round(map_center[1])),

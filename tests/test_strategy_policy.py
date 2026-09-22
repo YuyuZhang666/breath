@@ -45,6 +45,7 @@ class StrategyPolicyTests(unittest.TestCase):
             lambda: BuildPlan(opening_critical_wall_count=-1),
             lambda: BuildPlan(critical_wall_priority_boost=-1),
             lambda: BuildPlan(threat_wall_priority_boost=-1),
+            lambda: BuildPlan(rebuild_wall_priority_boost=-1),
             lambda: BuildPlan(max_wall_job_candidates=0),
             lambda: BuildPlan(minimum_wall_stock=-1),
             lambda: DayPriorities(recall=0),

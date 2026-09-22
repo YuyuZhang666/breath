@@ -143,6 +143,10 @@ class StrategyEngine:
             phase2_planner,
             'previous_decision',
         )
+        self._phase2_accepts_previously_built_walls = _accepts_keyword(
+            phase2_planner,
+            'previously_built_wall_sites',
+        )
         self._treasure_agent = (
             treasure_agent if treasure_agent is not None else TreasureAgent()
         )
@@ -770,9 +774,23 @@ class StrategyEngine:
                 LOGGER.exception('Phase 4 fallback feature extraction failed')
                 features = None
         fortification_threats = (
-            match_memory.recent_threat_positions
+            match_memory.fortification_threat_positions
             if match_memory is not None
             else ()
+        )
+        previously_built_wall_sites = (
+            frozenset(match_memory.seen_friendly_wall_positions)
+            if match_memory is not None
+            else frozenset()
+        )
+        self._telemetry.set(
+            fortification_anchor_day=(
+                match_memory.fortification_day_no
+                if match_memory is not None
+                else 0
+            ),
+            fortification_anchor_threat_count=len(fortification_threats),
+            historically_built_wall_count=len(previously_built_wall_sites),
         )
         governor_emergency = request_budget.remaining_compute() <= reserve
         if (
@@ -846,6 +864,7 @@ class StrategyEngine:
                     if previous_for_director is not None
                     else None
                 ),
+                previously_built_wall_sites,
             )
             if decision != Decision():
                 self._telemetry.set(decision_source='phase2')
@@ -1272,6 +1291,7 @@ class StrategyEngine:
         expected_wall_losses: int = 0,
         market_view: MarketView | None = None,
         previous_decision: Decision | None = None,
+        previously_built_wall_sites: frozenset[Position] = frozenset(),
     ) -> Decision:
         kwargs: dict[str, object] = {}
         if self._phase2_accepts_intent:
@@ -1288,6 +1308,10 @@ class StrategyEngine:
             kwargs['market_view'] = market_view
         if self._phase2_accepts_previous_decision:
             kwargs['previous_decision'] = previous_decision
+        if self._phase2_accepts_previously_built_walls:
+            kwargs['previously_built_wall_sites'] = (
+                previously_built_wall_sites
+            )
         try:
             with self._telemetry.measure('phase2_ms'):
                 return self._phase2_planner(observation, **kwargs)
