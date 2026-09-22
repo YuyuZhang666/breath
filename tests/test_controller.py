@@ -79,6 +79,21 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(sample.post_validation_action_count, 1)
         self.assertEqual(sample.serialized_action_count, 1)
         self.assertEqual(sample.response_action_count, 1)
+        self.assertEqual(len(sample.planned_action_log), 2)
+        self.assertEqual(len(sample.validated_action_log), 1)
+        self.assertEqual(len(sample.validation_drop_log), 1)
+        self.assertIn('id=99999', sample.validation_drop_log[0])
+        self.assertIn('validated=dropped', sample.validation_drop_log[0])
+        lifecycle = {
+            int(entry.split(':', 1)[0].split('=', 1)[1]): entry
+            for entry in sample.action_lifecycle_log
+        }
+        self.assertIn('planned=move', lifecycle[10010])
+        self.assertIn('validated=move', lifecycle[10010])
+        self.assertIn('response=move', lifecycle[10010])
+        self.assertIn('type=unknown', lifecycle[99999])
+        self.assertIn('validated=none', lifecycle[99999])
+        self.assertIn('response=none', lifecycle[99999])
         self.assertTrue(sample.validated_weapon_action_log)
         self.assertEqual(set(response['roleCommandMap']), {'10010'})
 

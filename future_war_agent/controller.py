@@ -25,6 +25,9 @@ COMPUTE_BUDGET_SECONDS = 3.0
 DEFAULT_STRATEGY_ENGINE = StrategyEngine()
 _WEAPON_TYPES = frozenset({'gatling', 'railgun', 'rocket'})
 _WEAPON_LOG_LIMIT = 16
+_ACTION_LOG_LIMIT = 32
+_UNKNOWN_UNIT_TYPE = 'unknown'
+_ACTION_DETAIL_SEPARATOR = ';'
 
 
 def default_planner(
@@ -88,7 +91,10 @@ def handle_payload(
         if _accepts_keyword(planner, 'request_started_at'):
             planner_kwargs['request_started_at'] = request_budget.started_at
         decision = planner(observation, **planner_kwargs)
-        telemetry.set(pre_validation_action_count=len(decision.commands))
+        telemetry.set(
+            pre_validation_action_count=len(decision.commands),
+            planned_action_log=_decision_action_log(observation, decision),
+        )
         if request_budget.compute_exhausted():
             _record_deadline_fallback(telemetry)
             return fallback_payload
@@ -96,6 +102,15 @@ def handle_payload(
             validated = validate_decision(observation, decision)
         telemetry.set(
             post_validation_action_count=len(validated.commands),
+            validated_action_log=_decision_action_log(
+                observation,
+                validated,
+            ),
+            validation_drop_log=_validation_drop_log(
+                observation,
+                decision,
+                validated,
+            ),
             validated_weapon_action_log=_validated_weapon_action_log(
                 observation,
                 validated,
@@ -116,7 +131,15 @@ def handle_payload(
         if request_budget.response_exhausted():
             _record_deadline_fallback(telemetry)
             return fallback_payload
-        telemetry.set(response_action_count=serialized_action_count)
+        telemetry.set(
+            response_action_count=serialized_action_count,
+            action_lifecycle_log=_action_lifecycle_log(
+                observation,
+                decision,
+                validated,
+                serialized_actions,
+            ),
+        )
         return response
     except RequestDeadlineExceeded:
         _record_deadline_fallback(telemetry)
@@ -176,6 +199,133 @@ def _validated_weapon_action_log(
         if len(entries) >= _WEAPON_LOG_LIMIT:
             break
     return tuple(entries)
+
+
+def _decision_action_log(
+    observation: Observation,
+    decision: Decision,
+) -> tuple[str, ...]:
+    unit_types = {
+        unit.unit_id: unit.role_type for unit in observation.our.units
+    }
+    return tuple(
+        f'id={actor_id}:type={unit_types.get(actor_id, _UNKNOWN_UNIT_TYPE)}:'
+        f'action={_action_summary(action)}'
+        for actor_id, action in sorted(decision.commands.items())[
+            :_ACTION_LOG_LIMIT
+        ]
+    )
+
+
+def _validation_drop_log(
+    observation: Observation,
+    planned: Decision,
+    validated: Decision,
+) -> tuple[str, ...]:
+    unit_types = {
+        unit.unit_id: unit.role_type for unit in observation.our.units
+    }
+    entries: list[str] = []
+    for actor_id, action in sorted(planned.commands.items()):
+        final = validated.commands.get(actor_id)
+        if final == action:
+            continue
+        result = 'dropped' if final is None else _action_summary(final)
+        entries.append(
+            f'id={actor_id}:type={unit_types.get(actor_id, _UNKNOWN_UNIT_TYPE)}:'
+            f'planned={_action_summary(action)}:validated={result}'
+        )
+        if len(entries) >= _ACTION_LOG_LIMIT:
+            break
+    return tuple(entries)
+
+
+def _action_lifecycle_log(
+    observation: Observation,
+    planned: Decision,
+    validated: Decision,
+    serialized_actions: object,
+) -> tuple[str, ...]:
+    serialized = (
+        serialized_actions if isinstance(serialized_actions, dict) else {}
+    )
+    unit_types = {
+        unit.unit_id: unit.role_type for unit in observation.our.units
+    }
+    actor_ids = set(planned.commands) | set(validated.commands)
+    actor_ids.update(
+        int(actor_id)
+        for actor_id in serialized
+        if str(actor_id).lstrip('-').isdigit()
+    )
+    entries: list[str] = []
+    for actor_id in sorted(actor_ids)[:_ACTION_LOG_LIMIT]:
+        planned_action = planned.commands.get(actor_id)
+        validated_action = validated.commands.get(actor_id)
+        response_action = serialized.get(str(actor_id))
+        entries.append(
+            f'id={actor_id}:type={unit_types.get(actor_id, _UNKNOWN_UNIT_TYPE)}:'
+            f'planned={_optional_action_summary(planned_action)}:'
+            f'validated={_optional_action_summary(validated_action)}:'
+            f'response={_serialized_action_summary(response_action)}'
+        )
+    return tuple(entries)
+
+
+def _optional_action_summary(action: object) -> str:
+    if action is None:
+        return 'none'
+    return _action_summary(action)
+
+
+def _action_summary(action: object) -> str:
+    kind = getattr(getattr(action, 'kind', None), 'value', 'unknown')
+    details: list[str] = []
+    controller_id = getattr(action, 'controller_id', None)
+    if controller_id is not None:
+        details.append(f'controller={controller_id}')
+    targets = getattr(action, 'target_positions', ())
+    if targets:
+        details.append(
+            'targets=' + '|'.join(f'{item.x},{item.y}' for item in targets)
+        )
+    name = getattr(action, 'name', None)
+    if name is not None:
+        details.append(f'name={name}')
+    quantity = getattr(action, 'quantity', None)
+    if quantity is not None:
+        details.append(f'quantity={quantity}')
+    joined = _ACTION_DETAIL_SEPARATOR.join(details)
+    return kind if not details else f'{kind}[{joined}]'
+
+
+def _serialized_action_summary(action: object) -> str:
+    if not isinstance(action, dict):
+        return 'none'
+    kind = str(action.get('action', 'unknown'))
+    details: list[str] = []
+    if 'controllerId' in action:
+        controller_id = action.get('controllerId')
+        details.append(f'controller={controller_id}')
+    targets = action.get('targetPos')
+    if isinstance(targets, list):
+        coordinates: list[str] = []
+        for item in targets:
+            if not isinstance(item, dict):
+                continue
+            x_value = item.get('x')
+            y_value = item.get('y')
+            coordinates.append(f'{x_value},{y_value}')
+        if coordinates:
+            details.append('targets=' + '|'.join(coordinates))
+    if 'name' in action:
+        name = action.get('name')
+        details.append(f'name={name}')
+    if 'num' in action:
+        quantity = action.get('num')
+        details.append(f'quantity={quantity}')
+    joined = _ACTION_DETAIL_SEPARATOR.join(details)
+    return kind if not details else f'{kind}[{joined}]'
 
 
 def _record_deadline_fallback(telemetry: TelemetryRecorder) -> None:

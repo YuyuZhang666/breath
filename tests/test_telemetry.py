@@ -28,6 +28,10 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.post_validation_action_count, 0)
         self.assertEqual(sample.serialized_action_count, 0)
         self.assertEqual(sample.response_action_count, 0)
+        self.assertEqual(sample.planned_action_log, ())
+        self.assertEqual(sample.validated_action_log, ())
+        self.assertEqual(sample.validation_drop_log, ())
+        self.assertEqual(sample.action_lifecycle_log, ())
         self.assertEqual(sample.phase3_executed_level, 'none')
         self.assertEqual(sample.phase3_skip_reason, 'none')
         self.assertEqual(sample.phase3_completed_root_count, 0)
@@ -74,6 +78,12 @@ class TelemetryTests(unittest.TestCase):
             post_validation_action_count=2,
             serialized_action_count=1,
             response_action_count=2,
+            planned_action_log=('id=10:type=worker:action=move',),
+            validated_action_log=('id=10:type=worker:action=move',),
+            validation_drop_log=('id=11:type=unknown:validated=dropped',),
+            action_lifecycle_log=(
+                'id=10:type=worker:planned=move:validated=move:response=move',
+            ),
             phase3_executed_level='lite',
             phase3_skip_reason='none',
             phase3_completed_root_count=4,
@@ -114,6 +124,10 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.post_validation_action_count, 2)
         self.assertEqual(sample.serialized_action_count, 1)
         self.assertEqual(sample.response_action_count, 2)
+        self.assertTrue(sample.planned_action_log)
+        self.assertTrue(sample.validated_action_log)
+        self.assertTrue(sample.validation_drop_log)
+        self.assertTrue(sample.action_lifecycle_log)
         self.assertEqual(sample.phase3_executed_level, 'lite')
         self.assertEqual(sample.phase3_completed_root_count, 4)
         self.assertEqual(sample.forecast_generated_round, 71)
@@ -138,6 +152,9 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(payload['fallback_reason'], 'deadline_low')
         self.assertEqual(payload['response_action_count'], 2)
         self.assertEqual(payload['pre_validation_action_count'], 3)
+        self.assertTrue(payload['planned_action_log'])
+        self.assertTrue(payload['validation_drop_log'])
+        self.assertTrue(payload['action_lifecycle_log'])
         self.assertEqual(payload['phase3_executed_level'], 'lite')
         self.assertTrue(payload['forecast_conservative_bound'])
         self.assertEqual(payload['build_failure_count'], 2)

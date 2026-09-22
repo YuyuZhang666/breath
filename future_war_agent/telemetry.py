@@ -97,6 +97,10 @@ class TurnTelemetry:
     post_validation_action_count: int = 0
     serialized_action_count: int = 0
     response_action_count: int = 0
+    planned_action_log: tuple[str, ...] = ()
+    validated_action_log: tuple[str, ...] = ()
+    validation_drop_log: tuple[str, ...] = ()
+    action_lifecycle_log: tuple[str, ...] = ()
     validated_weapon_action_log: tuple[str, ...] = ()
     wall_plan_stage: str = 'unknown'
     core_weapon_ready_count: int = 0
@@ -219,6 +223,10 @@ class _ActiveTurn:
     post_validation_action_count: int = 0
     serialized_action_count: int = 0
     response_action_count: int = 0
+    planned_action_log: tuple[str, ...] = ()
+    validated_action_log: tuple[str, ...] = ()
+    validation_drop_log: tuple[str, ...] = ()
+    action_lifecycle_log: tuple[str, ...] = ()
     validated_weapon_action_log: tuple[str, ...] = ()
     wall_plan_stage: str = 'unknown'
     core_weapon_ready_count: int = 0
@@ -420,6 +428,10 @@ class TelemetryRecorder:
             post_validation_action_count=active.post_validation_action_count,
             serialized_action_count=active.serialized_action_count,
             response_action_count=active.response_action_count,
+            planned_action_log=active.planned_action_log,
+            validated_action_log=active.validated_action_log,
+            validation_drop_log=active.validation_drop_log,
+            action_lifecycle_log=active.action_lifecycle_log,
             validated_weapon_action_log=active.validated_weapon_action_log,
             wall_plan_stage=active.wall_plan_stage,
             core_weapon_ready_count=active.core_weapon_ready_count,
