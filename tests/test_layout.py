@@ -21,7 +21,7 @@ class DefensiveLayoutTests(unittest.TestCase):
         )
         self.assertEqual(len({site.position for site in layout.weapon_sites}), 3)
 
-    def test_wall_ring_has_one_entrance_and_no_weapon_overlap(self) -> None:
+    def test_wall_ring_has_one_temporary_gate_and_no_weapon_overlap(self) -> None:
         world = WorldGrid.from_observation(
             observation(our_units=(unit(10013, 5, 5, "station", level=1),))
         )
@@ -29,7 +29,7 @@ class DefensiveLayoutTests(unittest.TestCase):
         layout = build_defensive_layout(world)
 
         self.assertIsNotNone(layout.entrance)
-        self.assertNotIn(layout.entrance, layout.wall_sites)
+        self.assertEqual(layout.wall_sites[-1], layout.entrance)
         self.assertTrue(
             set(layout.wall_sites).isdisjoint(
                 site.position for site in layout.weapon_sites
@@ -79,7 +79,7 @@ class DefensiveLayoutTests(unittest.TestCase):
         )
         self.assertEqual(len(layout.wall_sites), 2)
 
-    def test_entrance_is_on_rear_side_and_stays_out_of_wall_plan(self) -> None:
+    def test_entrance_is_on_rear_side_and_is_planned_last(self) -> None:
         world = WorldGrid.from_observation(
             observation(our_units=(unit(10013, 5, 5, 'station', level=1),))
         )
@@ -87,7 +87,7 @@ class DefensiveLayoutTests(unittest.TestCase):
         layout = build_defensive_layout(world)
 
         self.assertEqual(layout.entrance, Position(3, 3))
-        self.assertNotIn(layout.entrance, layout.wall_sites)
+        self.assertEqual(layout.wall_sites[-1], layout.entrance)
 
     def test_visible_east_attack_reorders_critical_walls(self) -> None:
         world = WorldGrid.from_observation(
@@ -147,6 +147,7 @@ class DefensiveLayoutTests(unittest.TestCase):
         self.assertEqual(len(layout.controller_sites), len(layout.weapon_sites))
         self.assertEqual(len(set(layout.controller_sites)), len(layout.controller_sites))
         self.assertTrue(set(layout.controller_sites).isdisjoint(layout.wall_sites))
+        self.assertNotIn(layout.entrance, layout.controller_sites)
         for weapon_site, controller_site in zip(
             layout.weapon_sites,
             layout.controller_sites,

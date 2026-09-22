@@ -162,15 +162,15 @@ class SafetyPlanTests(unittest.TestCase):
             round_no=1,
             gold=25,
             our_units=(
-                unit(1, 1, 1, 'worker'),
+                unit(1, 8, 10, 'worker'),
                 unit(2, 10, 10, 'station', health=500, level=1),
             ),
         )
         world = WorldGrid.from_observation(observed)
         planned = TacticalCandidate.build(
             1,
-            Position(1, 1),
-            Position(2, 1),
+            Position(8, 10),
+            Position(9, 10),
             'gatling',
             400,
             gold_cost=25,
@@ -178,8 +178,8 @@ class SafetyPlanTests(unittest.TestCase):
         )
         discretionary = TacticalCandidate.build(
             1,
-            Position(1, 1),
-            Position(2, 1),
+            Position(8, 10),
+            Position(9, 10),
             'gatling',
             400,
             gold_cost=25,

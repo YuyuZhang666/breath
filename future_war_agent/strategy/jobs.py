@@ -5,6 +5,7 @@ from types import MappingProxyType
 from typing import Mapping
 
 from future_war_agent.protocol.models import Observation, Position, UnitState
+from future_war_agent.protocol.time import Phase
 from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.decision import Decision
 from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
@@ -14,9 +15,9 @@ from .defense import core_weapon_readiness
 from .items import count_item, has_item
 from .layout import DefensiveLayout, WeaponSite
 from .market import MarketView, PriceDirection
+from .opening import OpeningPlan, OpeningStage, build_opening_plan
 from .pathfinding import path_to_interaction
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
-from .rules import station_footprint
 from .world import WorldGrid
 
 
@@ -82,6 +83,7 @@ def generate_day_jobs(
     workers = tuple(role for role in roles if role.role_type == "worker")
     pioneers = tuple(role for role in roles if role.role_type == "pioneer")
     result: dict[int, list[Job]] = {role.unit_id: [] for role in roles}
+    opening = build_opening_plan(observation, world, layout, intent)
     medicine_buyer_ids = _medicine_buyer_ids(
         workers,
         observation,
@@ -165,8 +167,14 @@ def generate_day_jobs(
         for position in missing_wall_sites
         if position in previously_built_wall_sites
     )
+    opening_wall_forced = (
+        observation.time.day_no == 1
+        and observation.time.round_in_phase
+        >= intent.build_plan.opening_wall_force_round
+    )
     defense_started = (
         weapon_readiness.ready_count >= required_weapons_before_walls
+        or opening_wall_forced
         or observation.time.day_no > 1
         or existing_planned_wall_count > 0
         or bool(rebuild_wall_sites)
@@ -181,6 +189,17 @@ def generate_day_jobs(
     )
     failed_wall_targets = failed_wall_targets | recovery_wall_targets
     occupied_wall_targets = world.hard_blocked | world.soft_friendly
+    temporary_gate_waiting = (
+        layout.entrance is not None
+        and layout.entrance in missing_wall_sites
+        and not _temporary_gate_ready(
+            observation,
+            world,
+            layout,
+            existing_wall_positions,
+            intent,
+        )
+    )
     wall_rank_by_position = {
         position: rank for rank, position in enumerate(layout.wall_sites)
     }
@@ -191,6 +210,10 @@ def generate_day_jobs(
                 for position in missing_wall_sites
                 if position not in occupied_wall_targets
                 and position not in failed_wall_targets
+                and (
+                    position != layout.entrance
+                    or not temporary_gate_waiting
+                )
             ),
             key=lambda position: (
                 position not in rebuild_wall_sites,
@@ -219,18 +242,28 @@ def generate_day_jobs(
             position
             for position in eligible_wall_sites
             if path_to_interaction(world, worker.position, position) is not None
+            and (
+                position != layout.entrance
+                or world.is_inside_defense(worker.position)
+            )
         )
         for worker in workers
     }
     actionable_wall_sites = {
         position
         for worker in workers
-        if count_item(worker.backpack, world.rules.wall_material) > 0
+        if count_item(worker.backpack, world.rules.wall_material)
+        >= world.rules.wall_material_cost
         for position in reachable_wall_sites_by_worker[worker.unit_id]
     }
     has_actionable_stone_worker = bool(actionable_wall_sites)
     missing_critical_count = sum(
         position in missing_wall_sites for position in layout.critical_wall_sites
+    )
+    urgent_opening_stone = (
+        opening_wall_forced
+        and missing_critical_count > 0
+        and not has_actionable_stone_worker
     )
 
     for role in roles:
@@ -259,8 +292,20 @@ def generate_day_jobs(
             world,
             priority=priorities.recall,
         )
+        if opening.active and opening.stage is OpeningStage.RECALL:
+            _add_opening_recall_jobs(
+                result[worker.unit_id],
+                worker,
+                world,
+                priority=priorities.recall + 1,
+            )
         spendable_gold = max(0, observation.our.gold - intent.gold_reserve)
-        for site in missing_weapon_sites:
+        opening_weapon_worker = (
+            not opening.active
+            or opening.weapon_worker_id is None
+            or worker.unit_id == opening.weapon_worker_id
+        )
+        for site in missing_weapon_sites if opening_weapon_worker else ():
             reserve_eligible = (
                 ('build', site.weapon_type)
                 in intent.reserve_eligible_actions
@@ -287,7 +332,17 @@ def generate_day_jobs(
                     )
 
         backpack = Counter(worker.backpack)
-        if defense_started and backpack[world.rules.wall_material] > 0:
+        opening_wall_worker = (
+            not opening.active
+            or opening.stone_worker_id is None
+            or worker.unit_id == opening.stone_worker_id
+        )
+        if (
+            defense_started
+            and opening_wall_worker
+            and backpack[world.rules.wall_material]
+            >= world.rules.wall_material_cost
+        ):
             critical_sites = set(layout.critical_wall_sites)
             for wall_rank, position in enumerate(
                 reachable_wall_sites_by_worker[worker.unit_id][
@@ -307,6 +362,11 @@ def generate_day_jobs(
                         )
                     if position in rebuild_wall_sites:
                         priority += intent.build_plan.rebuild_wall_priority_boost
+                    if (
+                        position == layout.entrance
+                        and not temporary_gate_waiting
+                    ):
+                        priority = max(priority, priorities.recall - 1)
                     result[worker.unit_id].append(
                         Job(
                             role_id=worker.unit_id,
@@ -358,13 +418,34 @@ def generate_day_jobs(
                 world,
                 intent,
             )
+        if (
+            opening.active
+            and opening.stage is OpeningStage.RETURN_TO_BASE
+            and worker.unit_id == opening.stone_worker_id
+            and worker.unit_id != opening.weapon_worker_id
+        ):
+            _add_opening_return_job(
+                result[worker.unit_id],
+                worker,
+                world,
+                priority=(
+                    priorities.build_wall
+                    + intent.build_plan.critical_wall_priority_boost
+                    + 1
+                ),
+            )
         if not near_full and intent.allow_mining:
+            opening_stone_supply = (
+                opening.active
+                and opening.stage is OpeningStage.STONE_SUPPLY
+                and worker.unit_id == opening.stone_worker_id
+            )
             _add_mining_jobs(
                 result[worker.unit_id],
                 worker,
                 observation,
                 world,
-                stone_needed=(
+                stone_needed=(opening_stone_supply or (
                     defense_started
                     and bool(missing_wall_sites)
                     and worker_reaches_wall
@@ -372,8 +453,14 @@ def generate_day_jobs(
                         current_stone < stone_reserve
                         or not has_actionable_stone_worker
                     )
+                )),
+                priority=(
+                    priorities.build_wall
+                    + intent.build_plan.critical_wall_priority_boost
+                    + 1
+                    if urgent_opening_stone or opening_stone_supply
+                    else priorities.collect
                 ),
-                priority=priorities.collect,
                 market_view=market_view,
             )
 
@@ -385,6 +472,13 @@ def generate_day_jobs(
             world,
             priority=priorities.recall,
         )
+        if opening.active and opening.stage is OpeningStage.RECALL:
+            _add_opening_recall_jobs(
+                result[pioneer.unit_id],
+                pioneer,
+                world,
+                priority=priorities.recall + 1,
+            )
         targets = tuple((weapon.position, weapon.unit_id) for weapon in world.weapons)
         if not targets and layout.entrance is not None:
             targets = ((layout.entrance, None),)
@@ -411,7 +505,27 @@ def generate_day_jobs(
         for role_jobs in frozen.values()
         for job in role_jobs
     )
+    planned_wall_target, planned_build_position = _planned_wall_positions(
+        workers,
+        frozen,
+        world,
+    )
     telemetry.set(
+        opening_stage=opening.stage.value,
+        opening_weapon_count=opening.weapon_count,
+        opening_wall_count=opening.wall_count,
+        opening_workers_with_stone=opening.workers_with_stone,
+        opening_workers_returned=opening.workers_returned,
+        opening_controllers_ready=opening.controllers_ready,
+        opening_gate_closed=opening.gate_closed,
+        opening_remaining_daylight=opening.remaining_daylight,
+        opening_mine_eta=opening.mine_eta,
+        opening_return_eta=opening.return_eta,
+        opening_construction_eta=opening.construction_eta,
+        opening_recall_eta=opening.recall_eta,
+        opening_worker_log=_opening_worker_log(workers, frozen, opening, world),
+        planned_wall_target=planned_wall_target,
+        planned_build_position=planned_build_position,
         wall_plan_stage=_wall_plan_stage(
             intent,
             layout,
@@ -445,7 +559,9 @@ def generate_day_jobs(
             eligible_wall_sites=eligible_wall_sites,
             failed_wall_targets=failed_wall_targets,
             current_stone=current_stone,
+            wall_material_cost=world.rules.wall_material_cost,
             wall_job_count=wall_job_count,
+            temporary_gate_waiting=temporary_gate_waiting,
         ),
         wall_failed_build_log=failed_wall_log,
         weapon_build_reroute_log=tuple(weapon_build_reroute_log[:8]),
@@ -464,7 +580,6 @@ def _alternate_weapon_site(
     station = world.our_station()
     if station is None or not workers:
         return None
-    footprint = station_footprint(station.position, world.rules)
     reserved_targets = {
         *(site.position for site in layout.weapon_sites),
         *layout.wall_sites,
@@ -475,10 +590,7 @@ def _alternate_weapon_site(
         for y in range(world.observation.height):
             position = Position(x, y)
             if (
-                not world.is_geographic_land(position)
-                or min(
-                    position.chebyshev_distance(cell) for cell in footprint
-                ) != 1
+                not world.is_weapon_build_site(position)
                 or position in reserved_targets
                 or position in excluded_positions
                 or position in world.hard_blocked
@@ -560,6 +672,11 @@ def _wall_plan_stage(
         return 'no_planned_sites'
     if not missing_wall_sites:
         return 'complete'
+    if (
+        layout.entrance is not None
+        and missing_wall_sites == (layout.entrance,)
+    ):
+        return 'temporary_gate'
     if not defense_started:
         return 'waiting_for_first_weapon'
     if missing_critical_count:
@@ -588,7 +705,9 @@ def _wall_blocker(
     eligible_wall_sites: tuple[Position, ...],
     failed_wall_targets: frozenset[Position],
     current_stone: int,
+    wall_material_cost: int,
     wall_job_count: int,
+    temporary_gate_waiting: bool,
 ) -> str:
     if not intent.build_plan.build_walls:
         return 'walls_disabled'
@@ -600,13 +719,143 @@ def _wall_blocker(
         return 'no_workers'
     if not defense_started:
         return 'waiting_for_first_weapon'
-    if current_stone <= 0:
+    if current_stone < wall_material_cost:
         return 'worker_without_stone'
+    if temporary_gate_waiting and not eligible_wall_sites:
+        return 'temporary_gate_open'
     if failed_wall_targets and not eligible_wall_sites:
         return 'failed_build_cooldown'
     if not eligible_wall_sites or wall_job_count <= 0:
         return 'blocked_or_unreachable'
     return 'none'
+
+
+def _temporary_gate_ready(
+    observation: Observation,
+    world: WorldGrid,
+    layout: DefensiveLayout,
+    existing_walls: set[Position],
+    intent: StrategicIntent,
+) -> bool:
+    gate = layout.entrance
+    if (
+        gate is None
+        or observation.time.phase is not Phase.DAY
+        or observation.time.round_in_phase
+        < intent.build_plan.opening_gate_close_round
+    ):
+        return False
+    ordinary_walls = set(layout.wall_sites) - {gate}
+    if not ordinary_walls.issubset(existing_walls):
+        return False
+    if not world.friendly_roles or not all(
+        world.is_inside_defense(role.position) for role in world.friendly_roles
+    ):
+        return False
+    return any(
+        worker.role_type == 'worker'
+        and world.is_inside_defense(worker.position)
+        for worker in world.friendly_roles
+    )
+
+
+def _add_opening_recall_jobs(
+    jobs: list[Job],
+    role: UnitState,
+    world: WorldGrid,
+    *,
+    priority: int,
+) -> None:
+    station = world.our_station()
+    targets = tuple(weapon.position for weapon in world.weapons)
+    if not targets and station is not None:
+        targets = (station.position,)
+    for target in targets:
+        path = path_to_interaction(world, role.position, target)
+        if path is None:
+            continue
+        jobs.append(
+            Job(
+                role_id=role.unit_id,
+                kind=JobKind.RECALL,
+                target=target,
+                priority=priority,
+                value=-float(path.cost),
+            )
+        )
+
+
+def _add_opening_return_job(
+    jobs: list[Job],
+    worker: UnitState,
+    world: WorldGrid,
+    *,
+    priority: int,
+) -> None:
+    station = world.our_station()
+    if station is None:
+        return
+    path = path_to_interaction(world, worker.position, station.position)
+    if path is None:
+        return
+    jobs.append(
+        Job(
+            role_id=worker.unit_id,
+            kind=JobKind.PREPOSITION,
+            target=station.position,
+            priority=priority,
+            value=-float(path.cost),
+        )
+    )
+
+
+def _opening_worker_log(
+    workers: tuple[UnitState, ...],
+    jobs: Mapping[int, tuple[Job, ...]],
+    opening: OpeningPlan,
+    world: WorldGrid,
+) -> tuple[str, ...]:
+    entries: list[str] = []
+    for worker in workers:
+        intended = jobs.get(worker.unit_id, ())
+        top = intended[0] if intended else None
+        action = top.kind.value if top is not None else 'none'
+        target = (
+            f'{top.target.x},{top.target.y}' if top is not None else 'none'
+        )
+        entries.append(
+            f'id={worker.unit_id}:pos={worker.position.x},{worker.position.y}:'
+            f'stone={count_item(worker.backpack, world.rules.wall_material)}:'
+            f'assigned={opening.assignment_for(worker.unit_id)}:'
+            f'intended={action}:target={target}'
+        )
+    return tuple(entries)
+
+
+def _planned_wall_positions(
+    workers: tuple[UnitState, ...],
+    jobs: Mapping[int, tuple[Job, ...]],
+    world: WorldGrid,
+) -> tuple[str, str]:
+    worker_by_id = {worker.unit_id: worker for worker in workers}
+    candidates = tuple(
+        job
+        for role_jobs in jobs.values()
+        for job in role_jobs
+        if job.kind is JobKind.BUILD_WALL
+    )
+    if not candidates:
+        return '', ''
+    job = min(candidates, key=lambda item: item.sort_key)
+    worker = worker_by_id.get(job.role_id)
+    if worker is None:
+        return f'{job.target.x},{job.target.y}', ''
+    path = path_to_interaction(world, worker.position, job.target)
+    stand = path.path[-1] if path is not None else None
+    return (
+        f'{job.target.x},{job.target.y}',
+        f'{stand.x},{stand.y}' if stand is not None else '',
+    )
 
 
 def _add_recall_jobs(

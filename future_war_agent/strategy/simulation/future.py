@@ -58,7 +58,10 @@ def choose_future_action(
         weapon = weapons.get(role.assigned_weapon_id)
         if weapon is None:
             continue
-        if role.position != role.assigned_stand:
+        if (
+            role.position.chebyshev_distance(weapon.position) > 1
+            and role.position != role.assigned_stand
+        ):
             step = _shortest_step(
                 state,
                 role,

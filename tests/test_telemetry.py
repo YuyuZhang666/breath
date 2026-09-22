@@ -33,6 +33,26 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.validated_action_log, ())
         self.assertEqual(sample.validation_drop_log, ())
         self.assertEqual(sample.action_lifecycle_log, ())
+        self.assertEqual(sample.day_no, 0)
+        self.assertEqual(sample.round_in_phase, 0)
+        self.assertEqual(sample.action_override_log, ())
+        self.assertEqual(sample.opening_stage, 'inactive')
+        self.assertEqual(sample.opening_weapon_count, 0)
+        self.assertEqual(sample.opening_wall_count, 0)
+        self.assertEqual(sample.opening_workers_with_stone, 0)
+        self.assertEqual(sample.opening_workers_returned, 0)
+        self.assertEqual(sample.opening_controllers_ready, 0)
+        self.assertFalse(sample.opening_gate_closed)
+        self.assertEqual(sample.opening_remaining_daylight, 0)
+        self.assertEqual(sample.opening_mine_eta, -1)
+        self.assertEqual(sample.opening_return_eta, -1)
+        self.assertEqual(sample.opening_construction_eta, 0)
+        self.assertEqual(sample.opening_recall_eta, -1)
+        self.assertEqual(sample.opening_worker_log, ())
+        self.assertEqual(sample.opening_final_action_log, ())
+        self.assertEqual(sample.controller_assignment_log, ())
+        self.assertEqual(sample.planned_wall_target, '')
+        self.assertEqual(sample.planned_build_position, '')
         self.assertEqual(sample.phase3_executed_level, 'none')
         self.assertEqual(sample.phase3_skip_reason, 'none')
         self.assertEqual(sample.phase3_completed_root_count, 0)
@@ -92,6 +112,28 @@ class TelemetryTests(unittest.TestCase):
             action_lifecycle_log=(
                 'id=10:type=worker:planned=move:validated=move:response=move',
             ),
+            day_no=1,
+            round_in_phase=10,
+            action_override_log=(
+                'ACTION_OVERRIDE:module=validation:id=11:original=build:final=none',
+            ),
+            opening_stage='opening_build_walls',
+            opening_weapon_count=1,
+            opening_wall_count=2,
+            opening_workers_with_stone=1,
+            opening_workers_returned=1,
+            opening_controllers_ready=1,
+            opening_gate_closed=False,
+            opening_remaining_daylight=62,
+            opening_mine_eta=0,
+            opening_return_eta=3,
+            opening_construction_eta=4,
+            opening_recall_eta=5,
+            opening_worker_log=('worker=10:role=stone:stage=build',),
+            opening_final_action_log=('worker=10:final=build:stone=5',),
+            controller_assignment_log=('role=20:weapon=30:stand=8,8',),
+            planned_wall_target='9,9',
+            planned_build_position='8,8',
             phase3_executed_level='lite',
             phase3_skip_reason='none',
             phase3_completed_root_count=4,
@@ -148,6 +190,23 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(sample.validated_action_log)
         self.assertTrue(sample.validation_drop_log)
         self.assertTrue(sample.action_lifecycle_log)
+        self.assertEqual(sample.day_no, 1)
+        self.assertEqual(sample.round_in_phase, 10)
+        self.assertIn('ACTION_OVERRIDE', sample.action_override_log[0])
+        self.assertEqual(sample.opening_stage, 'opening_build_walls')
+        self.assertEqual(sample.opening_weapon_count, 1)
+        self.assertEqual(sample.opening_wall_count, 2)
+        self.assertEqual(sample.opening_workers_with_stone, 1)
+        self.assertEqual(sample.opening_workers_returned, 1)
+        self.assertEqual(sample.opening_controllers_ready, 1)
+        self.assertFalse(sample.opening_gate_closed)
+        self.assertEqual(sample.opening_remaining_daylight, 62)
+        self.assertEqual(sample.opening_return_eta, 3)
+        self.assertTrue(sample.opening_worker_log)
+        self.assertTrue(sample.opening_final_action_log)
+        self.assertTrue(sample.controller_assignment_log)
+        self.assertEqual(sample.planned_wall_target, '9,9')
+        self.assertEqual(sample.planned_build_position, '8,8')
         self.assertEqual(sample.phase3_executed_level, 'lite')
         self.assertEqual(sample.phase3_completed_root_count, 4)
         self.assertEqual(sample.forecast_generated_round, 71)
@@ -179,6 +238,13 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(payload['planned_action_log'])
         self.assertTrue(payload['validation_drop_log'])
         self.assertTrue(payload['action_lifecycle_log'])
+        self.assertIn('ACTION_OVERRIDE', payload['action_override_log'][0])
+        self.assertEqual(payload['opening_stage'], 'opening_build_walls')
+        self.assertEqual(payload['opening_remaining_daylight'], 62)
+        self.assertTrue(payload['opening_worker_log'])
+        self.assertTrue(payload['opening_final_action_log'])
+        self.assertTrue(payload['controller_assignment_log'])
+        self.assertEqual(payload['planned_wall_target'], '9,9')
         self.assertEqual(payload['phase3_executed_level'], 'lite')
         self.assertTrue(payload['forecast_conservative_bound'])
         self.assertEqual(payload['performance_segment'], 'night_alive')

@@ -179,6 +179,31 @@ class JointFireTests(unittest.TestCase):
 
         self.assertEqual(first, second)
 
+    def test_adjacent_controller_fires_from_nonpreferred_stand(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(101, 2, 5, 'worker'),
+                unit(200, 8, 8, 'station', health=1000, level=1),
+                weapon(301, 3, 5, 'gatling', attack_power=10),
+            ),
+            robots=(robot(501, 6, 5, health=10),),
+        )
+        assignments = (
+            ControllerAssignment(101, 301, Position(3, 4), 1),
+        )
+
+        plan = plan_joint_fire(
+            observed,
+            WorldGrid.from_observation(observed),
+            controller_assignments=assignments,
+        )
+
+        self.assertEqual(
+            plan.decision.commands[301].kind,
+            ActionKind.ATTACK,
+        )
+
     def test_weapon_diagnostics_explain_selected_and_blocked_fire(self) -> None:
         observed = observation(
             round_no=71,

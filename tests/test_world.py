@@ -83,6 +83,24 @@ class WorldGridTests(unittest.TestCase):
 
         self.assertTrue(world.can_traverse(Position(2, 2)))
 
+    def test_build_zones_follow_station_footprint_rings(self) -> None:
+        world = WorldGrid.from_observation(
+            observation(
+                our_units=(unit(10013, 5, 5, 'station', level=1),),
+            )
+        )
+
+        self.assertTrue(world.is_weapon_build_site(Position(4, 5)))
+        self.assertTrue(world.is_wall_build_site(Position(3, 5)))
+        self.assertTrue(
+            world.is_legal_build_site('gatling', Position(4, 5))
+        )
+        self.assertTrue(world.is_legal_build_site('wall', Position(3, 5)))
+        self.assertFalse(world.is_legal_build_site('wall', Position(4, 5)))
+        self.assertFalse(
+            world.is_legal_build_site('rocket', Position(3, 5))
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

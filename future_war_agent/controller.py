@@ -82,8 +82,12 @@ def handle_payload(
             round_no=observation.time.round_no,
             phase=observation.time.phase.value,
         )
+        telemetry.set(
+            day_no=observation.time.day_no,
+            round_in_phase=observation.time.round_in_phase,
+        )
         if request_budget.compute_exhausted():
-            _record_deadline_fallback(telemetry)
+            _record_deadline_fallback(telemetry, decision)
             return fallback_payload
         planner_kwargs: dict[str, object] = {}
         if _accepts_keyword(planner, 'request_budget'):
@@ -111,13 +115,26 @@ def handle_payload(
                 decision,
                 validated,
             ),
+            action_override_log=(
+                tuple(telemetry.current('action_override_log', ()))
+                + _decision_override_log(
+                    decision,
+                    validated,
+                    module='validator',
+                    reason='legality_validation',
+                )
+            ),
+            opening_final_action_log=_opening_final_action_log(
+                observation,
+                validated,
+            ),
             validated_weapon_action_log=_validated_weapon_action_log(
                 observation,
                 validated,
             ),
         )
         if request_budget.response_exhausted():
-            _record_deadline_fallback(telemetry)
+            _record_deadline_fallback(telemetry, validated)
             return fallback_payload
         with telemetry.measure('serialization_ms'):
             response = decision_to_payload(validated)
@@ -129,7 +146,7 @@ def handle_payload(
         )
         telemetry.set(serialized_action_count=serialized_action_count)
         if request_budget.response_exhausted():
-            _record_deadline_fallback(telemetry)
+            _record_deadline_fallback(telemetry, validated)
             return fallback_payload
         telemetry.set(
             response_action_count=serialized_action_count,
@@ -240,6 +257,49 @@ def _validation_drop_log(
     return tuple(entries)
 
 
+def _decision_override_log(
+    original: Decision,
+    final: Decision,
+    *,
+    module: str,
+    reason: str,
+) -> tuple[str, ...]:
+    entries: list[str] = []
+    actor_ids = sorted(set(original.commands) | set(final.commands))
+    for actor_id in actor_ids:
+        before = original.commands.get(actor_id)
+        after = final.commands.get(actor_id)
+        if before == after:
+            continue
+        entries.append(
+            f'ACTION_OVERRIDE:id={actor_id}:'
+            f'original={_optional_action_summary(before)}:'
+            f'final={_optional_action_summary(after)}:'
+            f'module={module}:reason={reason}'
+        )
+        if len(entries) >= _ACTION_LOG_LIMIT:
+            break
+    return tuple(entries)
+
+
+def _opening_final_action_log(
+    observation: Observation,
+    decision: Decision,
+) -> tuple[str, ...]:
+    entries: list[str] = []
+    for role in sorted(observation.our.units, key=lambda item: item.unit_id):
+        if role.role_type != 'worker':
+            continue
+        action = decision.commands.get(role.unit_id)
+        stone = sum(item.casefold() == 'stone' for item in role.backpack)
+        entries.append(
+            f'id={role.unit_id}:pos={role.position.x},{role.position.y}:'
+            f'stone={stone}:final={_optional_action_summary(action)}:'
+            f'last_result={observation.last_action_results.get(role.unit_id)}'
+        )
+    return tuple(entries)
+
+
 def _action_lifecycle_log(
     observation: Observation,
     planned: Decision,
@@ -328,11 +388,23 @@ def _serialized_action_summary(action: object) -> str:
     return kind if not details else f'{kind}[{joined}]'
 
 
-def _record_deadline_fallback(telemetry: TelemetryRecorder) -> None:
+def _record_deadline_fallback(
+    telemetry: TelemetryRecorder,
+    original: Decision | None = None,
+) -> None:
+    overrides = tuple(telemetry.current('action_override_log', ()))
+    if original is not None:
+        overrides += _decision_override_log(
+            original,
+            Decision(),
+            module='deadline',
+            reason='response_deadline',
+        )
     telemetry.set(
         fallback_used=True,
         fallback_reason='deadline_low',
         timeout_prevented=True,
         decision_source='safe',
         response_action_count=0,
+        action_override_log=overrides,
     )

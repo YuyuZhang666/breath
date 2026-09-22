@@ -38,6 +38,9 @@ class BuildPlan:
     build_weapons: bool = True
     build_walls: bool = True
     minimum_weapons_before_walls: int = 1
+    opening_wall_force_round: int = 10
+    opening_stone_batch_target: int = 5
+    opening_gate_close_round: int = 60
     opening_critical_wall_count: int = 3
     critical_wall_priority_boost: int = 75
     threat_wall_priority_boost: int = 30
@@ -54,6 +57,12 @@ class BuildPlan:
             raise ValueError("wall_site_limit cannot be negative")
         if self.minimum_weapons_before_walls < 0:
             raise ValueError('minimum_weapons_before_walls cannot be negative')
+        if self.opening_wall_force_round < 1:
+            raise ValueError('opening_wall_force_round must be positive')
+        if self.opening_stone_batch_target < 1:
+            raise ValueError('opening_stone_batch_target must be positive')
+        if not 1 <= self.opening_gate_close_round <= 70:
+            raise ValueError('opening_gate_close_round must be in day bounds')
         if self.opening_critical_wall_count < 0:
             raise ValueError('opening_critical_wall_count cannot be negative')
         if self.critical_wall_priority_boost < 0:

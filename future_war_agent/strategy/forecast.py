@@ -7,7 +7,7 @@ from time import monotonic
 
 from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.decision import Decision
-from future_war_agent.protocol.models import Observation, UnitState
+from future_war_agent.protocol.models import Observation, RobotState, UnitState
 from future_war_agent.protocol.time import NIGHT_ROUNDS, Phase
 
 from .night import ControllerAssignment, assign_controllers
@@ -147,14 +147,28 @@ def refresh_night_forecast(
                 recomputed=True,
                 reason=f'{reason}; full forecast disabled',
             )
-        return ForecastRefresh(
-            forecast=build_night_forecast(
+        try:
+            forecast = build_night_forecast(
                 observation,
                 controller_assignments=controller_assignments,
                 config=config,
                 clock=clock,
                 deadline=deadline,
-            ),
+            )
+        except UnsupportedSimulation as exc:
+            forecast = build_lightweight_forecast(
+                observation,
+                config=config,
+                clock=clock,
+                deadline=deadline,
+            )
+            return ForecastRefresh(
+                forecast=forecast,
+                recomputed=True,
+                reason=f'{reason}; full forecast unsupported: {exc}',
+            )
+        return ForecastRefresh(
+            forecast=forecast,
             recomputed=True,
             reason=reason,
         )
@@ -330,7 +344,10 @@ def build_lightweight_forecast(
     critical_robots: list[tuple[int, int]] = []
     for robot in observation.robots:
         check_deadline()
-        if robot.health <= 0 or robot.target_team != observation.our.team_type:
+        if (
+            robot.health <= 0
+            or not _is_possible_threat(robot, observation.our.team_type)
+        ):
             continue
         spec = ROBOT_SPECS.get(robot.role_type)
         attack_power = (
@@ -373,6 +390,12 @@ def build_lightweight_forecast(
     uncertainty = ['lightweight_conservative_estimate']
     if not config.tail_visible_roster_complete:
         uncertainty.append('future_robot_roster_unconfirmed')
+    if any(
+        robot.health > 0
+        and (robot.target_team is None or not robot.target_team.strip())
+        for robot in observation.robots
+    ):
+        uncertainty.append('robot_target_team_unconfirmed')
     if (
         observation.time.day_no >= 3
         and not config.tail_late_wave_calibration_source.strip()
@@ -613,7 +636,7 @@ def summarize_forecast_inputs(
                 robot
                 for robot in observation.robots
                 if robot.health > 0
-                and robot.target_team == observation.our.team_type
+                and _is_possible_threat(robot, observation.our.team_type)
             ),
             key=lambda robot: robot.robot_id,
         )
@@ -785,12 +808,14 @@ def _wave_changed_materially(
     before = {
         robot.robot_id: robot
         for robot in previous.robots
-        if robot.health > 0 and robot.target_team == previous.our.team_type
+        if robot.health > 0
+        and _is_possible_threat(robot, previous.our.team_type)
     }
     after = {
         robot.robot_id: robot
         for robot in current.robots
-        if robot.health > 0 and robot.target_team == current.our.team_type
+        if robot.health > 0
+        and _is_possible_threat(robot, current.our.team_type)
     }
     if set(after) - set(before):
         return True
@@ -829,6 +854,15 @@ def _lost_asset_kind(
         if unit.role_type == 'station':
             return 'station'
     return None
+
+
+def _is_possible_threat(robot: RobotState, team_type: str) -> bool:
+    target_team = robot.target_team
+    return (
+        target_team is None
+        or not target_team.strip()
+        or target_team == team_type
+    )
 
 
 def _experimental_item_was_used(decision: Decision | None) -> bool:

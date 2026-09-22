@@ -94,6 +94,9 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('type=unknown', lifecycle[99999])
         self.assertIn('validated=none', lifecycle[99999])
         self.assertIn('response=none', lifecycle[99999])
+        self.assertEqual(len(sample.action_override_log), 1)
+        self.assertIn('ACTION_OVERRIDE:id=99999', sample.action_override_log[0])
+        self.assertIn('module=validator', sample.action_override_log[0])
         self.assertTrue(sample.validated_weapon_action_log)
         self.assertEqual(set(response['roleCommandMap']), {'10010'})
 

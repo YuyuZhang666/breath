@@ -77,10 +77,12 @@ def update_build_recovery(
         if round_no - record.last_failure_round <= BUILD_FAILURE_TTL_ROUNDS
     }
     if previous_decision is not None:
-        for actor_id, succeeded in sorted(
-            observation.last_action_results.items()
-        ):
-            action = previous_decision.commands.get(actor_id)
+        actual_builds = {
+            (unit.role_type, unit.position)
+            for unit in observation.our.units
+            if unit.health > 0
+        }
+        for actor_id, action in sorted(previous_decision.commands.items()):
             if (
                 action is None
                 or action.kind is not ActionKind.BUILD
@@ -90,8 +92,11 @@ def update_build_recovery(
                 continue
             target = action.target_positions[0]
             key = action.name, target
-            if succeeded:
+            if key in actual_builds:
                 active.pop(key, None)
+                continue
+            succeeded = observation.last_action_results.get(actor_id)
+            if succeeded is None:
                 continue
             prior = active.get(key)
             failures = (

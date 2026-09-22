@@ -10,7 +10,7 @@ from statistics import median
 
 from future_war_agent.decision.actions import Action
 from future_war_agent.decision.decision import Decision
-from future_war_agent.protocol.models import Observation, Position
+from future_war_agent.protocol.models import Observation, Position, Zone
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.protocol.time import TurnTime
 from future_war_agent.strategy.build_recovery import BuildRecoveryState
@@ -318,6 +318,44 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertTrue(decision.prompt)
         session = engine._sessions.get(observed.our.team_id)
         self.assertTrue(session.task_state.active_task_type)
+
+    def test_opening_hard_recall_skips_task_and_treasure_overlays(
+        self,
+    ) -> None:
+        class OverlaySpy:
+            def __init__(self) -> None:
+                self.apply_calls = 0
+
+            def reconcile(self, observation, state):
+                del observation
+                return state
+
+            def apply(self, *args, **kwargs):
+                del args, kwargs
+                self.apply_calls += 1
+                raise AssertionError('opening recall must not be overlaid')
+
+        task_agent = OverlaySpy()
+        treasure_agent = OverlaySpy()
+        engine = StrategyEngine(
+            task_agent=task_agent,
+            treasure_agent=treasure_agent,
+        )
+        observed = observation(
+            round_no=66,
+            our_units=(
+                unit(10, 1, 1, 'worker'),
+                unit(11, 2, 1, 'worker'),
+                unit(20, 10, 10, 'station', health=500, level=1),
+            ),
+            zones=(Zone(Position(1, 2), 'stone'),),
+        )
+
+        decision = engine.plan(observed)
+
+        self.assertTrue(decision.commands)
+        self.assertEqual(task_agent.apply_calls, 0)
+        self.assertEqual(treasure_agent.apply_calls, 0)
 
     def test_critical_active_night_task_releases_pioneer_to_fire_control(
         self,

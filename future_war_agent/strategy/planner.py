@@ -1,5 +1,6 @@
 import logging
 
+from future_war_agent.decision.actions import Action
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.time import Phase
@@ -7,7 +8,7 @@ from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
 from .joint_fire import plan_joint_fire
 from .build_recovery import EMPTY_BUILD_RECOVERY_STATE, BuildRecoveryState
-from .jobs import generate_day_jobs
+from .jobs import JobKind, generate_day_jobs
 from .joint import candidates_for_jobs, solve_joint
 from .layout import build_defensive_layout
 from .market import MarketView
@@ -102,9 +103,78 @@ def plan_turn(
         )
         for role in world.friendly_roles
     }
-    return solve_joint(
+    decision = solve_joint(
         observation,
         world,
         candidates,
         gold_reserve=intent.gold_reserve,
+    )
+    _record_day_joint_overrides(
+        observation,
+        jobs,
+        decision,
+        telemetry,
+    )
+    return decision
+
+
+def _record_day_joint_overrides(
+    observation: Observation,
+    jobs,
+    decision: Decision,
+    telemetry: TelemetryRecorder,
+) -> None:
+    roles = {
+        role.unit_id: role
+        for role in observation.our.units
+        if role.health > 0
+    }
+    entries = list(telemetry.current('action_override_log', ()))
+    for role_id, role_jobs in sorted(jobs.items()):
+        if not role_jobs:
+            continue
+        intended = role_jobs[0]
+        role = roles.get(role_id)
+        if (
+            role is None
+            or intended.kind is not JobKind.BUILD_WALL
+            or role.position.chebyshev_distance(intended.target) != 1
+        ):
+            continue
+        original = Action.build('wall', intended.target)
+        final = decision.commands.get(role_id)
+        if final == original:
+            continue
+        entries.append(
+            f'ACTION_OVERRIDE:id={role_id}:'
+            f'original=build[name=wall;targets='
+            f'{intended.target.x},{intended.target.y}]:'
+            f'final={_action_summary(final)}:'
+            f'module=joint_planner:'
+            f'reason=joint_legality_or_global_optimization'
+        )
+        if len(entries) >= 32:
+            break
+    telemetry.set(action_override_log=tuple(entries))
+
+
+def _action_summary(action: Action | None) -> str:
+    if action is None:
+        return 'none'
+    details: list[str] = []
+    if action.name is not None:
+        details.append(f'name={action.name}')
+    if action.target_positions:
+        details.append(
+            'targets='
+            + '|'.join(
+                f'{target.x},{target.y}'
+                for target in action.target_positions
+            )
+        )
+    joined = ';'.join(details)
+    return (
+        action.kind.value
+        if not details
+        else f'{action.kind.value}[{joined}]'
     )

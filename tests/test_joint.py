@@ -326,7 +326,12 @@ class JointSolverTests(unittest.TestCase):
         self.assertTrue(is_valid_joint(observed, world, (first, second)))
 
     def test_gold_reserve_applies_to_whole_joint(self) -> None:
-        observed = observation(our_units=self.observed.our.units, gold=50)
+        observed = observation(
+            our_units=self.observed.our.units + (
+                unit(10013, 1, 3, 'station', level=1),
+            ),
+            gold=50,
+        )
         world = WorldGrid.from_observation(observed)
         joint = (
             TacticalCandidate.build(

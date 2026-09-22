@@ -181,9 +181,32 @@ def candidates_for_jobs(
                 generated.extend(_move_candidates(world, role, job, interaction=True))
         elif job.kind in {JobKind.RECALL, JobKind.PREPOSITION}:
             interaction = job.target in world.hard_blocked
-            generated.extend(
-                _move_candidates(world, role, job, interaction=interaction)
+            moves = _move_candidates(
+                world,
+                role,
+                job,
+                interaction=interaction,
             )
+            generated.extend(moves)
+            goals = (
+                world.interaction_cells(job.target)
+                if interaction
+                else (job.target,)
+            )
+            if not moves and role.position in goals:
+                generated.append(
+                    TacticalCandidate(
+                        role_id=role.unit_id,
+                        command_actor_id=role.unit_id,
+                        action=None,
+                        job_kind=job.kind,
+                        start=role.position,
+                        priority=job.priority,
+                        completes_job=True,
+                        progress=1,
+                        utility=job.value,
+                    )
+                )
         elif job.kind is JobKind.BUY:
             if role.position.chebyshev_distance(job.target) == 1:
                 if job.name is not None and job.quantity is not None:
@@ -236,6 +259,8 @@ def candidates_for_jobs(
     wait = TacticalCandidate.wait(role.unit_id, role.position)
     if limit <= 0:
         return ()
+    if any(item.action is None for item in ranked):
+        return tuple(ranked[:limit])
     if len(ranked) >= limit:
         return tuple(ranked[: limit - 1] + [wait])
     return tuple(ranked + [wait])
@@ -484,6 +509,8 @@ def _direct_action_is_legal(
             and role.position.chebyshev_distance(item.build_target) == 1
             and world.in_bounds(item.build_target)
             and item.build_target not in world.hard_blocked
+            and action.name is not None
+            and world.is_legal_build_site(action.name, item.build_target)
         )
     if action.kind is ActionKind.COLLECT:
         return (

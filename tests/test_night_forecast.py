@@ -74,6 +74,62 @@ class NightForecastTests(unittest.TestCase):
             forecast.uncertainty_reasons,
         )
 
+    def test_missing_target_team_is_a_conservative_possible_threat(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(1, 1, 1, 'worker'),
+                unit(2, 10, 10, 'station', health=100, level=1),
+            ),
+            robots=(
+                robot(
+                    9,
+                    10,
+                    9,
+                    role_type='bossRobot',
+                    target_team=None,
+                ),
+            ),
+        )
+
+        forecast = build_lightweight_forecast(observed)
+
+        self.assertGreater(forecast.predicted_damage_before_dawn, 0)
+        self.assertLess(forecast.survival_margin, 0)
+        self.assertIs(forecast.risk_level, RiskLevel.CRITICAL)
+        self.assertIn(
+            'robot_target_team_unconfirmed',
+            forecast.uncertainty_reasons,
+        )
+
+    def test_full_forecast_unsupported_falls_back_to_lightweight(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(1, 1, 1, 'worker'),
+                unit(2, 10, 10, 'station', health=100, level=1),
+            ),
+            robots=(
+                robot(
+                    9,
+                    10,
+                    9,
+                    role_type='bossRobot',
+                    target_team=None,
+                ),
+            ),
+        )
+
+        refreshed = refresh_night_forecast(observed)
+
+        self.assertTrue(refreshed.recomputed)
+        self.assertIs(
+            refreshed.forecast.update_kind,
+            ForecastUpdateKind.LIGHTWEIGHT,
+        )
+        self.assertIn('full forecast unsupported', refreshed.reason)
+        self.assertLess(refreshed.forecast.survival_margin, 0)
+
     def test_full_disabled_uses_lightweight_without_cache(self) -> None:
         refreshed = refresh_night_forecast(
             self._quiet_night(71),

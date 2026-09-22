@@ -166,3 +166,27 @@ class WorldGrid:
             else frozenset()
         )
         return position not in station_cells
+
+    def station_distance(self, position: Position) -> int | None:
+        station = self.our_station()
+        if station is None:
+            return None
+        footprint = station_footprint(station.position, self.rules)
+        return min(position.chebyshev_distance(cell) for cell in footprint)
+
+    def is_weapon_build_site(self, position: Position) -> bool:
+        return self.is_geographic_land(position) and self.station_distance(position) == 1
+
+    def is_wall_build_site(self, position: Position) -> bool:
+        return self.is_geographic_land(position) and self.station_distance(position) == 2
+
+    def is_legal_build_site(self, name: str, position: Position) -> bool:
+        if name == 'wall':
+            return self.is_wall_build_site(position)
+        if name in _WEAPON_TYPES:
+            return self.is_weapon_build_site(position)
+        return False
+
+    def is_inside_defense(self, position: Position) -> bool:
+        distance = self.station_distance(position)
+        return distance is not None and distance <= 1

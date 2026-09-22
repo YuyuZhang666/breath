@@ -7,7 +7,7 @@ from future_war_agent.strategy.build_recovery import (
     EMPTY_BUILD_RECOVERY_STATE,
     update_build_recovery,
 )
-from tests.strategy_helpers import observation
+from tests.strategy_helpers import observation, unit
 
 
 class BuildRecoveryTests(unittest.TestCase):
@@ -47,11 +47,26 @@ class BuildRecoveryTests(unittest.TestCase):
 
         recovered = update_build_recovery(
             failed,
-            observation(round_no=3, last_action_results={10010: True}),
+            observation(
+                round_no=3,
+                our_units=(
+                    unit(10020, self.target.x, self.target.y, 'rocket'),
+                ),
+                last_action_results={10010: True},
+            ),
             self.build,
         )
 
         self.assertEqual(recovered.failures, ())
+
+    def test_reported_success_without_structure_is_failure(self) -> None:
+        recovered = update_build_recovery(
+            EMPTY_BUILD_RECOVERY_STATE,
+            observation(round_no=3, last_action_results={10010: True}),
+            self.build,
+        )
+
+        self.assertEqual(recovered.failures[0].consecutive_failures, 1)
 
     def test_stale_failure_expires(self) -> None:
         failed = update_build_recovery(

@@ -178,6 +178,8 @@ def plan_emergency_night_fire(
 class _ControllerCacheEntry:
     signature: tuple[object, ...]
     assignments: tuple[ControllerAssignment, ...]
+    mode_key: str
+    excluded_role_ids: frozenset[int]
 
 
 class ControllerAssignmentCache:
@@ -200,23 +202,33 @@ class ControllerAssignmentCache:
             mode_key,
             excluded_role_ids,
         )
+        preferred: tuple[ControllerAssignment, ...] = ()
         if team_id:
             with self._lock:
                 cached = self._entries.get(team_id)
                 if cached is not None and cached.signature == signature:
                     return cached.assignments, True
+                if (
+                    cached is not None
+                    and cached.mode_key == mode_key
+                    and cached.excluded_role_ids == excluded_role_ids
+                ):
+                    preferred = cached.assignments
 
         assignments = assign_controllers(
             observation,
             world,
             mode_key=mode_key,
             excluded_role_ids=excluded_role_ids,
+            preferred_assignments=preferred,
         )
         if team_id:
             with self._lock:
                 self._entries[team_id] = _ControllerCacheEntry(
                     signature,
                     assignments,
+                    mode_key,
+                    excluded_role_ids,
                 )
         return assignments, False
 
@@ -262,6 +274,7 @@ def assign_controllers(
     *,
     mode_key: str = 'economy',
     excluded_role_ids: frozenset[int] = frozenset(),
+    preferred_assignments: tuple[ControllerAssignment, ...] = (),
 ) -> tuple[ControllerAssignment, ...]:
     roles = tuple(
         sorted(
@@ -286,6 +299,9 @@ def assign_controllers(
         )
         for role in roles
         for weapon in weapons
+    }
+    preferred_weapon_by_role = {
+        item.role_id: item.weapon_id for item in preferred_assignments
     }
     for size in range(min(len(roles), len(weapons)), 0, -1):
         best: tuple[ControllerAssignment, ...] | None = None
@@ -324,6 +340,12 @@ def assign_controllers(
                             )
                             for item in ordered
                         )
+                        switch_count = sum(
+                            item.role_id in preferred_weapon_by_role
+                            and preferred_weapon_by_role[item.role_id]
+                            != item.weapon_id
+                            for item in ordered
+                        )
                         operator_risk = sum(
                             _operator_risk(observation, item.stand)
                             for item in ordered
@@ -331,6 +353,7 @@ def assign_controllers(
                         score: tuple[object, ...] = (
                             -ready_now,
                             -attack_value,
+                            switch_count,
                             sum(item.distance for item in ordered),
                             operator_risk,
                             tuple(
@@ -453,7 +476,11 @@ def _assigned_candidates(
     assignment: ControllerAssignment,
     intent: StrategicIntent,
 ) -> tuple[TacticalCandidate, ...]:
-    if role.position != assignment.stand:
+    adjacent_to_assigned_weapon = (
+        weapon is not None
+        and role.position.chebyshev_distance(weapon.position) <= 1
+    )
+    if not adjacent_to_assigned_weapon and role.position != assignment.stand:
         job = Job(
             role_id=role.unit_id,
             kind=JobKind.PREPOSITION,
@@ -465,7 +492,7 @@ def _assigned_candidates(
         return candidates_for_jobs(observation, world, role, (job,))
 
     candidates: list[TacticalCandidate] = []
-    if weapon is not None:
+    if adjacent_to_assigned_weapon and weapon is not None:
         targets = _phase2_attack_targets(
             observation,
             world,

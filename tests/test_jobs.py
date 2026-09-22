@@ -328,6 +328,43 @@ class DayJobTests(unittest.TestCase):
             {job.kind for job in jobs[10010]},
         )
 
+    def test_opening_wall_deadline_forces_critical_wall_without_weapon(
+        self,
+    ) -> None:
+        observed = observation(
+            round_no=10,
+            our_units=(
+                unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+
+        jobs = generate_day_jobs(observed, world, layout)
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertIn(jobs[10010][0].target, layout.critical_wall_sites)
+
+    def test_opening_wall_deadline_prioritizes_stone_over_more_weapons(
+        self,
+    ) -> None:
+        observed = observation(
+            round_no=10,
+            our_units=(
+                unit(10010, 2, 5, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            zones=(Zone(Position(3, 5), 'stone'),),
+            gold=75,
+        )
+
+        jobs = self.jobs(observed)
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.COLLECT)
+        self.assertEqual(jobs[10010][0].name, 'stone')
+
     def test_one_off_plan_core_weapon_opens_critical_walls(self) -> None:
         observed = observation(
             our_units=(
@@ -585,7 +622,7 @@ class DayJobTests(unittest.TestCase):
         initial_world = WorldGrid.from_observation(initial)
         layout = build_defensive_layout(initial_world)
         attack_lane_gap = layout.wall_sites[3]
-        rear_gap = layout.wall_sites[-1]
+        rear_gap = layout.wall_sites[-2]
         walls = tuple(
             unit(10100 + index, site.x, site.y, 'wall')
             for index, site in enumerate(layout.wall_sites)
@@ -609,6 +646,49 @@ class DayJobTests(unittest.TestCase):
         )
         self.assertEqual(rebuilds[0].target, attack_lane_gap)
         self.assertGreater(rebuilds[0].priority, rebuilds[1].priority)
+
+    def test_temporary_gate_closes_after_roles_return_at_twilight(self) -> None:
+        base = observation(
+            round_no=60,
+            our_units=(unit(10013, 5, 5, 'station', level=1),),
+        )
+        base_world = WorldGrid.from_observation(base)
+        layout = build_defensive_layout(base_world)
+        gate = layout.entrance
+        self.assertIsNotNone(gate)
+        stand = next(
+            cell
+            for cell in base_world.interaction_cells(gate)
+            if base_world.is_inside_defense(cell)
+        )
+        walls = tuple(
+            unit(10100 + index, site.x, site.y, 'wall')
+            for index, site in enumerate(layout.wall_sites)
+            if site != gate
+        )
+        observed = observation(
+            round_no=60,
+            our_units=(
+                unit(
+                    10010,
+                    stand.x,
+                    stand.y,
+                    'worker',
+                    backpack=('stone',),
+                ),
+                unit(10013, 5, 5, 'station', level=1),
+            ) + walls,
+        )
+        world = WorldGrid.from_observation(observed)
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world),
+        )
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertEqual(jobs[10010][0].target, gate)
 
     def test_price_per_distance_selects_mineral_after_defense(self) -> None:
         observed = observation(

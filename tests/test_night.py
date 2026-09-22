@@ -5,6 +5,7 @@ from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.validator import validate_decision
 from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.night import (
+    ControllerAssignment,
     ControllerAssignmentCache,
     assign_controllers,
     generate_night_candidates,
@@ -141,6 +142,32 @@ class NightPolicyTests(unittest.TestCase):
             len(assignments),
         )
 
+    def test_assignment_prefers_sticky_role_weapon_pairing(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 2, 2, 'worker'),
+                unit(10011, 2, 4, 'pioneer'),
+                unit(10020, 4, 2, 'gatling', level=1, attack_range=4),
+                unit(10030, 4, 4, 'railgun', level=1, attack_range=6),
+            ),
+        )
+        preferred = (
+            ControllerAssignment(10010, 10030, Position(3, 3), 1),
+            ControllerAssignment(10011, 10020, Position(3, 3), 1),
+        )
+
+        assignments = assign_controllers(
+            observed,
+            WorldGrid.from_observation(observed),
+            preferred_assignments=preferred,
+        )
+
+        self.assertEqual(
+            {(item.role_id, item.weapon_id) for item in assignments},
+            {(10010, 10030), (10011, 10020)},
+        )
+
     def test_role_moves_toward_assigned_weapon(self) -> None:
         observed = observation(
             round_no=71,
@@ -180,6 +207,35 @@ class NightPolicyTests(unittest.TestCase):
             if item.action and item.action.kind is ActionKind.ATTACK
         )
         self.assertEqual(attack.action.target_positions, (Position(3, 3),))
+
+    def test_adjacent_controller_attacks_from_nonpreferred_stand(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 4, 5, 'worker'),
+                unit(10020, 5, 5, 'gatling', level=1, attack_range=5),
+            ),
+            robots=(robot(30001, 7, 5),),
+        )
+        choices = generate_night_candidates(
+            observed,
+            WorldGrid.from_observation(observed),
+            controller_assignments=(
+                ControllerAssignment(
+                    role_id=10010,
+                    weapon_id=10020,
+                    stand=Position(5, 4),
+                    distance=1,
+                ),
+            ),
+        )
+
+        self.assertTrue(
+            any(
+                item.action and item.action.kind is ActionKind.ATTACK
+                for item in choices[10010]
+            )
+        )
 
     def test_cooling_weapon_does_not_attack(self) -> None:
         for role_type in ('gatling', 'railgun', 'rocket'):

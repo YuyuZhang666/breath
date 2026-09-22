@@ -326,18 +326,19 @@ def _choose_joint_fire_attacks_cached(
                 no_candidate_reason='controller_has_other_action',
             )
             continue
-        if role.assigned_stand is None:
-            diagnostics[weapon.unit_id] = replace(
-                diagnostic,
-                no_candidate_reason='controller_stand_missing',
-            )
-            continue
-        if role.position != role.assigned_stand:
-            diagnostics[weapon.unit_id] = replace(
-                diagnostic,
-                no_candidate_reason='controller_not_at_stand',
-            )
-            continue
+        if role.position.chebyshev_distance(weapon.position) > 1:
+            if role.assigned_stand is None:
+                diagnostics[weapon.unit_id] = replace(
+                    diagnostic,
+                    no_candidate_reason='controller_stand_missing',
+                )
+                continue
+            if role.position != role.assigned_stand:
+                diagnostics[weapon.unit_id] = replace(
+                    diagnostic,
+                    no_candidate_reason='controller_not_at_stand',
+                )
+                continue
         if role.assigned_weapon_id in used_weapons:
             continue
         if weapon.health <= 0:

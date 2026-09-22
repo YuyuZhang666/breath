@@ -965,6 +965,16 @@ class StrategyEngine:
                     observation.time.round_no,
                 )
 
+        if controller_assignments is not None:
+            self._telemetry.set(
+                controller_assignment_log=tuple(
+                    f'role={item.role_id}:weapon={item.weapon_id}:'
+                    f'stand={item.stand.x},{item.stand.y}:'
+                    f'distance={item.distance}'
+                    for item in controller_assignments
+                )
+            )
+
         simulation_action = None
         fresh_certificate = None
         certificate = (
@@ -1188,6 +1198,13 @@ class StrategyEngine:
                             break
                         if result.decision != decision:
                             self._telemetry.set(decision_source='phase3')
+                            _record_action_overrides(
+                                self._telemetry,
+                                decision,
+                                result.decision,
+                                module='phase3',
+                                reason='night_search_replacement',
+                            )
                         decision = result.decision
                         self._telemetry.set(
                             phase3_executed_level=attempt.value,
@@ -1290,7 +1307,11 @@ class StrategyEngine:
             )
             if treasure_state is None:
                 treasure_state = EMPTY_TREASURE_STATE
-        if not governor_emergency:
+        opening_hard_recall = (
+            self._telemetry.current('opening_stage', '')
+            == 'opening_recall'
+        )
+        if not governor_emergency and not opening_hard_recall:
             try:
                 with self._telemetry.measure('task_ms'):
                     task_kwargs = {'previous_state': task_state}
@@ -1309,6 +1330,13 @@ class StrategyEngine:
                 task_state = task_result.state
                 if decision != task_input_decision:
                     self._telemetry.set(decision_source='task')
+                    _record_action_overrides(
+                        self._telemetry,
+                        task_input_decision,
+                        decision,
+                        module='task',
+                        reason='task_overlay',
+                    )
                 pending_candidate = next(
                     (
                         candidate
@@ -1365,6 +1393,13 @@ class StrategyEngine:
                     )
                     if decision != treasure_input_decision:
                         self._telemetry.set(decision_source='treasure')
+                        _record_action_overrides(
+                            self._telemetry,
+                            treasure_input_decision,
+                            decision,
+                            module='treasure',
+                            reason='treasure_overlay',
+                        )
                 except Exception:
                     self._telemetry.set(fallback_used=True)
                     LOGGER.exception(
@@ -1458,6 +1493,48 @@ class StrategyEngine:
                 observation.time.round_no,
             )
             return Decision()
+
+
+def _record_action_overrides(
+    telemetry: TelemetryRecorder,
+    original: Decision,
+    final: Decision,
+    *,
+    module: str,
+    reason: str,
+) -> None:
+    entries = list(telemetry.current('action_override_log', ()))
+    for actor_id in sorted(set(original.commands) | set(final.commands)):
+        before = original.commands.get(actor_id)
+        after = final.commands.get(actor_id)
+        if before == after:
+            continue
+        entries.append(
+            f'ACTION_OVERRIDE:id={actor_id}:'
+            f'original={_engine_action_summary(before)}:'
+            f'final={_engine_action_summary(after)}:'
+            f'module={module}:reason={reason}'
+        )
+        if len(entries) >= 32:
+            break
+    telemetry.set(action_override_log=tuple(entries))
+
+
+def _engine_action_summary(action: object) -> str:
+    if action is None:
+        return 'none'
+    kind = getattr(getattr(action, 'kind', None), 'value', 'unknown')
+    name = getattr(action, 'name', None)
+    targets = getattr(action, 'target_positions', ())
+    details: list[str] = []
+    if name is not None:
+        details.append(f'name={name}')
+    if targets:
+        details.append(
+            'targets=' + '|'.join(f'{item.x},{item.y}' for item in targets)
+        )
+    joined = ';'.join(details)
+    return kind if not details else f'{kind}[{joined}]'
 
 
 def _eliminates_critical_night_fire(
