@@ -119,6 +119,24 @@ class DefensiveLayoutTests(unittest.TestCase):
             (Position(8, 8), Position(8, 7), Position(8, 6)),
         )
 
+    def test_daily_anchor_overrides_transient_current_threat_direction(self) -> None:
+        world = WorldGrid.from_observation(
+            observation(
+                our_units=(unit(10013, 5, 5, 'station', level=1),),
+                robots=(robot(1, 1, 7), robot(2, 2, 8)),
+            )
+        )
+
+        layout = build_defensive_layout(
+            world,
+            recent_threat_positions=(Position(12, 7), Position(11, 8)),
+        )
+
+        self.assertEqual(
+            layout.critical_wall_sites,
+            (Position(8, 8), Position(8, 7), Position(8, 6)),
+        )
+
     def test_every_planned_weapon_keeps_a_distinct_controller_site(self) -> None:
         world = WorldGrid.from_observation(
             observation(our_units=(unit(10013, 5, 5, 'station', level=1),))

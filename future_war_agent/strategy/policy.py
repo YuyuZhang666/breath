@@ -41,6 +41,7 @@ class BuildPlan:
     opening_critical_wall_count: int = 3
     critical_wall_priority_boost: int = 75
     threat_wall_priority_boost: int = 30
+    rebuild_wall_priority_boost: int = 60
     max_wall_job_candidates: int = 4
     minimum_wall_stock: int = 5
 
@@ -59,6 +60,8 @@ class BuildPlan:
             raise ValueError('critical_wall_priority_boost cannot be negative')
         if self.threat_wall_priority_boost < 0:
             raise ValueError('threat_wall_priority_boost cannot be negative')
+        if self.rebuild_wall_priority_boost < 0:
+            raise ValueError('rebuild_wall_priority_boost cannot be negative')
         if self.max_wall_job_candidates <= 0:
             raise ValueError('max_wall_job_candidates must be positive')
         if self.minimum_wall_stock < 0:

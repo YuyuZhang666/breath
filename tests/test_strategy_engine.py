@@ -43,6 +43,7 @@ from future_war_agent.strategy.simulation.search import (
     SearchStats,
 )
 from future_war_agent.telemetry import TelemetryRecorder
+from tests.strategy_helpers import observation, robot, unit
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -196,6 +197,48 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertIs(duplicate, first)
         self.assertEqual(len(phase2.observations), 1)
         self.assertEqual(search.calls, [])
+
+    def test_phase2_receives_daily_anchor_and_historical_wall_sites(self) -> None:
+        captured: list[tuple[tuple[Position, ...], frozenset[Position]]] = []
+
+        def phase2(
+            observed,
+            *,
+            fortification_threats=(),
+            previously_built_wall_sites=frozenset(),
+            **kwargs,
+        ):
+            del observed, kwargs
+            captured.append(
+                (fortification_threats, previously_built_wall_sites)
+            )
+            return Decision()
+
+        engine = StrategyEngine(phase2_planner=phase2)
+        wall_position = Position(8, 8)
+        engine.plan(
+            observation(
+                round_no=71,
+                our_units=(
+                    unit(10, 5, 5, 'station', level=1),
+                    unit(20, 8, 8, 'wall', level=1),
+                ),
+                robots=(robot(501, 12, 7), robot(502, 11, 8)),
+            )
+        )
+
+        engine.plan(
+            observation(
+                round_no=131,
+                our_units=(unit(10, 5, 5, 'station', level=1),),
+            )
+        )
+
+        self.assertEqual(
+            captured[-1][0],
+            (Position(11, 8), Position(12, 7)),
+        )
+        self.assertIn(wall_position, captured[-1][1])
 
     def test_safe_active_night_task_reserves_pioneer_from_fire_control(
         self,

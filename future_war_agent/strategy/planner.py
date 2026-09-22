@@ -32,6 +32,7 @@ def plan_turn(
     expected_wall_losses: int = 0,
     market_view: MarketView | None = None,
     previous_decision: Decision | None = None,
+    previously_built_wall_sites: frozenset[Position] = frozenset(),
 ) -> Decision:
     world = WorldGrid.from_observation(observation, rules)
     if not world.friendly_roles:
@@ -86,6 +87,7 @@ def plan_turn(
         expected_wall_losses=expected_wall_losses,
         market_view=market_view,
         previous_decision=previous_decision,
+        previously_built_wall_sites=previously_built_wall_sites,
         telemetry=telemetry,
     )
     candidates = {

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 
 from future_war_agent.protocol.models import Observation, Position
+from future_war_agent.protocol.time import Phase
 
 from .belief import OpponentBelief, update_opponent_belief
 from .capability_matrix import CapabilityMatrix, UNKNOWN_CAPABILITY_MATRIX
@@ -16,6 +17,7 @@ from .simulation.certificate import (
 
 MAX_NORMALIZED_ZONES = 256
 MAX_WAVE_SUMMARIES = 16
+MAX_FORTIFICATION_SITES = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +49,9 @@ class MatchMemory:
     zones: tuple[NormalizedZone, ...] = ()
     wave_summaries: tuple[WaveSummary, ...] = ()
     recent_threat_positions: tuple[Position, ...] = ()
+    fortification_day_no: int = 0
+    fortification_threat_positions: tuple[Position, ...] = ()
+    seen_friendly_wall_positions: tuple[Position, ...] = ()
     night_forecast: NightForecast | None = None
 
 
@@ -216,6 +221,25 @@ def update_match_memory(
     recent_threat_positions = (
         () if rollback or side_changed else prior.recent_threat_positions
     )
+    fortification_day_no = (
+        0 if rollback or side_changed else prior.fortification_day_no
+    )
+    fortification_threat_positions = (
+        ()
+        if rollback or side_changed
+        else prior.fortification_threat_positions
+    )
+    seen_friendly_wall_positions = set(
+        ()
+        if rollback or side_changed
+        else prior.seen_friendly_wall_positions
+    )
+    targeted_positions = {
+        robot.position
+        for robot in observation.robots
+        if robot.health > 0
+        and robot.target_team == observation.our.team_type
+    }
     if not same_observation:
         belief = update_opponent_belief(
             prior.belief,
@@ -260,12 +284,6 @@ def update_match_memory(
                 ),
             )[:MAX_NORMALIZED_ZONES]
         )
-        targeted_positions = {
-            robot.position
-            for robot in observation.robots
-            if robot.health > 0
-            and robot.target_team == observation.our.team_type
-        }
         if targeted_positions:
             recent_threat_positions = tuple(
                 sorted(
@@ -273,6 +291,36 @@ def update_match_memory(
                     key=lambda position: (position.x, position.y),
                 )
             )[:64]
+        seen_friendly_wall_positions.update(
+            unit.position
+            for unit in observation.our.units
+            if unit.health > 0 and unit.role_type == 'wall'
+        )
+        if (
+            observation.time.phase is Phase.DAY
+            and fortification_day_no != observation.time.day_no
+        ):
+            fortification_day_no = observation.time.day_no
+            fortification_threat_positions = (
+                prior.recent_threat_positions
+                if not (rollback or side_changed)
+                and prior.recent_threat_positions
+                else (
+                    tuple(
+                        sorted(
+                            targeted_positions,
+                            key=lambda position: (position.x, position.y),
+                        )
+                    )[:64]
+                    if targeted_positions
+                    else (
+                        Position(
+                            round((observation.width - 1) / 2),
+                            round((observation.height - 1) / 2),
+                        ),
+                    )
+                )
+            )
 
     summaries = prior.wave_summaries
     if certificate is not None:
@@ -308,6 +356,14 @@ def update_match_memory(
         zones=zones,
         wave_summaries=summaries,
         recent_threat_positions=recent_threat_positions,
+        fortification_day_no=fortification_day_no,
+        fortification_threat_positions=fortification_threat_positions,
+        seen_friendly_wall_positions=tuple(
+            sorted(
+                seen_friendly_wall_positions,
+                key=lambda position: (position.x, position.y),
+            )[:MAX_FORTIFICATION_SITES]
+        ),
         night_forecast=(
             None
             if clear_forecast

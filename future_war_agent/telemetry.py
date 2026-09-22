@@ -105,12 +105,17 @@ class TurnTelemetry:
     existing_planned_wall_count: int = 0
     missing_wall_count: int = 0
     missing_critical_wall_count: int = 0
+    new_wall_gap_count: int = 0
+    rebuild_wall_gap_count: int = 0
     actionable_wall_count: int = 0
     wall_job_count: int = 0
     worker_stone_count: int = 0
     stone_reserve: int = 0
     wall_blocker: str = 'unknown'
     wall_failed_build_log: tuple[str, ...] = ()
+    historically_built_wall_count: int = 0
+    fortification_anchor_day: int = 0
+    fortification_anchor_threat_count: int = 0
     own_station_alive: bool = True
     own_station_status: str = 'alive'
     engine_lock_wait_ms: float = 0.0
@@ -217,12 +222,17 @@ class _ActiveTurn:
     existing_planned_wall_count: int = 0
     missing_wall_count: int = 0
     missing_critical_wall_count: int = 0
+    new_wall_gap_count: int = 0
+    rebuild_wall_gap_count: int = 0
     actionable_wall_count: int = 0
     wall_job_count: int = 0
     worker_stone_count: int = 0
     stone_reserve: int = 0
     wall_blocker: str = 'unknown'
     wall_failed_build_log: tuple[str, ...] = ()
+    historically_built_wall_count: int = 0
+    fortification_anchor_day: int = 0
+    fortification_anchor_threat_count: int = 0
     own_station_alive: bool = True
     own_station_status: str = 'alive'
     engine_lock_wait_ms: float = 0.0
@@ -408,12 +418,21 @@ class TelemetryRecorder:
             existing_planned_wall_count=active.existing_planned_wall_count,
             missing_wall_count=active.missing_wall_count,
             missing_critical_wall_count=active.missing_critical_wall_count,
+            new_wall_gap_count=active.new_wall_gap_count,
+            rebuild_wall_gap_count=active.rebuild_wall_gap_count,
             actionable_wall_count=active.actionable_wall_count,
             wall_job_count=active.wall_job_count,
             worker_stone_count=active.worker_stone_count,
             stone_reserve=active.stone_reserve,
             wall_blocker=active.wall_blocker,
             wall_failed_build_log=active.wall_failed_build_log,
+            historically_built_wall_count=(
+                active.historically_built_wall_count
+            ),
+            fortification_anchor_day=active.fortification_anchor_day,
+            fortification_anchor_threat_count=(
+                active.fortification_anchor_threat_count
+            ),
             own_station_alive=active.own_station_alive,
             own_station_status=active.own_station_status,
             engine_lock_wait_ms=active.engine_lock_wait_ms,

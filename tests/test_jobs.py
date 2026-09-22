@@ -273,7 +273,7 @@ class DayJobTests(unittest.TestCase):
         self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
         self.assertIn(jobs[10010][0].target, layout.critical_wall_sites)
         self.assertIsNotNone(sample)
-        self.assertEqual(sample.wall_plan_stage, 'daily_critical_rebuild')
+        self.assertEqual(sample.wall_plan_stage, 'opening_critical')
         self.assertEqual(sample.wall_blocker, 'none')
         self.assertEqual(sample.core_weapon_ready_count, 0)
         self.assertGreater(sample.wall_job_count, 0)
@@ -429,6 +429,47 @@ class DayJobTests(unittest.TestCase):
         jobs = self.jobs(observed)
 
         self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
+
+    def test_destroyed_wall_rebuild_outranks_remaining_core_weapons(self) -> None:
+        base_units = (
+            unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+            unit(10013, 5, 5, 'station', level=1),
+            unit(10020, 7, 7, 'gatling', level=1),
+        )
+        initial = observation(round_no=131, our_units=base_units, gold=75)
+        initial_layout = build_defensive_layout(
+            WorldGrid.from_observation(initial)
+        )
+        critical_walls = tuple(
+            unit(10100 + index, site.x, site.y, 'wall')
+            for index, site in enumerate(initial_layout.critical_wall_sites)
+        )
+        rebuild_target = initial_layout.wall_sites[3]
+        observed = observation(
+            round_no=132,
+            our_units=base_units + critical_walls,
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+        recorder = TelemetryRecorder()
+        token = recorder.begin()
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            layout,
+            previously_built_wall_sites=frozenset({rebuild_target}),
+            telemetry=recorder,
+        )
+        sample = recorder.finish(token)
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertEqual(jobs[10010][0].target, rebuild_target)
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample.wall_plan_stage, 'daily_rebuild')
+        self.assertEqual(sample.rebuild_wall_gap_count, 1)
+        self.assertGreater(sample.new_wall_gap_count, 0)
 
     def test_later_rebuild_prefers_attack_lane_over_nearer_rear_gap(self) -> None:
         initial = observation(

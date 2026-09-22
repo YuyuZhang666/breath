@@ -192,6 +192,77 @@ class MatchMemoryTests(unittest.TestCase):
             memory.recent_threat_positions,
             (Position(11, 8), Position(12, 7)),
         )
+        self.assertEqual(memory.fortification_day_no, 2)
+        self.assertEqual(
+            memory.fortification_threat_positions,
+            (Position(11, 8), Position(12, 7)),
+        )
+
+    def test_daily_fortification_anchor_and_seen_walls_remain_stable(self) -> None:
+        store = MatchMemoryStore()
+        store.observe(
+            observation(
+                round_no=71,
+                our_units=(unit(10, 5, 5, 'station', level=1),),
+                robots=(robot(501, 12, 7), robot(502, 11, 8)),
+            )
+        )
+        store.observe(
+            observation(
+                round_no=131,
+                our_units=(
+                    unit(10, 5, 5, 'station', level=1),
+                    unit(20, 8, 8, 'wall', level=1),
+                ),
+            )
+        )
+
+        memory = store.observe(
+            observation(
+                round_no=132,
+                our_units=(unit(10, 5, 5, 'station', level=1),),
+                robots=(robot(503, 1, 7), robot(504, 2, 8)),
+            )
+        )
+
+        self.assertEqual(memory.fortification_day_no, 2)
+        self.assertEqual(
+            memory.fortification_threat_positions,
+            (Position(11, 8), Position(12, 7)),
+        )
+        self.assertEqual(
+            memory.recent_threat_positions,
+            (Position(1, 7), Position(2, 8)),
+        )
+        self.assertEqual(
+            memory.seen_friendly_wall_positions,
+            (Position(8, 8),),
+        )
+
+    def test_first_day_without_threats_anchors_to_map_center(self) -> None:
+        store = MatchMemoryStore()
+        first = store.observe(
+            observation(
+                round_no=1,
+                our_units=(unit(10, 5, 5, 'station', level=1),),
+            )
+        )
+        later = store.observe(
+            observation(
+                round_no=2,
+                our_units=(unit(10, 5, 5, 'station', level=1),),
+                robots=(robot(501, 1, 7), robot(502, 2, 8)),
+            )
+        )
+
+        self.assertEqual(
+            first.fortification_threat_positions,
+            (Position(7, 7),),
+        )
+        self.assertEqual(
+            later.fortification_threat_positions,
+            (Position(7, 7),),
+        )
 
 
 if __name__ == '__main__':

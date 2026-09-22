@@ -71,6 +71,7 @@ def generate_day_jobs(
     expected_wall_losses: int = 0,
     market_view: MarketView | None = None,
     previous_decision: Decision | None = None,
+    previously_built_wall_sites: frozenset[Position] = frozenset(),
     telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
 ) -> Mapping[int, tuple[Job, ...]]:
     priorities = intent.day_priorities
@@ -109,21 +110,38 @@ def generate_day_jobs(
         if position not in existing_wall_positions
     ) if intent.build_plan.build_walls else ()
     existing_planned_wall_count = len(layout.wall_sites) - len(missing_wall_sites)
+    rebuild_wall_sites = frozenset(
+        position
+        for position in missing_wall_sites
+        if position in previously_built_wall_sites
+    )
     defense_started = (
         weapon_readiness.ready_count >= required_weapons_before_walls
         or observation.time.day_no > 1
         or existing_planned_wall_count > 0
+        or bool(rebuild_wall_sites)
     )
     failed_wall_targets, failed_wall_log = _failed_wall_builds(
         observation,
         previous_decision,
     )
     occupied_wall_targets = world.hard_blocked | world.soft_friendly
+    wall_rank_by_position = {
+        position: rank for rank, position in enumerate(layout.wall_sites)
+    }
     eligible_wall_sites = tuple(
-        position
-        for position in missing_wall_sites
-        if position not in occupied_wall_targets
-        and position not in failed_wall_targets
+        sorted(
+            (
+                position
+                for position in missing_wall_sites
+                if position not in occupied_wall_targets
+                and position not in failed_wall_targets
+            ),
+            key=lambda position: (
+                position not in rebuild_wall_sites,
+                wall_rank_by_position[position],
+            ),
+        )
     )
     stone_reserve = calculate_stone_reserve(
         world,
@@ -232,6 +250,8 @@ def generate_day_jobs(
                             intent.build_plan.threat_wall_priority_boost
                             - wall_rank,
                         )
+                    if position in rebuild_wall_sites:
+                        priority += intent.build_plan.rebuild_wall_priority_boost
                     result[worker.unit_id].append(
                         Job(
                             role_id=worker.unit_id,
@@ -338,7 +358,6 @@ def generate_day_jobs(
     )
     telemetry.set(
         wall_plan_stage=_wall_plan_stage(
-            observation,
             intent,
             layout,
             weapon_readiness.ready_count,
@@ -346,6 +365,7 @@ def generate_day_jobs(
             defense_started,
             missing_wall_sites,
             missing_critical_count,
+            rebuild_wall_sites,
         ),
         core_weapon_ready_count=weapon_readiness.ready_count,
         core_weapon_required_count=weapon_readiness.required_count,
@@ -353,6 +373,10 @@ def generate_day_jobs(
         existing_planned_wall_count=existing_planned_wall_count,
         missing_wall_count=len(missing_wall_sites),
         missing_critical_wall_count=missing_critical_count,
+        new_wall_gap_count=(
+            len(missing_wall_sites) - len(rebuild_wall_sites)
+        ),
+        rebuild_wall_gap_count=len(rebuild_wall_sites),
         actionable_wall_count=len(actionable_wall_sites),
         wall_job_count=wall_job_count,
         worker_stone_count=current_stone,
@@ -398,7 +422,6 @@ def _failed_wall_builds(
 
 
 def _wall_plan_stage(
-    observation: Observation,
     intent: StrategicIntent,
     layout: DefensiveLayout,
     ready_weapons: int,
@@ -406,6 +429,7 @@ def _wall_plan_stage(
     defense_started: bool,
     missing_wall_sites: tuple[Position, ...],
     missing_critical_count: int,
+    rebuild_wall_sites: frozenset[Position],
 ) -> str:
     if not intent.build_plan.build_walls:
         return 'disabled'
@@ -417,10 +441,15 @@ def _wall_plan_stage(
         return 'waiting_for_first_weapon'
     if missing_critical_count:
         return (
-            'daily_critical_rebuild'
-            if observation.time.day_no > 1
+            'critical_rebuild'
+            if any(
+                position in rebuild_wall_sites
+                for position in layout.critical_wall_sites
+            )
             else 'opening_critical'
         )
+    if rebuild_wall_sites:
+        return 'daily_rebuild'
     if ready_weapons < required_weapons:
         return 'complete_core_weapons'
     return 'daily_infill'
