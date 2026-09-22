@@ -651,6 +651,7 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertEqual(search.calls, [])
         self.assertFalse(sample.own_station_alive)
         self.assertEqual(sample.own_station_status, 'destroyed')
+        self.assertEqual(sample.performance_segment, 'post_station_loss')
         self.assertEqual(sample.forecast_mode, 'skipped')
         self.assertEqual(sample.forecast_reason, 'own_station_destroyed')
         self.assertEqual(sample.phase3_executed_level, 'none')
@@ -659,6 +660,27 @@ class StrategyEngineTests(unittest.TestCase):
             phase2.intents[-1].item_policy.medicine_health_threshold,
             0,
         )
+
+    def test_forecast_telemetry_proves_current_observation_was_used(
+        self,
+    ) -> None:
+        telemetry = TelemetryRecorder()
+        engine = StrategyEngine(telemetry=telemetry, clock=lambda: 100.0)
+
+        engine.plan(self.day)
+        engine.plan(self.night)
+
+        sample = telemetry.snapshot()[-1]
+        self.assertEqual(sample.performance_segment, 'night_alive')
+        self.assertTrue(sample.forecast_observation_signature)
+        self.assertEqual(
+            sample.forecast_model_input_signature,
+            sample.forecast_observation_signature,
+        )
+        self.assertTrue(sample.forecast_input_current)
+        self.assertGreater(sample.forecast_observed_station_hp, 0)
+        self.assertGreaterEqual(sample.forecast_hostile_robot_count, 0)
+        self.assertGreaterEqual(sample.forecast_ready_weapon_count, 0)
 
     def test_lowercase_inventory_medicine_bypasses_phase3_search(self) -> None:
         injured_id = next(
@@ -877,6 +899,25 @@ class StrategyEngineTests(unittest.TestCase):
 
         self.assertEqual(task_agent.calls, 0)
         self.assertEqual(task_agent.reconcile_calls, 0)
+
+    def test_emergency_reserve_still_records_current_forecast_inputs(
+        self,
+    ) -> None:
+        telemetry = TelemetryRecorder()
+        engine = StrategyEngine(
+            phase2_planner=Phase2Spy(),
+            telemetry=telemetry,
+            clock=lambda: 2.6,
+        )
+
+        engine.plan(self.night, request_started_at=0.0)
+
+        sample = telemetry.snapshot()[-1]
+        self.assertEqual(sample.performance_segment, 'night_alive')
+        self.assertTrue(sample.forecast_observation_signature)
+        self.assertTrue(sample.forecast_input_changed)
+        self.assertFalse(sample.forecast_input_current)
+        self.assertGreater(sample.forecast_observed_station_hp, 0)
 
     def test_emergency_reserve_defers_success_feedback_until_retry(self) -> None:
         engine = StrategyEngine(

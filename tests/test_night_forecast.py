@@ -219,6 +219,41 @@ class NightForecastTests(unittest.TestCase):
         )
         self.assertEqual(refreshed.forecast.updated_round, 72)
 
+    def test_incremental_update_records_new_inputs_when_margin_is_stable(
+        self,
+    ) -> None:
+        first = observation(
+            round_no=71,
+            our_units=(
+                unit(1, 1, 1, 'worker'),
+                unit(2, 10, 10, 'station', health=500, level=1),
+            ),
+            robots=(robot(9, 0, 10),),
+        )
+        second = observation(
+            round_no=72,
+            our_units=first.our.units,
+            robots=(robot(9, 1, 10),),
+        )
+        initial = refresh_night_forecast(first, allow_full=False)
+
+        refreshed = refresh_night_forecast(
+            second,
+            previous_observation=first,
+            previous_forecast=initial.forecast,
+            allow_full=False,
+        )
+
+        self.assertEqual(
+            refreshed.forecast.survival_margin,
+            initial.forecast.survival_margin,
+        )
+        self.assertNotEqual(
+            refreshed.forecast.input_signature,
+            initial.forecast.input_signature,
+        )
+        self.assertEqual(refreshed.forecast.updated_round, 72)
+
     def test_wall_loss_forces_full_recompute(self) -> None:
         first = self._quiet_night(
             71,

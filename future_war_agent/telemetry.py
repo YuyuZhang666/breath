@@ -18,6 +18,7 @@ class TurnTelemetry:
     team_id: str = ''
     round_no: int = 0
     phase: str = 'unknown'
+    performance_segment: str = 'unknown'
     parser_ms: float = 0.0
     director_ms: float = 0.0
     task_ms: float = 0.0
@@ -50,6 +51,17 @@ class TurnTelemetry:
     forecast_age_rounds: int = 0
     forecast_margin_source: str = 'none'
     forecast_conservative_bound: bool = False
+    forecast_observation_signature: str = ''
+    forecast_model_input_signature: str = ''
+    forecast_input_changed: bool = False
+    forecast_input_current: bool = False
+    forecast_margin_delta: int = 0
+    forecast_observed_station_hp: int = 0
+    forecast_hostile_robot_count: int = 0
+    forecast_hostile_robot_health: int = 0
+    forecast_hostile_attack_power: int = 0
+    forecast_ready_weapon_count: int = 0
+    forecast_min_station_distance: int = -1
     night_risk_level: str = 'unknown'
     risk_ratio: float = 0.0
     survival_margin: int = 0
@@ -145,6 +157,7 @@ class _ActiveTurn:
     team_id: str = ''
     round_no: int = 0
     phase: str = 'unknown'
+    performance_segment: str = 'unknown'
     parser_ms: float = 0.0
     director_ms: float = 0.0
     task_ms: float = 0.0
@@ -176,6 +189,17 @@ class _ActiveTurn:
     forecast_age_rounds: int = 0
     forecast_margin_source: str = 'none'
     forecast_conservative_bound: bool = False
+    forecast_observation_signature: str = ''
+    forecast_model_input_signature: str = ''
+    forecast_input_changed: bool = False
+    forecast_input_current: bool = False
+    forecast_margin_delta: int = 0
+    forecast_observed_station_hp: int = 0
+    forecast_hostile_robot_count: int = 0
+    forecast_hostile_robot_health: int = 0
+    forecast_hostile_attack_power: int = 0
+    forecast_ready_weapon_count: int = 0
+    forecast_min_station_distance: int = -1
     night_risk_level: str = 'unknown'
     risk_ratio: float = 0.0
     survival_margin: int = 0
@@ -343,6 +367,7 @@ class TelemetryRecorder:
             team_id=active.team_id,
             round_no=active.round_no,
             phase=active.phase,
+            performance_segment=active.performance_segment,
             parser_ms=active.parser_ms,
             director_ms=active.director_ms,
             task_ms=active.task_ms,
@@ -375,6 +400,33 @@ class TelemetryRecorder:
             forecast_age_rounds=active.forecast_age_rounds,
             forecast_margin_source=active.forecast_margin_source,
             forecast_conservative_bound=active.forecast_conservative_bound,
+            forecast_observation_signature=(
+                active.forecast_observation_signature
+            ),
+            forecast_model_input_signature=(
+                active.forecast_model_input_signature
+            ),
+            forecast_input_changed=active.forecast_input_changed,
+            forecast_input_current=active.forecast_input_current,
+            forecast_margin_delta=active.forecast_margin_delta,
+            forecast_observed_station_hp=(
+                active.forecast_observed_station_hp
+            ),
+            forecast_hostile_robot_count=(
+                active.forecast_hostile_robot_count
+            ),
+            forecast_hostile_robot_health=(
+                active.forecast_hostile_robot_health
+            ),
+            forecast_hostile_attack_power=(
+                active.forecast_hostile_attack_power
+            ),
+            forecast_ready_weapon_count=(
+                active.forecast_ready_weapon_count
+            ),
+            forecast_min_station_distance=(
+                active.forecast_min_station_distance
+            ),
             night_risk_level=active.night_risk_level,
             risk_ratio=active.risk_ratio,
             survival_margin=active.survival_margin,

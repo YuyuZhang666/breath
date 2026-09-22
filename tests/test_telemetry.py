@@ -18,6 +18,7 @@ class TelemetryTests(unittest.TestCase):
 
         self.assertEqual(sample.request_total_ms, 0.0)
         self.assertEqual(sample.remaining_deadline_ms, 0.0)
+        self.assertEqual(sample.performance_segment, 'unknown')
         self.assertEqual(sample.forecast_mode, 'none')
         self.assertEqual(sample.forecast_reason, '')
         self.assertFalse(sample.safe_action_generated)
@@ -40,6 +41,12 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.forecast_age_rounds, 0)
         self.assertEqual(sample.forecast_margin_source, 'none')
         self.assertFalse(sample.forecast_conservative_bound)
+        self.assertEqual(sample.forecast_observation_signature, '')
+        self.assertEqual(sample.forecast_model_input_signature, '')
+        self.assertFalse(sample.forecast_input_changed)
+        self.assertFalse(sample.forecast_input_current)
+        self.assertEqual(sample.forecast_margin_delta, 0)
+        self.assertEqual(sample.forecast_min_station_distance, -1)
         self.assertEqual(sample.wall_plan_stage, 'unknown')
         self.assertEqual(sample.wall_blocker, 'unknown')
         self.assertEqual(sample.wall_job_count, 0)
@@ -68,6 +75,7 @@ class TelemetryTests(unittest.TestCase):
         recorder.set(
             request_total_ms=3.5,
             remaining_deadline_ms=496.5,
+            performance_segment='night_alive',
             forecast_mode='lightweight',
             forecast_reason='critical_risk',
             safe_action_generated=True,
@@ -92,6 +100,17 @@ class TelemetryTests(unittest.TestCase):
             forecast_age_rounds=1,
             forecast_margin_source='conservative_bound',
             forecast_conservative_bound=True,
+            forecast_observation_signature='abc123',
+            forecast_model_input_signature='abc123',
+            forecast_input_changed=True,
+            forecast_input_current=True,
+            forecast_margin_delta=-25,
+            forecast_observed_station_hp=900,
+            forecast_hostile_robot_count=35,
+            forecast_hostile_robot_health=1400,
+            forecast_hostile_attack_power=350,
+            forecast_ready_weapon_count=2,
+            forecast_min_station_distance=4,
             build_failure_count=2,
             build_cooldown_count=1,
             build_reroute_count=1,
@@ -114,6 +133,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertIsNotNone(sample)
         self.assertEqual(sample.request_total_ms, 3.5)
         self.assertEqual(sample.remaining_deadline_ms, 496.5)
+        self.assertEqual(sample.performance_segment, 'night_alive')
         self.assertEqual(sample.forecast_mode, 'lightweight')
         self.assertEqual(sample.forecast_reason, 'critical_risk')
         self.assertTrue(sample.safe_action_generated)
@@ -135,6 +155,10 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.forecast_age_rounds, 1)
         self.assertEqual(sample.forecast_margin_source, 'conservative_bound')
         self.assertTrue(sample.forecast_conservative_bound)
+        self.assertTrue(sample.forecast_input_current)
+        self.assertEqual(sample.forecast_margin_delta, -25)
+        self.assertEqual(sample.forecast_hostile_robot_count, 35)
+        self.assertEqual(sample.forecast_min_station_distance, 4)
         self.assertEqual(sample.build_failure_count, 2)
         self.assertEqual(sample.build_cooldown_count, 1)
         self.assertEqual(sample.build_reroute_count, 1)
@@ -157,6 +181,9 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(payload['action_lifecycle_log'])
         self.assertEqual(payload['phase3_executed_level'], 'lite')
         self.assertTrue(payload['forecast_conservative_bound'])
+        self.assertEqual(payload['performance_segment'], 'night_alive')
+        self.assertTrue(payload['forecast_input_current'])
+        self.assertEqual(payload['forecast_hostile_robot_count'], 35)
         self.assertEqual(payload['build_failure_count'], 2)
         self.assertEqual(payload['build_reroute_count'], 1)
         self.assertTrue(payload['weapon_build_reroute_log'])
