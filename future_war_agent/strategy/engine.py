@@ -12,6 +12,7 @@ from future_war_agent.protocol.time import Phase
 from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
 from .compute import ComputeGovernor, ComputeTurnUsage
+from .build_recovery import EMPTY_BUILD_RECOVERY_STATE, BuildRecoveryState
 from .director import StrategicDirector
 from .features import extract_features
 from .forecast import (
@@ -22,6 +23,7 @@ from .forecast import (
     forecast_recompute_reason,
     rebase_day_forecast,
     refresh_night_forecast,
+    summarize_forecast_inputs,
 )
 from .items import has_item
 from .market import EMPTY_MARKET_STATE, MarketMemory, MarketView
@@ -146,6 +148,10 @@ class StrategyEngine:
         self._phase2_accepts_previously_built_walls = _accepts_keyword(
             phase2_planner,
             'previously_built_wall_sites',
+        )
+        self._phase2_accepts_build_recovery = _accepts_keyword(
+            phase2_planner,
+            'build_recovery',
         )
         self._treasure_agent = (
             treasure_agent if treasure_agent is not None else TreasureAgent()
@@ -290,6 +296,36 @@ class StrategyEngine:
         deadline_stage: str = 'strategy',
     ) -> Decision:
         config = self._compute_governor.config
+        if not self._telemetry.current(
+            'forecast_observation_signature',
+            '',
+        ):
+            forecast_inputs = summarize_forecast_inputs(observation)
+            self._telemetry.set(
+                performance_segment=_performance_segment(
+                    observation.time.phase,
+                    _observed_station_status(observation),
+                ),
+                forecast_observation_signature=forecast_inputs.signature,
+                forecast_input_changed=True,
+                forecast_input_current=False,
+                forecast_observed_station_hp=forecast_inputs.station_hp,
+                forecast_hostile_robot_count=(
+                    forecast_inputs.hostile_robot_count
+                ),
+                forecast_hostile_robot_health=(
+                    forecast_inputs.hostile_robot_health
+                ),
+                forecast_hostile_attack_power=(
+                    forecast_inputs.hostile_attack_power
+                ),
+                forecast_ready_weapon_count=(
+                    forecast_inputs.ready_weapon_count
+                ),
+                forecast_min_station_distance=(
+                    forecast_inputs.minimum_station_distance
+                ),
+            )
         self._telemetry.set(
             safe_action_generated=True,
             compute_governor_action='emergency_reserve',
@@ -351,9 +387,48 @@ class StrategyEngine:
         request_deadline = request_budget.compute_deadline
         reserve = self._compute_governor.config.emergency_reserve_seconds
         governor_emergency = request_budget.remaining_compute() <= reserve
+        forecast_inputs = summarize_forecast_inputs(observation)
+        previous = (
+            self._sessions.get(team_id) if team_id.strip() else None
+        )
+        cached_forecast = (
+            previous.night_forecast if previous is not None else None
+        )
         self._telemetry.set(
             safe_action_generated=True,
             decision_source='safe',
+            performance_segment=_performance_segment(
+                observation.time.phase,
+                _observed_station_status(observation),
+            ),
+            forecast_observation_signature=forecast_inputs.signature,
+            forecast_model_input_signature=(
+                cached_forecast.input_signature
+                if cached_forecast is not None
+                else ''
+            ),
+            forecast_input_changed=(
+                cached_forecast is None
+                or cached_forecast.input_signature != forecast_inputs.signature
+            ),
+            forecast_input_current=(
+                cached_forecast is not None
+                and cached_forecast.input_signature == forecast_inputs.signature
+            ),
+            forecast_observed_station_hp=forecast_inputs.station_hp,
+            forecast_hostile_robot_count=(
+                forecast_inputs.hostile_robot_count
+            ),
+            forecast_hostile_robot_health=(
+                forecast_inputs.hostile_robot_health
+            ),
+            forecast_hostile_attack_power=(
+                forecast_inputs.hostile_attack_power
+            ),
+            forecast_ready_weapon_count=forecast_inputs.ready_weapon_count,
+            forecast_min_station_distance=(
+                forecast_inputs.minimum_station_distance
+            ),
         )
         if governor_emergency and observation.time.phase is Phase.NIGHT:
             return self._plan_emergency(observation, request_budget)
@@ -369,12 +444,15 @@ class StrategyEngine:
 
         fingerprint = observation_fingerprint(observation)
         signature = static_signature(observation)
-        previous = self._sessions.get(team_id)
         own_station_status = _own_station_status(observation, previous)
         own_station_alive = own_station_status == 'alive'
         self._telemetry.set(
             own_station_alive=own_station_alive,
             own_station_status=own_station_status,
+            performance_segment=_performance_segment(
+                observation.time.phase,
+                own_station_status,
+            ),
         )
         continuity = (
             classify_continuity(previous, observation)
@@ -401,6 +479,12 @@ class StrategyEngine:
             match_memory = self._memory.observe(
                 observation,
                 clear_forecast=not own_station_alive,
+                previous_decision=(
+                    previous.decision
+                    if previous is not None
+                    and continuity is SessionContinuity.CONSECUTIVE
+                    else None
+                ),
             )
             opponent_memory = match_memory.opponent_memory
             (
@@ -445,6 +529,23 @@ class StrategyEngine:
                 capability_supported_count=capability_supported_count,
                 capability_unsupported_count=capability_unsupported_count,
                 capability_log=match_memory.capability_matrix.log_entries(),
+                build_failure_count=len(
+                    match_memory.build_recovery.failures
+                ),
+                build_failure_log=(
+                    match_memory.build_recovery.log_entries(
+                        observation.time.round_no
+                    )
+                ),
+                build_cooldown_count=sum(
+                    observation.time.round_no
+                    <= record.cooldown_until_round
+                    for record in match_memory.build_recovery.failures
+                ),
+                build_reroute_count=sum(
+                    record.consecutive_failures >= 2
+                    for record in match_memory.build_recovery.failures
+                ),
             )
         except Exception:
             LOGGER.exception(
@@ -508,6 +609,13 @@ class StrategyEngine:
             previous_for_director.night_forecast
             if previous_for_director is not None
             else None
+        )
+        forecast_before_refresh = night_forecast
+        self._telemetry.set(
+            forecast_input_changed=(
+                night_forecast is None
+                or night_forecast.input_signature != forecast_inputs.signature
+            ),
         )
         forecast_invalidation_reason: str | None = None
         if observation.time.phase is Phase.NIGHT and not own_station_alive:
@@ -699,6 +807,24 @@ class StrategyEngine:
                     team_id,
                     observation.time.round_no,
                 )
+        self._telemetry.set(
+            forecast_model_input_signature=(
+                night_forecast.input_signature
+                if night_forecast is not None
+                else ''
+            ),
+            forecast_input_current=(
+                night_forecast is not None
+                and night_forecast.input_signature == forecast_inputs.signature
+            ),
+            forecast_margin_delta=(
+                night_forecast.survival_margin
+                - forecast_before_refresh.survival_margin
+                if night_forecast is not None
+                and forecast_before_refresh is not None
+                else 0
+            ),
+        )
         if observation.time.phase is Phase.NIGHT and task_controller_exclusions:
             task_survival_interrupt = (
                 task_assignment_failed
@@ -783,6 +909,11 @@ class StrategyEngine:
             if match_memory is not None
             else frozenset()
         )
+        build_recovery = (
+            match_memory.build_recovery
+            if match_memory is not None
+            else EMPTY_BUILD_RECOVERY_STATE
+        )
         self._telemetry.set(
             fortification_anchor_day=(
                 match_memory.fortification_day_no
@@ -865,6 +996,7 @@ class StrategyEngine:
                     else None
                 ),
                 previously_built_wall_sites,
+                build_recovery,
             )
             if decision != Decision():
                 self._telemetry.set(decision_source='phase2')
@@ -1292,6 +1424,7 @@ class StrategyEngine:
         market_view: MarketView | None = None,
         previous_decision: Decision | None = None,
         previously_built_wall_sites: frozenset[Position] = frozenset(),
+        build_recovery: BuildRecoveryState = EMPTY_BUILD_RECOVERY_STATE,
     ) -> Decision:
         kwargs: dict[str, object] = {}
         if self._phase2_accepts_intent:
@@ -1312,6 +1445,8 @@ class StrategyEngine:
             kwargs['previously_built_wall_sites'] = (
                 previously_built_wall_sites
             )
+        if self._phase2_accepts_build_recovery:
+            kwargs['build_recovery'] = build_recovery
         try:
             with self._telemetry.measure('phase2_ms'):
                 return self._phase2_planner(observation, **kwargs)
@@ -1373,6 +1508,28 @@ def _own_station_status(
         ):
             return 'destroyed'
     return 'state_invalid'
+
+
+def _observed_station_status(observation: Observation) -> str:
+    stations = tuple(
+        unit for unit in observation.our.units if unit.role_type == 'station'
+    )
+    living_count = sum(unit.health > 0 for unit in stations)
+    if living_count == 1:
+        return 'alive'
+    if living_count > 1:
+        return 'state_invalid'
+    if stations:
+        return 'destroyed'
+    return 'state_invalid'
+
+
+def _performance_segment(phase: Phase, station_status: str) -> str:
+    if station_status == 'destroyed':
+        return 'post_station_loss'
+    if station_status != 'alive':
+        return 'station_unknown'
+    return 'night_alive' if phase is Phase.NIGHT else 'day_alive'
 
 
 def _phase3_skip_reason(

@@ -18,6 +18,7 @@ class TelemetryTests(unittest.TestCase):
 
         self.assertEqual(sample.request_total_ms, 0.0)
         self.assertEqual(sample.remaining_deadline_ms, 0.0)
+        self.assertEqual(sample.performance_segment, 'unknown')
         self.assertEqual(sample.forecast_mode, 'none')
         self.assertEqual(sample.forecast_reason, '')
         self.assertFalse(sample.safe_action_generated)
@@ -28,6 +29,10 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.post_validation_action_count, 0)
         self.assertEqual(sample.serialized_action_count, 0)
         self.assertEqual(sample.response_action_count, 0)
+        self.assertEqual(sample.planned_action_log, ())
+        self.assertEqual(sample.validated_action_log, ())
+        self.assertEqual(sample.validation_drop_log, ())
+        self.assertEqual(sample.action_lifecycle_log, ())
         self.assertEqual(sample.phase3_executed_level, 'none')
         self.assertEqual(sample.phase3_skip_reason, 'none')
         self.assertEqual(sample.phase3_completed_root_count, 0)
@@ -36,6 +41,12 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.forecast_age_rounds, 0)
         self.assertEqual(sample.forecast_margin_source, 'none')
         self.assertFalse(sample.forecast_conservative_bound)
+        self.assertEqual(sample.forecast_observation_signature, '')
+        self.assertEqual(sample.forecast_model_input_signature, '')
+        self.assertFalse(sample.forecast_input_changed)
+        self.assertFalse(sample.forecast_input_current)
+        self.assertEqual(sample.forecast_margin_delta, 0)
+        self.assertEqual(sample.forecast_min_station_distance, -1)
         self.assertEqual(sample.wall_plan_stage, 'unknown')
         self.assertEqual(sample.wall_blocker, 'unknown')
         self.assertEqual(sample.wall_job_count, 0)
@@ -44,6 +55,11 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.rebuild_wall_gap_count, 0)
         self.assertEqual(sample.historically_built_wall_count, 0)
         self.assertEqual(sample.fortification_anchor_day, 0)
+        self.assertEqual(sample.build_failure_count, 0)
+        self.assertEqual(sample.build_cooldown_count, 0)
+        self.assertEqual(sample.build_reroute_count, 0)
+        self.assertEqual(sample.build_failure_log, ())
+        self.assertEqual(sample.weapon_build_reroute_log, ())
         self.assertTrue(sample.own_station_alive)
         self.assertEqual(sample.engine_lock_wait_ms, 0.0)
         self.assertFalse(sample.engine_lock_timed_out)
@@ -59,6 +75,7 @@ class TelemetryTests(unittest.TestCase):
         recorder.set(
             request_total_ms=3.5,
             remaining_deadline_ms=496.5,
+            performance_segment='night_alive',
             forecast_mode='lightweight',
             forecast_reason='critical_risk',
             safe_action_generated=True,
@@ -69,6 +86,12 @@ class TelemetryTests(unittest.TestCase):
             post_validation_action_count=2,
             serialized_action_count=1,
             response_action_count=2,
+            planned_action_log=('id=10:type=worker:action=move',),
+            validated_action_log=('id=10:type=worker:action=move',),
+            validation_drop_log=('id=11:type=unknown:validated=dropped',),
+            action_lifecycle_log=(
+                'id=10:type=worker:planned=move:validated=move:response=move',
+            ),
             phase3_executed_level='lite',
             phase3_skip_reason='none',
             phase3_completed_root_count=4,
@@ -77,6 +100,24 @@ class TelemetryTests(unittest.TestCase):
             forecast_age_rounds=1,
             forecast_margin_source='conservative_bound',
             forecast_conservative_bound=True,
+            forecast_observation_signature='abc123',
+            forecast_model_input_signature='abc123',
+            forecast_input_changed=True,
+            forecast_input_current=True,
+            forecast_margin_delta=-25,
+            forecast_observed_station_hp=900,
+            forecast_hostile_robot_count=35,
+            forecast_hostile_robot_health=1400,
+            forecast_hostile_attack_power=350,
+            forecast_ready_weapon_count=2,
+            forecast_min_station_distance=4,
+            build_failure_count=2,
+            build_cooldown_count=1,
+            build_reroute_count=1,
+            build_failure_log=('rocket@(9,6):failures=2:cooldown=2',),
+            weapon_build_reroute_log=(
+                'rocket@(9,6)->(9,9):repeated_failure',
+            ),
             own_station_alive=False,
             engine_lock_wait_ms=3.25,
             engine_lock_timed_out=True,
@@ -92,6 +133,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertIsNotNone(sample)
         self.assertEqual(sample.request_total_ms, 3.5)
         self.assertEqual(sample.remaining_deadline_ms, 496.5)
+        self.assertEqual(sample.performance_segment, 'night_alive')
         self.assertEqual(sample.forecast_mode, 'lightweight')
         self.assertEqual(sample.forecast_reason, 'critical_risk')
         self.assertTrue(sample.safe_action_generated)
@@ -102,6 +144,10 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.post_validation_action_count, 2)
         self.assertEqual(sample.serialized_action_count, 1)
         self.assertEqual(sample.response_action_count, 2)
+        self.assertTrue(sample.planned_action_log)
+        self.assertTrue(sample.validated_action_log)
+        self.assertTrue(sample.validation_drop_log)
+        self.assertTrue(sample.action_lifecycle_log)
         self.assertEqual(sample.phase3_executed_level, 'lite')
         self.assertEqual(sample.phase3_completed_root_count, 4)
         self.assertEqual(sample.forecast_generated_round, 71)
@@ -109,6 +155,15 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.forecast_age_rounds, 1)
         self.assertEqual(sample.forecast_margin_source, 'conservative_bound')
         self.assertTrue(sample.forecast_conservative_bound)
+        self.assertTrue(sample.forecast_input_current)
+        self.assertEqual(sample.forecast_margin_delta, -25)
+        self.assertEqual(sample.forecast_hostile_robot_count, 35)
+        self.assertEqual(sample.forecast_min_station_distance, 4)
+        self.assertEqual(sample.build_failure_count, 2)
+        self.assertEqual(sample.build_cooldown_count, 1)
+        self.assertEqual(sample.build_reroute_count, 1)
+        self.assertTrue(sample.build_failure_log)
+        self.assertTrue(sample.weapon_build_reroute_log)
         self.assertFalse(sample.own_station_alive)
         self.assertEqual(sample.engine_lock_wait_ms, 3.25)
         self.assertTrue(sample.engine_lock_timed_out)
@@ -121,8 +176,17 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(payload['fallback_reason'], 'deadline_low')
         self.assertEqual(payload['response_action_count'], 2)
         self.assertEqual(payload['pre_validation_action_count'], 3)
+        self.assertTrue(payload['planned_action_log'])
+        self.assertTrue(payload['validation_drop_log'])
+        self.assertTrue(payload['action_lifecycle_log'])
         self.assertEqual(payload['phase3_executed_level'], 'lite')
         self.assertTrue(payload['forecast_conservative_bound'])
+        self.assertEqual(payload['performance_segment'], 'night_alive')
+        self.assertTrue(payload['forecast_input_current'])
+        self.assertEqual(payload['forecast_hostile_robot_count'], 35)
+        self.assertEqual(payload['build_failure_count'], 2)
+        self.assertEqual(payload['build_reroute_count'], 1)
+        self.assertTrue(payload['weapon_build_reroute_log'])
         self.assertTrue(payload['engine_lock_timed_out'])
         self.assertEqual(payload['deadline_stage'], 'engine_lock')
         self.assertEqual(payload['emergency_fire_action_count'], 2)

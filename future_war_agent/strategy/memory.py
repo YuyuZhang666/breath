@@ -3,8 +3,14 @@ from fractions import Fraction
 
 from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.time import Phase
+from future_war_agent.decision.decision import Decision
 
 from .belief import OpponentBelief, update_opponent_belief
+from .build_recovery import (
+    EMPTY_BUILD_RECOVERY_STATE,
+    BuildRecoveryState,
+    update_build_recovery,
+)
 from .capability_matrix import CapabilityMatrix, UNKNOWN_CAPABILITY_MATRIX
 from .forecast import NightForecast
 from .opponent_memory import OpponentMemory, update_opponent_memory
@@ -52,6 +58,7 @@ class MatchMemory:
     fortification_day_no: int = 0
     fortification_threat_positions: tuple[Position, ...] = ()
     seen_friendly_wall_positions: tuple[Position, ...] = ()
+    build_recovery: BuildRecoveryState = EMPTY_BUILD_RECOVERY_STATE
     night_forecast: NightForecast | None = None
 
 
@@ -84,6 +91,7 @@ class MatchMemoryStore:
         certificate: RobotWaveSafetyCertificate | None = None,
         forecast: NightForecast | None = None,
         clear_forecast: bool = False,
+        previous_decision: Decision | None = None,
     ) -> MatchMemory:
         team_id = observation.our.team_id
         previous = self.get(team_id)
@@ -94,6 +102,7 @@ class MatchMemoryStore:
             and certificate is None
             and forecast is None
             and not clear_forecast
+            and previous_decision is None
         ):
             return previous
         memory = update_match_memory(
@@ -102,6 +111,7 @@ class MatchMemoryStore:
             certificate=certificate,
             forecast=forecast,
             clear_forecast=clear_forecast,
+            previous_decision=previous_decision,
             capability_matrix=self._capability_matrix,
         )
         if team_id.strip():
@@ -167,6 +177,7 @@ def update_match_memory(
     certificate: RobotWaveSafetyCertificate | None = None,
     forecast: NightForecast | None = None,
     clear_forecast: bool = False,
+    previous_decision: Decision | None = None,
     capability_matrix: CapabilityMatrix | None = None,
 ) -> MatchMemory:
     team_id = observation.our.team_id
@@ -217,6 +228,15 @@ def update_match_memory(
         and prior.opponent_memory.side_key != 'unknown'
         and effective_side_key != 'unknown'
         and effective_side_key != prior.opponent_memory.side_key
+    )
+    build_recovery = (
+        EMPTY_BUILD_RECOVERY_STATE
+        if rollback or side_changed
+        else update_build_recovery(
+            prior.build_recovery,
+            observation,
+            previous_decision if not same_observation else None,
+        )
     )
     recent_threat_positions = (
         () if rollback or side_changed else prior.recent_threat_positions
@@ -364,6 +384,7 @@ def update_match_memory(
                 key=lambda position: (position.x, position.y),
             )[:MAX_FORTIFICATION_SITES]
         ),
+        build_recovery=build_recovery,
         night_forecast=(
             None
             if clear_forecast

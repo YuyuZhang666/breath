@@ -18,6 +18,7 @@ class TurnTelemetry:
     team_id: str = ''
     round_no: int = 0
     phase: str = 'unknown'
+    performance_segment: str = 'unknown'
     parser_ms: float = 0.0
     director_ms: float = 0.0
     task_ms: float = 0.0
@@ -50,6 +51,17 @@ class TurnTelemetry:
     forecast_age_rounds: int = 0
     forecast_margin_source: str = 'none'
     forecast_conservative_bound: bool = False
+    forecast_observation_signature: str = ''
+    forecast_model_input_signature: str = ''
+    forecast_input_changed: bool = False
+    forecast_input_current: bool = False
+    forecast_margin_delta: int = 0
+    forecast_observed_station_hp: int = 0
+    forecast_hostile_robot_count: int = 0
+    forecast_hostile_robot_health: int = 0
+    forecast_hostile_attack_power: int = 0
+    forecast_ready_weapon_count: int = 0
+    forecast_min_station_distance: int = -1
     night_risk_level: str = 'unknown'
     risk_ratio: float = 0.0
     survival_margin: int = 0
@@ -97,6 +109,10 @@ class TurnTelemetry:
     post_validation_action_count: int = 0
     serialized_action_count: int = 0
     response_action_count: int = 0
+    planned_action_log: tuple[str, ...] = ()
+    validated_action_log: tuple[str, ...] = ()
+    validation_drop_log: tuple[str, ...] = ()
+    action_lifecycle_log: tuple[str, ...] = ()
     validated_weapon_action_log: tuple[str, ...] = ()
     wall_plan_stage: str = 'unknown'
     core_weapon_ready_count: int = 0
@@ -116,6 +132,11 @@ class TurnTelemetry:
     historically_built_wall_count: int = 0
     fortification_anchor_day: int = 0
     fortification_anchor_threat_count: int = 0
+    build_failure_count: int = 0
+    build_cooldown_count: int = 0
+    build_reroute_count: int = 0
+    build_failure_log: tuple[str, ...] = ()
+    weapon_build_reroute_log: tuple[str, ...] = ()
     own_station_alive: bool = True
     own_station_status: str = 'alive'
     engine_lock_wait_ms: float = 0.0
@@ -136,6 +157,7 @@ class _ActiveTurn:
     team_id: str = ''
     round_no: int = 0
     phase: str = 'unknown'
+    performance_segment: str = 'unknown'
     parser_ms: float = 0.0
     director_ms: float = 0.0
     task_ms: float = 0.0
@@ -167,6 +189,17 @@ class _ActiveTurn:
     forecast_age_rounds: int = 0
     forecast_margin_source: str = 'none'
     forecast_conservative_bound: bool = False
+    forecast_observation_signature: str = ''
+    forecast_model_input_signature: str = ''
+    forecast_input_changed: bool = False
+    forecast_input_current: bool = False
+    forecast_margin_delta: int = 0
+    forecast_observed_station_hp: int = 0
+    forecast_hostile_robot_count: int = 0
+    forecast_hostile_robot_health: int = 0
+    forecast_hostile_attack_power: int = 0
+    forecast_ready_weapon_count: int = 0
+    forecast_min_station_distance: int = -1
     night_risk_level: str = 'unknown'
     risk_ratio: float = 0.0
     survival_margin: int = 0
@@ -214,6 +247,10 @@ class _ActiveTurn:
     post_validation_action_count: int = 0
     serialized_action_count: int = 0
     response_action_count: int = 0
+    planned_action_log: tuple[str, ...] = ()
+    validated_action_log: tuple[str, ...] = ()
+    validation_drop_log: tuple[str, ...] = ()
+    action_lifecycle_log: tuple[str, ...] = ()
     validated_weapon_action_log: tuple[str, ...] = ()
     wall_plan_stage: str = 'unknown'
     core_weapon_ready_count: int = 0
@@ -233,6 +270,11 @@ class _ActiveTurn:
     historically_built_wall_count: int = 0
     fortification_anchor_day: int = 0
     fortification_anchor_threat_count: int = 0
+    build_failure_count: int = 0
+    build_cooldown_count: int = 0
+    build_reroute_count: int = 0
+    build_failure_log: tuple[str, ...] = ()
+    weapon_build_reroute_log: tuple[str, ...] = ()
     own_station_alive: bool = True
     own_station_status: str = 'alive'
     engine_lock_wait_ms: float = 0.0
@@ -325,6 +367,7 @@ class TelemetryRecorder:
             team_id=active.team_id,
             round_no=active.round_no,
             phase=active.phase,
+            performance_segment=active.performance_segment,
             parser_ms=active.parser_ms,
             director_ms=active.director_ms,
             task_ms=active.task_ms,
@@ -357,6 +400,33 @@ class TelemetryRecorder:
             forecast_age_rounds=active.forecast_age_rounds,
             forecast_margin_source=active.forecast_margin_source,
             forecast_conservative_bound=active.forecast_conservative_bound,
+            forecast_observation_signature=(
+                active.forecast_observation_signature
+            ),
+            forecast_model_input_signature=(
+                active.forecast_model_input_signature
+            ),
+            forecast_input_changed=active.forecast_input_changed,
+            forecast_input_current=active.forecast_input_current,
+            forecast_margin_delta=active.forecast_margin_delta,
+            forecast_observed_station_hp=(
+                active.forecast_observed_station_hp
+            ),
+            forecast_hostile_robot_count=(
+                active.forecast_hostile_robot_count
+            ),
+            forecast_hostile_robot_health=(
+                active.forecast_hostile_robot_health
+            ),
+            forecast_hostile_attack_power=(
+                active.forecast_hostile_attack_power
+            ),
+            forecast_ready_weapon_count=(
+                active.forecast_ready_weapon_count
+            ),
+            forecast_min_station_distance=(
+                active.forecast_min_station_distance
+            ),
             night_risk_level=active.night_risk_level,
             risk_ratio=active.risk_ratio,
             survival_margin=active.survival_margin,
@@ -410,6 +480,10 @@ class TelemetryRecorder:
             post_validation_action_count=active.post_validation_action_count,
             serialized_action_count=active.serialized_action_count,
             response_action_count=active.response_action_count,
+            planned_action_log=active.planned_action_log,
+            validated_action_log=active.validated_action_log,
+            validation_drop_log=active.validation_drop_log,
+            action_lifecycle_log=active.action_lifecycle_log,
             validated_weapon_action_log=active.validated_weapon_action_log,
             wall_plan_stage=active.wall_plan_stage,
             core_weapon_ready_count=active.core_weapon_ready_count,
@@ -433,6 +507,11 @@ class TelemetryRecorder:
             fortification_anchor_threat_count=(
                 active.fortification_anchor_threat_count
             ),
+            build_failure_count=active.build_failure_count,
+            build_cooldown_count=active.build_cooldown_count,
+            build_reroute_count=active.build_reroute_count,
+            build_failure_log=active.build_failure_log,
+            weapon_build_reroute_log=active.weapon_build_reroute_log,
             own_station_alive=active.own_station_alive,
             own_station_status=active.own_station_status,
             engine_lock_wait_ms=active.engine_lock_wait_ms,

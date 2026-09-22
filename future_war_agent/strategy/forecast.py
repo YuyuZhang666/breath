@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from fractions import Fraction
+from hashlib import sha256
 from time import monotonic
 
 from future_war_agent.decision.actions import ActionKind
@@ -43,6 +44,17 @@ class ForecastUpdateKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ForecastInputSummary:
+    signature: str
+    station_hp: int
+    hostile_robot_count: int
+    hostile_robot_health: int
+    hostile_attack_power: int
+    ready_weapon_count: int
+    minimum_station_distance: int
+
+
+@dataclass(frozen=True, slots=True)
 class NightForecast:
     expected_station_hp_at_dawn: int
     predicted_damage_before_dawn: int
@@ -67,6 +79,7 @@ class NightForecast:
     observed_station_hp: int
     expected_next_station_hp: int
     ineffective_attack_streak: int = 0
+    input_signature: str = ''
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,6 +256,7 @@ def build_night_forecast(
     surviving_wall_ids = frozenset(wall.unit_id for wall in state.walls)
     surviving_weapon_ids = frozenset(weapon.unit_id for weapon in state.weapons)
     surviving_role_ids = frozenset(role.unit_id for role in state.roles)
+    input_summary = summarize_forecast_inputs(observation)
     return NightForecast(
         expected_station_hp_at_dawn=tail.expected_station_hp_at_dawn,
         predicted_damage_before_dawn=predicted_damage,
@@ -275,6 +289,7 @@ def build_night_forecast(
         uncertainty_reasons=tail.uncertainty_reasons,
         observed_station_hp=initial_station_hp,
         expected_next_station_hp=expected_next_hp,
+        input_signature=input_summary.signature,
     )
 
 
@@ -371,6 +386,7 @@ def build_lightweight_forecast(
         observation.time.round_no,
         complete=False,
     )
+    input_summary = summarize_forecast_inputs(observation)
     return NightForecast(
         expected_station_hp_at_dawn=max(0, station_hp - incoming_damage),
         predicted_damage_before_dawn=incoming_damage,
@@ -394,6 +410,7 @@ def build_lightweight_forecast(
         uncertainty_reasons=tuple(uncertainty),
         observed_station_hp=station_hp,
         expected_next_station_hp=max(0, station_hp - next_damage),
+        input_signature=input_summary.signature,
     )
 
 
@@ -439,6 +456,7 @@ def _more_conservative_forecast(
         lethal_round=min(lethal_rounds) if lethal_rounds else None,
         uncertainty_reasons=uncertainty,
         updated_round=lightweight.updated_round,
+        input_signature=lightweight.input_signature,
     )
 
 
@@ -509,6 +527,7 @@ def update_forecast_incrementally(
         for unit in observation.our.units
         if unit.health > 0 and unit.role_type == 'wall'
     }
+    input_summary = summarize_forecast_inputs(observation)
     return replace(
         cached,
         expected_station_hp_at_dawn=expected_dawn_hp,
@@ -532,6 +551,7 @@ def update_forecast_incrementally(
         observed_station_hp=current_hp,
         expected_next_station_hp=max(0, current_hp - next_damage),
         ineffective_attack_streak=streak,
+        input_signature=input_summary.signature,
     )
 
 
@@ -560,6 +580,7 @@ def rebase_day_forecast(
         observation.time.round_no,
         complete=cached.complete,
     )
+    input_summary = summarize_forecast_inputs(observation)
     return replace(
         cached,
         expected_station_hp_at_dawn=max(
@@ -577,6 +598,100 @@ def rebase_day_forecast(
         observed_station_hp=current_hp,
         expected_next_station_hp=current_hp,
         ineffective_attack_streak=0,
+        input_signature=input_summary.signature,
+    )
+
+
+def summarize_forecast_inputs(
+    observation: Observation,
+) -> ForecastInputSummary:
+    living_station = _living_unit(observation, 'station')
+    station_hp = living_station.health if living_station is not None else 0
+    hostile_robots = tuple(
+        sorted(
+            (
+                robot
+                for robot in observation.robots
+                if robot.health > 0
+                and robot.target_team == observation.our.team_type
+            ),
+            key=lambda robot: robot.robot_id,
+        )
+    )
+    ready_weapon_count = sum(
+        unit.health > 0
+        and unit.role_type in _WEAPON_ROLES
+        and unit.cooldown == 0
+        for unit in observation.our.units
+    )
+    station_cells = (
+        station_footprint(living_station.position)
+        if living_station is not None
+        else ()
+    )
+    minimum_station_distance = (
+        min(
+            min(
+                robot.position.chebyshev_distance(cell)
+                for cell in station_cells
+            )
+            for robot in hostile_robots
+        )
+        if station_cells and hostile_robots
+        else -1
+    )
+    friendly_state = tuple(
+        (
+            unit.unit_id,
+            unit.role_type,
+            unit.health,
+            unit.position.x,
+            unit.position.y,
+            unit.cooldown,
+            unit.level,
+        )
+        for unit in sorted(
+            observation.our.units,
+            key=lambda unit: unit.unit_id,
+        )
+    )
+    robot_state = tuple(
+        (
+            robot.robot_id,
+            robot.role_type,
+            robot.health,
+            robot.position.x,
+            robot.position.y,
+            robot.abnormal_state,
+            robot.target_team,
+        )
+        for robot in sorted(
+            observation.robots,
+            key=lambda robot: robot.robot_id,
+        )
+    )
+    signature_payload = repr(
+        (
+            MODEL_VERSION,
+            observation.time.day_no,
+            observation.time.round_in_phase,
+            bool(observation.phase_task.strip()),
+            friendly_state,
+            robot_state,
+        )
+    ).encode('utf-8')
+    return ForecastInputSummary(
+        signature=sha256(signature_payload).hexdigest()[:16],
+        station_hp=station_hp,
+        hostile_robot_count=len(hostile_robots),
+        hostile_robot_health=sum(
+            robot.health for robot in hostile_robots
+        ),
+        hostile_attack_power=sum(
+            _robot_attack_power(robot) for robot in hostile_robots
+        ),
+        ready_weapon_count=ready_weapon_count,
+        minimum_station_distance=minimum_station_distance,
     )
 
 

@@ -3,6 +3,14 @@ import unittest
 from future_war_agent.decision.actions import Action
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Position, ShopItem, Zone
+from future_war_agent.strategy.build_recovery import (
+    BuildFailureRecord,
+    BuildRecoveryState,
+)
+from future_war_agent.strategy.build_recovery import (
+    BuildFailureRecord,
+    BuildRecoveryState,
+)
 from future_war_agent.strategy.jobs import (
     JobKind,
     calculate_stone_reserve,
@@ -52,6 +60,97 @@ class DayJobTests(unittest.TestCase):
         jobs = self.jobs(observed)
 
         self.assertIn(JobKind.BUILD_WEAPON, {job.kind for job in jobs[10010]})
+
+    def test_first_weapon_build_failure_cools_down_same_target(self) -> None:
+        observed = observation(
+            round_no=10,
+            our_units=(
+                unit(10010, 3, 3, 'worker'),
+                unit(10013, 7, 7, 'station', level=1),
+            ),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+        planned = next(
+            site for site in layout.weapon_sites
+            if site.weapon_type == 'rocket'
+        )
+        recovery = BuildRecoveryState(
+            failures=(
+                BuildFailureRecord(
+                    name='rocket',
+                    target=planned.position,
+                    consecutive_failures=1,
+                    last_failure_round=10,
+                    cooldown_until_round=10,
+                ),
+            )
+        )
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            layout,
+            build_recovery=recovery,
+        )
+
+        self.assertFalse(
+            any(
+                job.kind is JobKind.BUILD_WEAPON
+                and job.name == 'rocket'
+                for job in jobs[10010]
+            )
+        )
+
+    def test_repeated_weapon_build_failure_reroutes_target(self) -> None:
+        observed = observation(
+            round_no=10,
+            our_units=(
+                unit(10010, 3, 3, 'worker'),
+                unit(10013, 7, 7, 'station', level=1),
+            ),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+        planned = next(
+            site for site in layout.weapon_sites
+            if site.weapon_type == 'rocket'
+        )
+        recovery = BuildRecoveryState(
+            failures=(
+                BuildFailureRecord(
+                    name='rocket',
+                    target=planned.position,
+                    consecutive_failures=2,
+                    last_failure_round=10,
+                    cooldown_until_round=11,
+                ),
+            )
+        )
+        recorder = TelemetryRecorder()
+        token = recorder.begin()
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            layout,
+            build_recovery=recovery,
+            telemetry=recorder,
+        )
+        sample = recorder.finish(token)
+
+        rocket_job = next(
+            job
+            for job in jobs[10010]
+            if job.kind is JobKind.BUILD_WEAPON
+            and job.name == 'rocket'
+        )
+        self.assertNotEqual(rocket_job.target, planned.position)
+        self.assertNotIn(rocket_job.target, layout.wall_sites)
+        self.assertNotIn(rocket_job.target, layout.controller_sites)
+        self.assertTrue(sample.weapon_build_reroute_log)
 
     def test_full_backpack_generates_unload_job(self) -> None:
         observed = observation(
