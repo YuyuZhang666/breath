@@ -13,7 +13,9 @@ from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Observation, Position
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.protocol.time import TurnTime
+from future_war_agent.strategy.build_recovery import BuildRecoveryState
 from future_war_agent.strategy.compute import ComputeGovernor, ComputeGovernorConfig
+from future_war_agent.strategy.build_recovery import BuildRecoveryState
 from future_war_agent.strategy.engine import StrategyEngine
 from future_war_agent.strategy.director import StrategicDirector
 from future_war_agent.strategy.forecast import (
@@ -239,6 +241,41 @@ class StrategyEngineTests(unittest.TestCase):
             (Position(11, 8), Position(12, 7)),
         )
         self.assertIn(wall_position, captured[-1][1])
+
+    def test_failed_build_result_reaches_next_round_phase2(self) -> None:
+        target = Position(9, 6)
+        captured: list[BuildRecoveryState] = []
+
+        def phase2(observed, *, build_recovery, **kwargs):
+            del kwargs
+            captured.append(build_recovery)
+            if observed.time.round_no == 1:
+                return Decision(
+                    commands={10010: Action.build('rocket', target)}
+                )
+            return Decision()
+
+        engine = StrategyEngine(phase2_planner=phase2)
+        units = (
+            unit(10010, 3, 3, 'worker'),
+            unit(10013, 7, 7, 'station', level=1),
+        )
+
+        engine.plan(observation(round_no=1, our_units=units))
+        engine.plan(
+            observation(
+                round_no=2,
+                our_units=units,
+                last_action_results={10010: False},
+            )
+        )
+
+        self.assertEqual(captured[0].failures, ())
+        self.assertEqual(len(captured[1].failures), 1)
+        failure = captured[1].failures[0]
+        self.assertEqual(failure.name, 'rocket')
+        self.assertEqual(failure.target, target)
+        self.assertEqual(failure.consecutive_failures, 1)
 
     def test_safe_active_night_task_reserves_pioneer_from_fire_control(
         self,

@@ -6,6 +6,7 @@ from future_war_agent.protocol.time import Phase
 from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
 from .joint_fire import plan_joint_fire
+from .build_recovery import EMPTY_BUILD_RECOVERY_STATE, BuildRecoveryState
 from .jobs import generate_day_jobs
 from .joint import candidates_for_jobs, solve_joint
 from .layout import build_defensive_layout
@@ -33,6 +34,7 @@ def plan_turn(
     market_view: MarketView | None = None,
     previous_decision: Decision | None = None,
     previously_built_wall_sites: frozenset[Position] = frozenset(),
+    build_recovery: BuildRecoveryState = EMPTY_BUILD_RECOVERY_STATE,
 ) -> Decision:
     world = WorldGrid.from_observation(observation, rules)
     if not world.friendly_roles:
@@ -88,6 +90,7 @@ def plan_turn(
         market_view=market_view,
         previous_decision=previous_decision,
         previously_built_wall_sites=previously_built_wall_sites,
+        build_recovery=build_recovery,
         telemetry=telemetry,
     )
     candidates = {

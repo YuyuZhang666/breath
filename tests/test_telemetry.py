@@ -44,6 +44,11 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.rebuild_wall_gap_count, 0)
         self.assertEqual(sample.historically_built_wall_count, 0)
         self.assertEqual(sample.fortification_anchor_day, 0)
+        self.assertEqual(sample.build_failure_count, 0)
+        self.assertEqual(sample.build_cooldown_count, 0)
+        self.assertEqual(sample.build_reroute_count, 0)
+        self.assertEqual(sample.build_failure_log, ())
+        self.assertEqual(sample.weapon_build_reroute_log, ())
         self.assertTrue(sample.own_station_alive)
         self.assertEqual(sample.engine_lock_wait_ms, 0.0)
         self.assertFalse(sample.engine_lock_timed_out)
@@ -77,6 +82,13 @@ class TelemetryTests(unittest.TestCase):
             forecast_age_rounds=1,
             forecast_margin_source='conservative_bound',
             forecast_conservative_bound=True,
+            build_failure_count=2,
+            build_cooldown_count=1,
+            build_reroute_count=1,
+            build_failure_log=('rocket@(9,6):failures=2:cooldown=2',),
+            weapon_build_reroute_log=(
+                'rocket@(9,6)->(9,9):repeated_failure',
+            ),
             own_station_alive=False,
             engine_lock_wait_ms=3.25,
             engine_lock_timed_out=True,
@@ -109,6 +121,11 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.forecast_age_rounds, 1)
         self.assertEqual(sample.forecast_margin_source, 'conservative_bound')
         self.assertTrue(sample.forecast_conservative_bound)
+        self.assertEqual(sample.build_failure_count, 2)
+        self.assertEqual(sample.build_cooldown_count, 1)
+        self.assertEqual(sample.build_reroute_count, 1)
+        self.assertTrue(sample.build_failure_log)
+        self.assertTrue(sample.weapon_build_reroute_log)
         self.assertFalse(sample.own_station_alive)
         self.assertEqual(sample.engine_lock_wait_ms, 3.25)
         self.assertTrue(sample.engine_lock_timed_out)
@@ -123,6 +140,9 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(payload['pre_validation_action_count'], 3)
         self.assertEqual(payload['phase3_executed_level'], 'lite')
         self.assertTrue(payload['forecast_conservative_bound'])
+        self.assertEqual(payload['build_failure_count'], 2)
+        self.assertEqual(payload['build_reroute_count'], 1)
+        self.assertTrue(payload['weapon_build_reroute_log'])
         self.assertTrue(payload['engine_lock_timed_out'])
         self.assertEqual(payload['deadline_stage'], 'engine_lock')
         self.assertEqual(payload['emergency_fire_action_count'], 2)

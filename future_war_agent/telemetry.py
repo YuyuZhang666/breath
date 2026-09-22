@@ -116,6 +116,11 @@ class TurnTelemetry:
     historically_built_wall_count: int = 0
     fortification_anchor_day: int = 0
     fortification_anchor_threat_count: int = 0
+    build_failure_count: int = 0
+    build_cooldown_count: int = 0
+    build_reroute_count: int = 0
+    build_failure_log: tuple[str, ...] = ()
+    weapon_build_reroute_log: tuple[str, ...] = ()
     own_station_alive: bool = True
     own_station_status: str = 'alive'
     engine_lock_wait_ms: float = 0.0
@@ -233,6 +238,11 @@ class _ActiveTurn:
     historically_built_wall_count: int = 0
     fortification_anchor_day: int = 0
     fortification_anchor_threat_count: int = 0
+    build_failure_count: int = 0
+    build_cooldown_count: int = 0
+    build_reroute_count: int = 0
+    build_failure_log: tuple[str, ...] = ()
+    weapon_build_reroute_log: tuple[str, ...] = ()
     own_station_alive: bool = True
     own_station_status: str = 'alive'
     engine_lock_wait_ms: float = 0.0
@@ -433,6 +443,11 @@ class TelemetryRecorder:
             fortification_anchor_threat_count=(
                 active.fortification_anchor_threat_count
             ),
+            build_failure_count=active.build_failure_count,
+            build_cooldown_count=active.build_cooldown_count,
+            build_reroute_count=active.build_reroute_count,
+            build_failure_log=active.build_failure_log,
+            weapon_build_reroute_log=active.weapon_build_reroute_log,
             own_station_alive=active.own_station_alive,
             own_station_status=active.own_station_status,
             engine_lock_wait_ms=active.engine_lock_wait_ms,

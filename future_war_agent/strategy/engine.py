@@ -12,6 +12,7 @@ from future_war_agent.protocol.time import Phase
 from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
 from .compute import ComputeGovernor, ComputeTurnUsage
+from .build_recovery import EMPTY_BUILD_RECOVERY_STATE, BuildRecoveryState
 from .director import StrategicDirector
 from .features import extract_features
 from .forecast import (
@@ -146,6 +147,10 @@ class StrategyEngine:
         self._phase2_accepts_previously_built_walls = _accepts_keyword(
             phase2_planner,
             'previously_built_wall_sites',
+        )
+        self._phase2_accepts_build_recovery = _accepts_keyword(
+            phase2_planner,
+            'build_recovery',
         )
         self._treasure_agent = (
             treasure_agent if treasure_agent is not None else TreasureAgent()
@@ -401,6 +406,12 @@ class StrategyEngine:
             match_memory = self._memory.observe(
                 observation,
                 clear_forecast=not own_station_alive,
+                previous_decision=(
+                    previous.decision
+                    if previous is not None
+                    and continuity is SessionContinuity.CONSECUTIVE
+                    else None
+                ),
             )
             opponent_memory = match_memory.opponent_memory
             (
@@ -445,6 +456,23 @@ class StrategyEngine:
                 capability_supported_count=capability_supported_count,
                 capability_unsupported_count=capability_unsupported_count,
                 capability_log=match_memory.capability_matrix.log_entries(),
+                build_failure_count=len(
+                    match_memory.build_recovery.failures
+                ),
+                build_failure_log=(
+                    match_memory.build_recovery.log_entries(
+                        observation.time.round_no
+                    )
+                ),
+                build_cooldown_count=sum(
+                    observation.time.round_no
+                    <= record.cooldown_until_round
+                    for record in match_memory.build_recovery.failures
+                ),
+                build_reroute_count=sum(
+                    record.consecutive_failures >= 2
+                    for record in match_memory.build_recovery.failures
+                ),
             )
         except Exception:
             LOGGER.exception(
@@ -783,6 +811,11 @@ class StrategyEngine:
             if match_memory is not None
             else frozenset()
         )
+        build_recovery = (
+            match_memory.build_recovery
+            if match_memory is not None
+            else EMPTY_BUILD_RECOVERY_STATE
+        )
         self._telemetry.set(
             fortification_anchor_day=(
                 match_memory.fortification_day_no
@@ -865,6 +898,7 @@ class StrategyEngine:
                     else None
                 ),
                 previously_built_wall_sites,
+                build_recovery,
             )
             if decision != Decision():
                 self._telemetry.set(decision_source='phase2')
@@ -1292,6 +1326,7 @@ class StrategyEngine:
         market_view: MarketView | None = None,
         previous_decision: Decision | None = None,
         previously_built_wall_sites: frozenset[Position] = frozenset(),
+        build_recovery: BuildRecoveryState = EMPTY_BUILD_RECOVERY_STATE,
     ) -> Decision:
         kwargs: dict[str, object] = {}
         if self._phase2_accepts_intent:
@@ -1312,6 +1347,8 @@ class StrategyEngine:
             kwargs['previously_built_wall_sites'] = (
                 previously_built_wall_sites
             )
+        if self._phase2_accepts_build_recovery:
+            kwargs['build_recovery'] = build_recovery
         try:
             with self._telemetry.measure('phase2_ms'):
                 return self._phase2_planner(observation, **kwargs)

@@ -9,12 +9,14 @@ from future_war_agent.decision.actions import ActionKind
 from future_war_agent.decision.decision import Decision
 from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
+from .build_recovery import EMPTY_BUILD_RECOVERY_STATE, BuildRecoveryState
 from .defense import core_weapon_readiness
 from .items import count_item, has_item
-from .layout import DefensiveLayout
+from .layout import DefensiveLayout, WeaponSite
 from .market import MarketView, PriceDirection
 from .pathfinding import path_to_interaction
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
+from .rules import station_footprint
 from .world import WorldGrid
 
 
@@ -72,6 +74,7 @@ def generate_day_jobs(
     market_view: MarketView | None = None,
     previous_decision: Decision | None = None,
     previously_built_wall_sites: frozenset[Position] = frozenset(),
+    build_recovery: BuildRecoveryState = EMPTY_BUILD_RECOVERY_STATE,
     telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
 ) -> Mapping[int, tuple[Job, ...]]:
     priorities = intent.day_priorities
@@ -98,7 +101,54 @@ def generate_day_jobs(
                 continue
             missing_weapon_sites_list.append(site)
             missing_weapon_types[site.weapon_type] -= 1
-    missing_weapon_sites = tuple(missing_weapon_sites_list)
+    weapon_build_reroute_log: list[str] = []
+    resolved_weapon_sites: list[WeaponSite] = []
+    all_failed_build_positions = frozenset(
+        record.target for record in build_recovery.failures
+    )
+    occupied_build_targets = world.hard_blocked | world.soft_friendly
+    for site in missing_weapon_sites_list:
+        cooldown_targets = build_recovery.cooldown_targets(
+            site.weapon_type,
+            observation.time.round_no,
+        )
+        reroute_targets = build_recovery.reroute_targets(
+            site.weapon_type,
+            observation.time.round_no,
+        )
+        reroute_reason = None
+        if site.position in reroute_targets:
+            reroute_reason = 'repeated_failure'
+        elif site.position in occupied_build_targets:
+            reroute_reason = 'occupied'
+        elif site.position in cooldown_targets:
+            continue
+        if reroute_reason is None:
+            resolved_weapon_sites.append(site)
+            continue
+        alternative = _alternate_weapon_site(
+            world,
+            layout,
+            workers,
+            site,
+            excluded_positions=(
+                all_failed_build_positions | occupied_build_targets
+            ),
+        )
+        if alternative is None:
+            weapon_build_reroute_log.append(
+                f'{site.weapon_type}@({site.position.x},{site.position.y}):'
+                f'{reroute_reason}:no_alternative'
+            )
+            continue
+        resolved_weapon_sites.append(
+            WeaponSite(alternative, site.weapon_type)
+        )
+        weapon_build_reroute_log.append(
+            f'{site.weapon_type}@({site.position.x},{site.position.y})->'
+            f'({alternative.x},{alternative.y}):{reroute_reason}'
+        )
+    missing_weapon_sites = tuple(resolved_weapon_sites)
     required_weapons_before_walls = min(
         intent.build_plan.minimum_weapons_before_walls,
         len(layout.weapon_sites),
@@ -125,6 +175,11 @@ def generate_day_jobs(
         observation,
         previous_decision,
     )
+    recovery_wall_targets = (
+        build_recovery.cooldown_targets('wall', observation.time.round_no)
+        | build_recovery.reroute_targets('wall', observation.time.round_no)
+    )
+    failed_wall_targets = failed_wall_targets | recovery_wall_targets
     occupied_wall_targets = world.hard_blocked | world.soft_friendly
     wall_rank_by_position = {
         position: rank for rank, position in enumerate(layout.wall_sites)
@@ -393,8 +448,76 @@ def generate_day_jobs(
             wall_job_count=wall_job_count,
         ),
         wall_failed_build_log=failed_wall_log,
+        weapon_build_reroute_log=tuple(weapon_build_reroute_log[:8]),
     )
     return MappingProxyType(frozen)
+
+
+def _alternate_weapon_site(
+    world: WorldGrid,
+    layout: DefensiveLayout,
+    workers: tuple[UnitState, ...],
+    planned: WeaponSite,
+    *,
+    excluded_positions: frozenset[Position],
+) -> Position | None:
+    station = world.our_station()
+    if station is None or not workers:
+        return None
+    footprint = station_footprint(station.position, world.rules)
+    reserved_targets = {
+        *(site.position for site in layout.weapon_sites),
+        *layout.wall_sites,
+        *layout.controller_sites,
+    }
+    candidates: list[tuple[int, int, int, int, Position]] = []
+    for x in range(world.observation.width):
+        for y in range(world.observation.height):
+            position = Position(x, y)
+            if (
+                not world.is_geographic_land(position)
+                or min(
+                    position.chebyshev_distance(cell) for cell in footprint
+                ) != 1
+                or position in reserved_targets
+                or position in excluded_positions
+                or position in world.hard_blocked
+                or position in world.soft_friendly
+            ):
+                continue
+            controller_cells = tuple(
+                cell
+                for cell in world.interaction_cells(position)
+                if cell not in layout.wall_sites
+                and cell not in {
+                    site.position for site in layout.weapon_sites
+                }
+            )
+            if not controller_cells:
+                continue
+            costs = tuple(
+                path.cost
+                for worker in workers
+                if (
+                    path := path_to_interaction(
+                        world,
+                        worker.position,
+                        position,
+                    )
+                ) is not None
+            )
+            if not costs:
+                continue
+            candidates.append(
+                (
+                    min(costs),
+                    position.chebyshev_distance(planned.position),
+                    position.x,
+                    position.y,
+                    position,
+                )
+            )
+    return min(candidates)[-1] if candidates else None
 
 
 def _failed_wall_builds(
