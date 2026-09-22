@@ -1,4 +1,3 @@
-from collections import Counter
 from dataclasses import dataclass
 from enum import StrEnum
 from fractions import Fraction
@@ -6,6 +5,7 @@ from itertools import combinations
 
 from future_war_agent.protocol.models import Observation
 
+from .defense import core_weapon_readiness
 from .forecast import NightForecast, RiskLevel, classify_risk
 from .policy import BuildPlan
 from .rules import DEFAULT_RULES, RulesConfig
@@ -145,17 +145,13 @@ def _verified_actions(
 ) -> tuple[tuple[SafetyPlanAction, ...], bool]:
     if not build_plan.build_weapons:
         return (), False
-    living_counts = Counter(
-        unit.role_type
-        for unit in observation.our.units
-        if unit.health > 0
-    )
     actions: list[SafetyPlanAction] = []
     has_unverified_candidate = False
-    for weapon_type in build_plan.weapon_loadout:
-        if living_counts[weapon_type] > 0:
-            living_counts[weapon_type] -= 1
-            continue
+    readiness = core_weapon_readiness(
+        observation.our.units,
+        build_plan.weapon_loadout,
+    )
+    for weapon_type in readiness.missing_types:
         gain = _verified_weapon_gain(observation, weapon_type, config)
         if gain <= 0:
             has_unverified_candidate = True

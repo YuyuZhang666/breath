@@ -1,9 +1,9 @@
-from collections import Counter
 from dataclasses import dataclass
 
 from future_war_agent.protocol.models import Observation, UnitState
 from future_war_agent.protocol.time import Phase
 
+from .defense import core_weapon_readiness
 from .policy import DEFAULT_BUILD_PLAN, BuildPlan
 from .forecast import NightForecast, RiskLevel
 from .safety import CheapestSafePlan
@@ -71,13 +71,13 @@ def extract_features(
         station_health_loss = max(0, previous_station.health - station.health)
 
     living = tuple(unit for unit in observation.our.units if unit.health > 0)
-    weapon_counts = Counter(
-        unit.role_type for unit in living if unit.role_type in _WEAPON_ROLES
+    weapon_readiness = core_weapon_readiness(
+        observation.our.units,
+        build_plan.weapon_loadout,
     )
-    required_counts = Counter(build_plan.weapon_loadout)
     defense_complete = (
         not build_plan.build_weapons
-        or all(weapon_counts[name] >= count for name, count in required_counts.items())
+        or weapon_readiness.complete
     )
 
     targeted = tuple(

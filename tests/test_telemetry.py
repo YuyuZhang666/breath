@@ -24,7 +24,23 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.fallback_reason, 'normal')
         self.assertFalse(sample.timeout_prevented)
         self.assertEqual(sample.decision_source, 'safe')
+        self.assertEqual(sample.pre_validation_action_count, 0)
+        self.assertEqual(sample.post_validation_action_count, 0)
+        self.assertEqual(sample.serialized_action_count, 0)
         self.assertEqual(sample.response_action_count, 0)
+        self.assertEqual(sample.phase3_executed_level, 'none')
+        self.assertEqual(sample.phase3_skip_reason, 'none')
+        self.assertEqual(sample.phase3_completed_root_count, 0)
+        self.assertEqual(sample.forecast_generated_round, 0)
+        self.assertEqual(sample.forecast_updated_round, 0)
+        self.assertEqual(sample.forecast_age_rounds, 0)
+        self.assertEqual(sample.forecast_margin_source, 'none')
+        self.assertFalse(sample.forecast_conservative_bound)
+        self.assertEqual(sample.wall_plan_stage, 'unknown')
+        self.assertEqual(sample.wall_blocker, 'unknown')
+        self.assertEqual(sample.wall_job_count, 0)
+        self.assertEqual(sample.wall_failed_build_log, ())
+        self.assertTrue(sample.own_station_alive)
         self.assertEqual(sample.engine_lock_wait_ms, 0.0)
         self.assertFalse(sample.engine_lock_timed_out)
         self.assertEqual(sample.deadline_stage, 'none')
@@ -45,7 +61,19 @@ class TelemetryTests(unittest.TestCase):
             fallback_reason='deadline_low',
             timeout_prevented=True,
             decision_source='phase2',
+            pre_validation_action_count=3,
+            post_validation_action_count=2,
+            serialized_action_count=1,
             response_action_count=2,
+            phase3_executed_level='lite',
+            phase3_skip_reason='none',
+            phase3_completed_root_count=4,
+            forecast_generated_round=71,
+            forecast_updated_round=72,
+            forecast_age_rounds=1,
+            forecast_margin_source='conservative_bound',
+            forecast_conservative_bound=True,
+            own_station_alive=False,
             engine_lock_wait_ms=3.25,
             engine_lock_timed_out=True,
             deadline_stage='engine_lock',
@@ -66,7 +94,18 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.fallback_reason, 'deadline_low')
         self.assertTrue(sample.timeout_prevented)
         self.assertEqual(sample.decision_source, 'phase2')
+        self.assertEqual(sample.pre_validation_action_count, 3)
+        self.assertEqual(sample.post_validation_action_count, 2)
+        self.assertEqual(sample.serialized_action_count, 1)
         self.assertEqual(sample.response_action_count, 2)
+        self.assertEqual(sample.phase3_executed_level, 'lite')
+        self.assertEqual(sample.phase3_completed_root_count, 4)
+        self.assertEqual(sample.forecast_generated_round, 71)
+        self.assertEqual(sample.forecast_updated_round, 72)
+        self.assertEqual(sample.forecast_age_rounds, 1)
+        self.assertEqual(sample.forecast_margin_source, 'conservative_bound')
+        self.assertTrue(sample.forecast_conservative_bound)
+        self.assertFalse(sample.own_station_alive)
         self.assertEqual(sample.engine_lock_wait_ms, 3.25)
         self.assertTrue(sample.engine_lock_timed_out)
         self.assertEqual(sample.deadline_stage, 'engine_lock')
@@ -77,6 +116,9 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(payload['forecast_mode'], 'lightweight')
         self.assertEqual(payload['fallback_reason'], 'deadline_low')
         self.assertEqual(payload['response_action_count'], 2)
+        self.assertEqual(payload['pre_validation_action_count'], 3)
+        self.assertEqual(payload['phase3_executed_level'], 'lite')
+        self.assertTrue(payload['forecast_conservative_bound'])
         self.assertTrue(payload['engine_lock_timed_out'])
         self.assertEqual(payload['deadline_stage'], 'engine_lock')
         self.assertEqual(payload['emergency_fire_action_count'], 2)
@@ -132,6 +174,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertGreaterEqual(sample.phase2_ms, 0)
         self.assertGreaterEqual(sample.task_ms, 0)
         self.assertGreaterEqual(sample.validation_ms, 0)
+        self.assertEqual(sample.decision_source, 'phase2')
 
     def test_invalid_payload_records_fallback_without_breaking_schema(self) -> None:
         recorder = TelemetryRecorder()
@@ -168,6 +211,9 @@ class TelemetryTests(unittest.TestCase):
         sample = recorder.snapshot()[-1]
         self.assertEqual(sample.phase3_level, 'lite')
         self.assertEqual(sample.phase3_effective_level, 'lite')
+        self.assertEqual(sample.phase3_executed_level, 'lite')
+        self.assertEqual(sample.phase3_skip_reason, 'none')
+        self.assertGreater(sample.phase3_completed_root_count, 0)
         self.assertEqual(sample.compute_governor_action, 'normal')
         self.assertGreater(sample.governor_root_limit, 0)
         self.assertEqual(sample.governor_scenario_limit, 1)
@@ -195,6 +241,7 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(sample.phase2_5_fallback_count, 0)
         self.assertGreater(sample.phase2_5_combination_count, 0)
         self.assertGreater(sample.phase2_5_active_weapon_count, 0)
+        self.assertTrue(sample.phase2_5_weapon_log)
 
     def test_phase3_deadline_records_watchdog_and_fallback(self) -> None:
         day = parse_observation(
@@ -224,6 +271,8 @@ class TelemetryTests(unittest.TestCase):
         self.assertTrue(sample.watchdog_hit)
         self.assertTrue(sample.fallback_used)
         self.assertEqual(sample.phase3_fallback_count, 1)
+        self.assertEqual(sample.phase3_executed_level, 'none')
+        self.assertEqual(sample.phase3_skip_reason, 'phase3_timeout')
 
 
 if __name__ == '__main__':

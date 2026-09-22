@@ -35,6 +35,7 @@ class ComputeGovernorTests(unittest.TestCase):
         scenarios: int = 0,
         horizon: int = 0,
         watchdog: bool = False,
+        completed_phase3_ms: float | None = None,
     ):
         return self.governor.observe_turn(
             team,
@@ -46,6 +47,7 @@ class ComputeGovernorTests(unittest.TestCase):
             scenarios_per_root=scenarios,
             exact_horizon=horizon,
             watchdog_hit=watchdog,
+            completed_phase3_ms=completed_phase3_ms,
         )
 
     def plan(
@@ -90,6 +92,44 @@ class ComputeGovernorTests(unittest.TestCase):
         self.assertEqual(first.ewma_root_rollout_ms, 25.0)
         self.assertEqual(second.ewma_phase2_5_ms, 3.0)
         self.assertEqual(second.ewma_root_rollout_ms, 31.25)
+
+    def test_zero_complete_roots_do_not_poison_root_cost(self) -> None:
+        first = self.observe(
+            round_no=70,
+            phase3_ms=100.0,
+            roots=4,
+            scenarios=2,
+            horizon=4,
+        )
+
+        timed_out = self.observe(
+            round_no=71,
+            phase3_ms=350.0,
+            roots=0,
+            scenarios=0,
+            horizon=0,
+            watchdog=True,
+        )
+
+        self.assertEqual(first.ewma_root_rollout_ms, 25.0)
+        self.assertEqual(timed_out.ewma_root_rollout_ms, 25.0)
+        self.assertEqual(timed_out.last_scenarios_per_root, 2)
+        self.assertEqual(timed_out.last_exact_horizon, 4)
+        self.assertEqual(timed_out.last_phase3_ms, 350.0)
+        self.assertEqual(timed_out.halve_root_round, 72)
+
+    def test_failed_attempt_time_is_excluded_from_complete_root_sample(self) -> None:
+        state = self.observe(
+            round_no=71,
+            phase3_ms=450.0,
+            completed_phase3_ms=50.0,
+            roots=2,
+            scenarios=1,
+            horizon=2,
+        )
+
+        self.assertEqual(state.ewma_root_rollout_ms, 25.0)
+        self.assertEqual(state.last_phase3_ms, 450.0)
 
     def test_over_250_ms_halves_roots_only_on_next_round(self) -> None:
         self.observe(

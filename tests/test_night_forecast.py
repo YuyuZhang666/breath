@@ -13,10 +13,15 @@ from future_war_agent.strategy.forecast import (
 )
 from future_war_agent.strategy.simulation.config import Phase3Config
 from future_war_agent.strategy.simulation.errors import DeadlineExceeded
+from future_war_agent.strategy.simulation.errors import UnsupportedSimulation
 from tests.strategy_helpers import observation, robot, unit
 
 
 class NightForecastTests(unittest.TestCase):
+    def test_lightweight_forecast_rejects_missing_station(self) -> None:
+        with self.assertRaises(UnsupportedSimulation):
+            build_lightweight_forecast(observation(round_no=71))
+
     def test_full_forecast_honors_expired_deadline(self) -> None:
         with self.assertRaises(DeadlineExceeded):
             build_night_forecast(

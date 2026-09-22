@@ -31,6 +31,7 @@ def plan_turn(
     fortification_threats: tuple[Position, ...] = (),
     expected_wall_losses: int = 0,
     market_view: MarketView | None = None,
+    previous_decision: Decision | None = None,
 ) -> Decision:
     world = WorldGrid.from_observation(observation, rules)
     if not world.friendly_roles:
@@ -48,6 +49,7 @@ def plan_turn(
                 phase2_5_combination_count=plan.combinations_evaluated,
                 phase2_5_active_weapon_count=plan.active_weapon_count,
                 candidate_generation_ms=plan.candidate_generation_ms,
+                phase2_5_weapon_log=plan.weapon_log,
             )
             return plan.decision
         except UnsupportedSimulation:
@@ -83,6 +85,8 @@ def plan_turn(
         intent,
         expected_wall_losses=expected_wall_losses,
         market_view=market_view,
+        previous_decision=previous_decision,
+        telemetry=telemetry,
     )
     candidates = {
         role.unit_id: candidates_for_jobs(

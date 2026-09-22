@@ -37,7 +37,7 @@ class BuildPlan:
     wall_site_limit: int | None = None
     build_weapons: bool = True
     build_walls: bool = True
-    minimum_weapons_before_walls: int = 3
+    minimum_weapons_before_walls: int = 1
     opening_critical_wall_count: int = 3
     critical_wall_priority_boost: int = 75
     threat_wall_priority_boost: int = 30

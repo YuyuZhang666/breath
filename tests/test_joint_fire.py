@@ -179,6 +179,35 @@ class JointFireTests(unittest.TestCase):
 
         self.assertEqual(first, second)
 
+    def test_weapon_diagnostics_explain_selected_and_blocked_fire(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(101, 2, 5, 'worker'),
+                unit(102, 2, 8, 'worker'),
+                unit(200, 8, 8, 'station', health=1000, level=1),
+                weapon(301, 3, 5, 'gatling', attack_power=10),
+                weapon(302, 3, 8, 'rocket', attack_power=20, cooldown=2),
+            ),
+            robots=(robot(501, 6, 5),),
+        )
+        assignments = (
+            ControllerAssignment(101, 301, Position(2, 5), 0),
+            ControllerAssignment(102, 302, Position(2, 8), 0),
+        )
+
+        plan = plan_joint_fire(
+            observed,
+            WorldGrid.from_observation(observed),
+            controller_assignments=assignments,
+        )
+
+        self.assertEqual(len(plan.weapon_log), 2)
+        self.assertIn('id=301', plan.weapon_log[0])
+        self.assertIn('selected=attack', plan.weapon_log[0])
+        self.assertIn('id=302', plan.weapon_log[1])
+        self.assertIn('reason=cooldown', plan.weapon_log[1])
+
     def test_default_fallback_does_not_attack_other_team_robot(self) -> None:
         observed = observation(
             round_no=71,

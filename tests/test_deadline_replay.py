@@ -472,7 +472,11 @@ class DeadlineNightReplayTests(unittest.TestCase):
                 any(
                     command['action'] == 'attack'
                     for command in response['roleCommandMap'].values()
-                )
+                ),
+                msg=(
+                    f'round {round_no} response={response} '
+                    f'telemetry={telemetry.snapshot()[-1]}'
+                ),
             )
 
         samples = telemetry.snapshot()

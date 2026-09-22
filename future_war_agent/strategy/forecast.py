@@ -13,7 +13,7 @@ from .night import ControllerAssignment, assign_controllers
 from .policy import StrategyProfile
 from .rules import station_footprint
 from .simulation.config import DEFAULT_PHASE3_CONFIG, Phase3Config, ROBOT_SPECS
-from .simulation.errors import DeadlineExceeded
+from .simulation.errors import DeadlineExceeded, UnsupportedSimulation
 from .simulation.future import choose_future_action
 from .simulation.kernel import step_simulation
 from .simulation.robots import RobotPolicy
@@ -293,6 +293,15 @@ def build_lightweight_forecast(
 
     if observation.time.phase is not Phase.NIGHT:
         raise ValueError('NightForecast requires a night observation')
+    living_stations = tuple(
+        unit
+        for unit in observation.our.units
+        if unit.role_type == 'station' and unit.health > 0
+    )
+    if len(living_stations) != 1:
+        raise UnsupportedSimulation(
+            'lightweight forecast requires exactly one living station'
+        )
     check_deadline()
     station = _living_unit(observation, 'station')
     station_hp = station.health if station is not None else 0
@@ -439,6 +448,15 @@ def update_forecast_incrementally(
     *,
     previous_decision: Decision | None = None,
 ) -> NightForecast:
+    living_stations = tuple(
+        unit
+        for unit in observation.our.units
+        if unit.role_type == 'station' and unit.health > 0
+    )
+    if len(living_stations) != 1:
+        raise UnsupportedSimulation(
+            'incremental forecast requires exactly one living station'
+        )
     station = _living_unit(observation, 'station')
     current_hp = station.health if station is not None else 0
     actual_damage = max(0, cached.observed_station_hp - current_hp)

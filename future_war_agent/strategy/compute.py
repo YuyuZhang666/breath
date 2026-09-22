@@ -86,6 +86,7 @@ class ComputeTurnUsage:
     scenarios_per_root: int = 0
     exact_horizon: int = 0
     watchdog_hit: bool = False
+    completed_phase3_ms: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +237,7 @@ class ComputeGovernor:
         scenarios_per_root: int,
         exact_horizon: int,
         watchdog_hit: bool,
+        completed_phase3_ms: float | None = None,
     ) -> ComputeGovernorState:
         if not team_id.strip():
             return ComputeGovernorState()
@@ -253,11 +255,17 @@ class ComputeGovernor:
             last_scenarios = state.last_scenarios_per_root
             last_horizon = state.last_exact_horizon
             if phase3_ms > 0:
-                root_sample = phase3_ms / max(1, roots_evaluated)
-                root_ewma = self._ewma(root_ewma, root_sample)
                 last_phase3_ms = phase3_ms
-                last_scenarios = max(1, scenarios_per_root)
-                last_horizon = max(1, exact_horizon)
+                completed_ms = (
+                    phase3_ms
+                    if completed_phase3_ms is None
+                    else completed_phase3_ms
+                )
+                if roots_evaluated > 0 and completed_ms > 0:
+                    root_sample = completed_ms / roots_evaluated
+                    root_ewma = self._ewma(root_ewma, root_sample)
+                    last_scenarios = max(1, scenarios_per_root)
+                    last_horizon = max(1, exact_horizon)
                 halve_round = (
                     round_no + 1
                     if phase3_ms > self._config.slow_phase3_ms
