@@ -429,6 +429,13 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertEqual(len(phase2.observations), 2)
         sample = telemetry.snapshot()[-1]
         self.assertEqual(sample.phase3_level, 'full')
+        self.assertEqual(sample.phase3_effective_level, 'full')
+        self.assertEqual(sample.phase3_executed_level, 'lite')
+        self.assertEqual(sample.phase3_skip_reason, 'none')
+        self.assertEqual(
+            sample.phase3_completed_root_count,
+            result.stats.roots_evaluated,
+        )
         self.assertEqual(sample.phase3_fallback_count, 1)
         self.assertTrue(sample.watchdog_hit)
         self.assertTrue(sample.fallback_used)
@@ -527,6 +534,47 @@ class StrategyEngineTests(unittest.TestCase):
 
         self.assertIs(decision, phase2.decisions[-1])
         self.assertEqual(search.calls, [])
+
+    def test_destroyed_own_station_skips_forecast_and_phase3(self) -> None:
+        phase2 = Phase2Spy()
+        search = SearchSpy()
+        telemetry = TelemetryRecorder()
+
+        def forecaster(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError('forecast must not run after station destruction')
+
+        engine = StrategyEngine(
+            phase2_planner=phase2,
+            night_searcher=search,
+            night_forecaster=forecaster,
+            telemetry=telemetry,
+            clock=lambda: 100.0,
+        )
+        destroyed = replace(
+            self.night,
+            our=replace(
+                self.night.our,
+                units=tuple(
+                    replace(item, health=0)
+                    if item.role_type == 'station'
+                    else item
+                    for item in self.night.our.units
+                ),
+            ),
+        )
+
+        engine.plan(self.day)
+        engine.plan(destroyed)
+
+        sample = telemetry.snapshot()[-1]
+        self.assertEqual(search.calls, [])
+        self.assertFalse(sample.own_station_alive)
+        self.assertEqual(sample.own_station_status, 'destroyed')
+        self.assertEqual(sample.forecast_mode, 'skipped')
+        self.assertEqual(sample.forecast_reason, 'own_station_destroyed')
+        self.assertEqual(sample.phase3_executed_level, 'none')
+        self.assertEqual(sample.phase3_skip_reason, 'own_station_destroyed')
         self.assertGreater(
             phase2.intents[-1].item_policy.medicine_health_threshold,
             0,

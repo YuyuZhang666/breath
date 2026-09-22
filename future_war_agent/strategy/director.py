@@ -1,9 +1,9 @@
-from collections import Counter
 from dataclasses import dataclass, replace
 
 from future_war_agent.protocol.models import Observation
 from future_war_agent.protocol.time import Phase
 
+from .defense import core_weapon_readiness
 from .features import StrategyFeatures, extract_features
 from .forecast import NightForecast, RiskLevel
 from .policy import (
@@ -355,17 +355,13 @@ def _apply_opening_defense_reserve(
     ):
         return intent
 
-    living_counts = Counter(
-        unit.role_type
-        for unit in observation.our.units
-        if unit.health > 0
+    readiness = core_weapon_readiness(
+        observation.our.units,
+        intent.build_plan.weapon_loadout,
     )
-    missing: set[tuple[str, str]] = set()
-    for weapon_type in intent.build_plan.weapon_loadout:
-        if living_counts[weapon_type] > 0:
-            living_counts[weapon_type] -= 1
-        else:
-            missing.add(('build', weapon_type))
+    missing = {
+        ('build', weapon_type) for weapon_type in readiness.missing_types
+    }
     if not missing:
         return intent
     return replace(

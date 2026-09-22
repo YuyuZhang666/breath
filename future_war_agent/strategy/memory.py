@@ -78,6 +78,7 @@ class MatchMemoryStore:
         *,
         certificate: RobotWaveSafetyCertificate | None = None,
         forecast: NightForecast | None = None,
+        clear_forecast: bool = False,
     ) -> MatchMemory:
         team_id = observation.our.team_id
         previous = self.get(team_id)
@@ -87,6 +88,7 @@ class MatchMemoryStore:
             and previous.last_fingerprint == fingerprint
             and certificate is None
             and forecast is None
+            and not clear_forecast
         ):
             return previous
         memory = update_match_memory(
@@ -94,6 +96,7 @@ class MatchMemoryStore:
             observation,
             certificate=certificate,
             forecast=forecast,
+            clear_forecast=clear_forecast,
             capability_matrix=self._capability_matrix,
         )
         if team_id.strip():
@@ -104,6 +107,8 @@ class MatchMemoryStore:
 def canonical_position(
     observation: Observation,
     position: Position,
+    *,
+    side_key: str | None = None,
 ) -> Position:
     station = next(
         (
@@ -113,12 +118,17 @@ def canonical_position(
         ),
         None,
     )
-    if station is None:
+    if side_key == 'rotated':
+        rotate = True
+    elif side_key == 'native':
+        rotate = False
+    elif station is None:
         return position
-    rotate = (
-        station.position.x * 2 < observation.width - 1
-        or station.position.y * 2 < observation.height - 1
-    )
+    else:
+        rotate = (
+            station.position.x * 2 < observation.width - 1
+            or station.position.y * 2 < observation.height - 1
+        )
     if not rotate:
         return position
     return Position(
@@ -151,6 +161,7 @@ def update_match_memory(
     *,
     certificate: RobotWaveSafetyCertificate | None = None,
     forecast: NightForecast | None = None,
+    clear_forecast: bool = False,
     capability_matrix: CapabilityMatrix | None = None,
 ) -> MatchMemory:
     team_id = observation.our.team_id
@@ -167,6 +178,12 @@ def update_match_memory(
         previous
         if previous is not None
         else MatchMemory(team_id=team_id, capability_matrix=matrix)
+    )
+    observed_side_key = observation_side_key(observation)
+    effective_side_key = (
+        prior.opponent_memory.side_key
+        if observed_side_key == 'unknown' and prior.opponent_memory.side_key
+        else observed_side_key
     )
     fingerprint = observation_fingerprint(observation)
     same_observation = prior.last_fingerprint == fingerprint
@@ -190,14 +207,24 @@ def update_match_memory(
     belief = prior.belief
     opponent_memory = prior.opponent_memory
     zones = prior.zones
+    side_changed = (
+        bool(prior.opponent_memory.side_key)
+        and prior.opponent_memory.side_key != 'unknown'
+        and effective_side_key != 'unknown'
+        and effective_side_key != prior.opponent_memory.side_key
+    )
     recent_threat_positions = (
-        () if rollback else prior.recent_threat_positions
+        () if rollback or side_changed else prior.recent_threat_positions
     )
     if not same_observation:
         belief = update_opponent_belief(
             prior.belief,
             observation,
-            normalize=lambda position: canonical_position(observation, position),
+            normalize=lambda position: canonical_position(
+                observation,
+                position,
+                side_key=effective_side_key,
+            ),
             tick=observation_tick,
         )
         opponent_memory = update_opponent_memory(
@@ -205,16 +232,21 @@ def update_match_memory(
             observation,
             epoch=epoch,
             observation_tick=observation_tick,
-            side_key=observation_side_key(observation),
+            side_key=effective_side_key,
             normalize=lambda position: canonical_position(
                 observation,
                 position,
+                side_key=effective_side_key,
             ),
         )
         normalized_zones = {
             NormalizedZone(
                 neutral_type=zone.neutral_type.strip(),
-                position=canonical_position(observation, zone.position),
+                position=canonical_position(
+                    observation,
+                    zone.position,
+                    side_key=effective_side_key,
+                ),
             )
             for zone in observation.zones
         }
@@ -277,6 +309,8 @@ def update_match_memory(
         wave_summaries=summaries,
         recent_threat_positions=recent_threat_positions,
         night_forecast=(
-            forecast if forecast is not None else prior.night_forecast
+            None
+            if clear_forecast
+            else forecast if forecast is not None else prior.night_forecast
         ),
     )

@@ -36,6 +36,54 @@ class MatchMemoryTests(unittest.TestCase):
             Position(2, 3),
         )
 
+    def test_destroyed_station_retains_the_last_known_coordinate_frame(self) -> None:
+        store = MatchMemoryStore()
+        first = observation(
+            round_no=1,
+            our_units=(unit(10, 2, 2, 'station', level=1),),
+            enemy_units=(unit(90, 12, 12, 'station', level=1),),
+        )
+        after_destruction = observation(
+            round_no=2,
+            our_units=(),
+            enemy_units=(unit(90, 12, 12, 'station', level=1),),
+        )
+
+        store.observe(first)
+        memory = store.observe(after_destruction)
+
+        self.assertEqual(memory.opponent_memory.side_key, 'rotated')
+        self.assertEqual(
+            memory.opponent_memory.structures[0].position,
+            Position(2, 2),
+        )
+        self.assertIn(
+            'visibility=current',
+            memory.opponent_memory.structure_log_entries(current_round=2)[0],
+        )
+
+    def test_structure_log_marks_cached_sightings_as_last_seen(self) -> None:
+        store = MatchMemoryStore()
+        store.observe(
+            observation(
+                round_no=1,
+                our_units=(unit(10, 2, 2, 'station', level=1),),
+                enemy_units=(unit(90, 12, 12, 'station', level=1),),
+            )
+        )
+
+        memory = store.observe(
+            observation(
+                round_no=2,
+                our_units=(unit(10, 2, 2, 'station', level=1),),
+            )
+        )
+
+        self.assertIn(
+            'visibility=last_seen',
+            memory.opponent_memory.structure_log_entries(current_round=2)[0],
+        )
+
     def test_store_reuses_belief_across_side_swap_and_round_gap(self) -> None:
         store = MatchMemoryStore()
         first = observation(

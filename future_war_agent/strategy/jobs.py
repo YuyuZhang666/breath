@@ -5,7 +5,11 @@ from types import MappingProxyType
 from typing import Mapping
 
 from future_war_agent.protocol.models import Observation, Position, UnitState
+from future_war_agent.decision.actions import ActionKind
+from future_war_agent.decision.decision import Decision
+from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
+from .defense import core_weapon_readiness
 from .items import count_item, has_item
 from .layout import DefensiveLayout
 from .market import MarketView, PriceDirection
@@ -66,6 +70,8 @@ def generate_day_jobs(
     *,
     expected_wall_losses: int = 0,
     market_view: MarketView | None = None,
+    previous_decision: Decision | None = None,
+    telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
 ) -> Mapping[int, tuple[Job, ...]]:
     priorities = intent.day_priorities
     roles = tuple(sorted(world.friendly_roles, key=lambda value: value.unit_id))
@@ -79,23 +85,22 @@ def generate_day_jobs(
         intent,
     )
 
-    existing_weapon_sites = {
-        (weapon.position, weapon.role_type) for weapon in world.weapons
-    }
-    missing_weapon_sites = tuple(
-        site
-        for site in layout.weapon_sites
-        if (site.position, site.weapon_type) not in existing_weapon_sites
-    ) if intent.build_plan.build_weapons else ()
-    built_planned_weapon_count = len(layout.weapon_sites) - len(
-        missing_weapon_sites
+    weapon_readiness = core_weapon_readiness(
+        observation.our.units,
+        intent.build_plan.weapon_loadout,
     )
+    missing_weapon_types = Counter(weapon_readiness.missing_types)
+    missing_weapon_sites_list = []
+    if intent.build_plan.build_weapons:
+        for site in layout.weapon_sites:
+            if missing_weapon_types[site.weapon_type] <= 0:
+                continue
+            missing_weapon_sites_list.append(site)
+            missing_weapon_types[site.weapon_type] -= 1
+    missing_weapon_sites = tuple(missing_weapon_sites_list)
     required_weapons_before_walls = min(
         intent.build_plan.minimum_weapons_before_walls,
         len(layout.weapon_sites),
-    )
-    defense_started = (
-        built_planned_weapon_count >= required_weapons_before_walls
     )
     existing_wall_positions = {wall.position for wall in world.walls}
     missing_wall_sites = tuple(
@@ -103,6 +108,23 @@ def generate_day_jobs(
         for position in layout.wall_sites
         if position not in existing_wall_positions
     ) if intent.build_plan.build_walls else ()
+    existing_planned_wall_count = len(layout.wall_sites) - len(missing_wall_sites)
+    defense_started = (
+        weapon_readiness.ready_count >= required_weapons_before_walls
+        or observation.time.day_no > 1
+        or existing_planned_wall_count > 0
+    )
+    failed_wall_targets, failed_wall_log = _failed_wall_builds(
+        observation,
+        previous_decision,
+    )
+    occupied_wall_targets = world.hard_blocked | world.soft_friendly
+    eligible_wall_sites = tuple(
+        position
+        for position in missing_wall_sites
+        if position not in occupied_wall_targets
+        and position not in failed_wall_targets
+    )
     stone_reserve = calculate_stone_reserve(
         world,
         layout,
@@ -118,6 +140,24 @@ def generate_day_jobs(
     current_stone = sum(
         count_item(worker.backpack, world.rules.wall_material)
         for worker in workers
+    )
+    reachable_wall_sites_by_worker = {
+        worker.unit_id: tuple(
+            position
+            for position in eligible_wall_sites
+            if path_to_interaction(world, worker.position, position) is not None
+        )
+        for worker in workers
+    }
+    actionable_wall_sites = {
+        position
+        for worker in workers
+        if count_item(worker.backpack, world.rules.wall_material) > 0
+        for position in reachable_wall_sites_by_worker[worker.unit_id]
+    }
+    has_actionable_stone_worker = bool(actionable_wall_sites)
+    missing_critical_count = sum(
+        position in missing_wall_sites for position in layout.critical_wall_sites
     )
 
     for role in roles:
@@ -177,7 +217,9 @@ def generate_day_jobs(
         if defense_started and backpack[world.rules.wall_material] > 0:
             critical_sites = set(layout.critical_wall_sites)
             for wall_rank, position in enumerate(
-                missing_wall_sites[: intent.build_plan.max_wall_job_candidates]
+                reachable_wall_sites_by_worker[worker.unit_id][
+                    : intent.build_plan.max_wall_job_candidates
+                ]
             ):
                 path = path_to_interaction(world, worker.position, position)
                 if path is not None:
@@ -207,6 +249,15 @@ def generate_day_jobs(
             bool(missing_weapon_sites)
             and observation.our.gold < world.rules.weapon_build_cost
         )
+        worker_reaches_wall = bool(
+            reachable_wall_sites_by_worker[worker.unit_id]
+        )
+        defense_material_needed = (
+            defense_started
+            and missing_critical_count > 0
+            and worker_reaches_wall
+            and backpack[world.rules.wall_material] == 0
+        )
         sale_needed = near_full or defense_funding_needed
         if sale_needed:
             _add_sell_jobs(
@@ -220,7 +271,9 @@ def generate_day_jobs(
                     0,
                 ),
                 market_view=market_view,
-                allow_held_sale=defense_funding_needed,
+                allow_held_sale=(
+                    defense_funding_needed or defense_material_needed
+                ),
             )
         if worker.unit_id in medicine_buyer_ids:
             _add_medicine_purchase_jobs(
@@ -237,8 +290,13 @@ def generate_day_jobs(
                 observation,
                 world,
                 stone_needed=(
-                    bool(missing_wall_sites)
-                    and current_stone < stone_reserve
+                    defense_started
+                    and bool(missing_wall_sites)
+                    and worker_reaches_wall
+                    and (
+                        current_stone < stone_reserve
+                        or not has_actionable_stone_worker
+                    )
                 ),
                 priority=priorities.collect,
                 market_view=market_view,
@@ -273,7 +331,130 @@ def generate_day_jobs(
         role_id: tuple(sorted(jobs, key=lambda value: value.sort_key))
         for role_id, jobs in result.items()
     }
+    wall_job_count = sum(
+        job.kind is JobKind.BUILD_WALL
+        for role_jobs in frozen.values()
+        for job in role_jobs
+    )
+    telemetry.set(
+        wall_plan_stage=_wall_plan_stage(
+            observation,
+            intent,
+            layout,
+            weapon_readiness.ready_count,
+            weapon_readiness.required_count,
+            defense_started,
+            missing_wall_sites,
+            missing_critical_count,
+        ),
+        core_weapon_ready_count=weapon_readiness.ready_count,
+        core_weapon_required_count=weapon_readiness.required_count,
+        planned_wall_count=len(layout.wall_sites),
+        existing_planned_wall_count=existing_planned_wall_count,
+        missing_wall_count=len(missing_wall_sites),
+        missing_critical_wall_count=missing_critical_count,
+        actionable_wall_count=len(actionable_wall_sites),
+        wall_job_count=wall_job_count,
+        worker_stone_count=current_stone,
+        stone_reserve=stone_reserve,
+        wall_blocker=_wall_blocker(
+            intent=intent,
+            layout=layout,
+            workers=workers,
+            defense_started=defense_started,
+            missing_wall_sites=missing_wall_sites,
+            eligible_wall_sites=eligible_wall_sites,
+            failed_wall_targets=failed_wall_targets,
+            current_stone=current_stone,
+            wall_job_count=wall_job_count,
+        ),
+        wall_failed_build_log=failed_wall_log,
+    )
     return MappingProxyType(frozen)
+
+
+def _failed_wall_builds(
+    observation: Observation,
+    previous_decision: Decision | None,
+) -> tuple[frozenset[Position], tuple[str, ...]]:
+    if previous_decision is None:
+        return frozenset(), ()
+    failed: set[Position] = set()
+    log: list[str] = []
+    for actor_id, succeeded in sorted(observation.last_action_results.items()):
+        action = previous_decision.commands.get(actor_id)
+        if (
+            succeeded
+            or action is None
+            or action.kind is not ActionKind.BUILD
+            or action.name != 'wall'
+            or len(action.target_positions) != 1
+        ):
+            continue
+        target = action.target_positions[0]
+        failed.add(target)
+        log.append(f'actor={actor_id}:wall@({target.x},{target.y}):failed')
+    return frozenset(failed), tuple(log[:8])
+
+
+def _wall_plan_stage(
+    observation: Observation,
+    intent: StrategicIntent,
+    layout: DefensiveLayout,
+    ready_weapons: int,
+    required_weapons: int,
+    defense_started: bool,
+    missing_wall_sites: tuple[Position, ...],
+    missing_critical_count: int,
+) -> str:
+    if not intent.build_plan.build_walls:
+        return 'disabled'
+    if not layout.wall_sites:
+        return 'no_planned_sites'
+    if not missing_wall_sites:
+        return 'complete'
+    if not defense_started:
+        return 'waiting_for_first_weapon'
+    if missing_critical_count:
+        return (
+            'daily_critical_rebuild'
+            if observation.time.day_no > 1
+            else 'opening_critical'
+        )
+    if ready_weapons < required_weapons:
+        return 'complete_core_weapons'
+    return 'daily_infill'
+
+
+def _wall_blocker(
+    *,
+    intent: StrategicIntent,
+    layout: DefensiveLayout,
+    workers: tuple[UnitState, ...],
+    defense_started: bool,
+    missing_wall_sites: tuple[Position, ...],
+    eligible_wall_sites: tuple[Position, ...],
+    failed_wall_targets: frozenset[Position],
+    current_stone: int,
+    wall_job_count: int,
+) -> str:
+    if not intent.build_plan.build_walls:
+        return 'walls_disabled'
+    if not layout.wall_sites:
+        return 'no_planned_sites'
+    if not missing_wall_sites:
+        return 'none'
+    if not workers:
+        return 'no_workers'
+    if not defense_started:
+        return 'waiting_for_first_weapon'
+    if current_stone <= 0:
+        return 'worker_without_stone'
+    if failed_wall_targets and not eligible_wall_sites:
+        return 'failed_build_cooldown'
+    if not eligible_wall_sites or wall_job_count <= 0:
+        return 'blocked_or_unreachable'
+    return 'none'
 
 
 def _add_recall_jobs(

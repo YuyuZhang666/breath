@@ -150,23 +150,33 @@ class OpponentMemory:
     def last_observed_damage(self) -> int:
         return self.damage_patterns[-1].total_health_loss if self.damage_patterns else 0
 
-    def structure_log_entries(self) -> tuple[str, ...]:
+    def structure_log_entries(
+        self,
+        *,
+        current_round: int | None = None,
+    ) -> tuple[str, ...]:
         return tuple(
             (
                 f'{item.unit_id}:{item.role_type}:'
                 f'{item.position.x},{item.position.y}:'
                 f'hp={item.health}:level={item.level}:'
-                f'round={item.last_seen_round}'
+                f'round={item.last_seen_round}:'
+                f'visibility={_visibility(item.last_seen_round, current_round)}'
             )
             for item in self.structures
         )
 
-    def role_log_entries(self) -> tuple[str, ...]:
+    def role_log_entries(
+        self,
+        *,
+        current_round: int | None = None,
+    ) -> tuple[str, ...]:
         return tuple(
             (
                 f'{item.unit_id}:{item.role_type}:'
                 f'{item.position.x},{item.position.y}:'
-                f'hp={item.health}:round={item.last_seen_round}'
+                f'hp={item.health}:round={item.last_seen_round}:'
+                f'visibility={_visibility(item.last_seen_round, current_round)}'
             )
             for item in self.last_visible_roles
         )
@@ -218,6 +228,12 @@ class OpponentMemory:
 
 
 PositionNormalizer = Callable[[Position], Position]
+
+
+def _visibility(last_seen_round: int, current_round: int | None) -> str:
+    if current_round is None:
+        return 'unknown'
+    return 'current' if last_seen_round == current_round else 'last_seen'
 
 
 def update_opponent_memory(

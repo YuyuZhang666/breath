@@ -1,5 +1,7 @@
 import unittest
 
+from future_war_agent.decision.actions import Action
+from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Position, ShopItem, Zone
 from future_war_agent.strategy.jobs import (
     JobKind,
@@ -14,6 +16,7 @@ from future_war_agent.strategy.policy import (
     StrategicIntent,
 )
 from future_war_agent.strategy.world import WorldGrid
+from future_war_agent.telemetry import TelemetryRecorder
 from tests.strategy_helpers import observation, robot, unit
 
 
@@ -226,7 +229,7 @@ class DayJobTests(unittest.TestCase):
             {job.kind for job in jobs[10010]},
         )
 
-    def test_remaining_core_weapons_precede_opening_walls(self) -> None:
+    def test_one_off_plan_core_weapon_opens_critical_walls(self) -> None:
         observed = observation(
             our_units=(
                 unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
@@ -240,11 +243,114 @@ class DayJobTests(unittest.TestCase):
 
         jobs = generate_day_jobs(observed, world, layout)
 
-        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
-        self.assertNotIn(
-            JobKind.BUILD_WALL,
-            {job.kind for job in jobs[10010]},
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertIn(jobs[10010][0].target, layout.critical_wall_sites)
+
+    def test_day_two_rebuilds_critical_walls_even_if_weapons_were_lost(
+        self,
+    ) -> None:
+        observed = observation(
+            round_no=131,
+            our_units=(
+                unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            gold=75,
         )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+        recorder = TelemetryRecorder()
+        token = recorder.begin()
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            layout,
+            telemetry=recorder,
+        )
+        sample = recorder.finish(token)
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertIn(jobs[10010][0].target, layout.critical_wall_sites)
+        self.assertIsNotNone(sample)
+        self.assertEqual(sample.wall_plan_stage, 'daily_critical_rebuild')
+        self.assertEqual(sample.wall_blocker, 'none')
+        self.assertEqual(sample.core_weapon_ready_count, 0)
+        self.assertGreater(sample.wall_job_count, 0)
+
+    def test_occupied_front_candidates_do_not_starve_later_wall_sites(
+        self,
+    ) -> None:
+        base_units = (
+            unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+            unit(10013, 5, 5, 'station', level=1),
+            unit(10020, 7, 7, 'gatling', level=1),
+        )
+        initial = observation(our_units=base_units, gold=75)
+        initial_layout = build_defensive_layout(
+            WorldGrid.from_observation(initial)
+        )
+        occupied = initial_layout.wall_sites[:4]
+        blockers = tuple(
+            unit(11000 + index, site.x, site.y, 'pioneer')
+            for index, site in enumerate(occupied)
+        )
+        observed = observation(
+            our_units=base_units + blockers,
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+
+        jobs = generate_day_jobs(observed, world, layout)
+        wall_jobs = tuple(
+            job for job in jobs[10010] if job.kind is JobKind.BUILD_WALL
+        )
+
+        self.assertTrue(wall_jobs)
+        self.assertNotIn(wall_jobs[0].target, occupied)
+        self.assertIn(wall_jobs[0].target, layout.wall_sites[4:])
+
+    def test_failed_wall_target_cools_down_and_next_gap_is_used(self) -> None:
+        units = (
+            unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+            unit(10013, 5, 5, 'station', level=1),
+            unit(10020, 7, 7, 'gatling', level=1),
+        )
+        initial = observation(our_units=units, gold=75)
+        initial_world = WorldGrid.from_observation(initial)
+        initial_layout = build_defensive_layout(initial_world)
+        failed_target = initial_layout.critical_wall_sites[0]
+        previous = Decision(
+            commands={10010: Action.build('wall', failed_target)}
+        )
+        observed = observation(
+            round_no=2,
+            our_units=units,
+            gold=75,
+            last_action_results={10010: False},
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+        recorder = TelemetryRecorder()
+        token = recorder.begin()
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            layout,
+            previous_decision=previous,
+            telemetry=recorder,
+        )
+        sample = recorder.finish(token)
+        wall_jobs = tuple(
+            job for job in jobs[10010] if job.kind is JobKind.BUILD_WALL
+        )
+
+        self.assertTrue(wall_jobs)
+        self.assertNotIn(failed_target, {job.target for job in wall_jobs})
+        self.assertIsNotNone(sample)
+        self.assertEqual(len(sample.wall_failed_build_log), 1)
 
     def test_critical_opening_walls_start_after_core_weapons(self) -> None:
         observed = observation(

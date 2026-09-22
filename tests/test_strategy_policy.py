@@ -21,6 +21,8 @@ class StrategyPolicyTests(unittest.TestCase):
             DEFAULT_BUILD_PLAN.weapon_loadout,
             ("gatling", "railgun", "rocket"),
         )
+        self.assertEqual(DEFAULT_BUILD_PLAN.minimum_weapons_before_walls, 1)
+        self.assertEqual(DEFAULT_BUILD_PLAN.opening_critical_wall_count, 3)
         self.assertEqual(DEFAULT_STRATEGIC_INTENT.profile, StrategyProfile.ECONOMY)
         self.assertEqual(DEFAULT_STRATEGIC_INTENT.gold_reserve, 0)
         self.assertEqual(DEFAULT_STRATEGIC_INTENT.item_policy.medicine_stock, 0)

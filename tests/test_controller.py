@@ -57,6 +57,31 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(response["roleCommandMap"]["10010"]["action"], "move")
 
+    def test_action_counts_cover_validation_and_serialization_boundaries(self) -> None:
+        telemetry = TelemetryRecorder()
+
+        def planner(_: Observation) -> Decision:
+            return Decision(
+                commands={
+                    10010: Action.move(Position(5, 24)),
+                    99999: Action.move(Position(1, 1)),
+                }
+            )
+
+        response = handle_payload(
+            self.payload,
+            planner=planner,
+            telemetry=telemetry,
+        )
+
+        sample = telemetry.snapshot()[-1]
+        self.assertEqual(sample.pre_validation_action_count, 2)
+        self.assertEqual(sample.post_validation_action_count, 1)
+        self.assertEqual(sample.serialized_action_count, 1)
+        self.assertEqual(sample.response_action_count, 1)
+        self.assertTrue(sample.validated_weapon_action_log)
+        self.assertEqual(set(response['roleCommandMap']), {'10010'})
+
     def test_request_budget_starts_before_parser_and_reaches_engine(self) -> None:
         starts: list[float] = []
 

@@ -23,6 +23,8 @@ RESPONSE_BUDGET_SECONDS = 3.5
 COMPUTE_BUDGET_SECONDS = 3.0
 
 DEFAULT_STRATEGY_ENGINE = StrategyEngine()
+_WEAPON_TYPES = frozenset({'gatling', 'railgun', 'rocket'})
+_WEAPON_LOG_LIMIT = 16
 
 
 def default_planner(
@@ -86,20 +88,35 @@ def handle_payload(
         if _accepts_keyword(planner, 'request_started_at'):
             planner_kwargs['request_started_at'] = request_budget.started_at
         decision = planner(observation, **planner_kwargs)
+        telemetry.set(pre_validation_action_count=len(decision.commands))
         if request_budget.compute_exhausted():
             _record_deadline_fallback(telemetry)
             return fallback_payload
         with telemetry.measure('validation_ms'):
             validated = validate_decision(observation, decision)
+        telemetry.set(
+            post_validation_action_count=len(validated.commands),
+            validated_weapon_action_log=_validated_weapon_action_log(
+                observation,
+                validated,
+            ),
+        )
         if request_budget.response_exhausted():
             _record_deadline_fallback(telemetry)
             return fallback_payload
         with telemetry.measure('serialization_ms'):
             response = decision_to_payload(validated)
+        serialized_actions = response.get('roleCommandMap', {})
+        serialized_action_count = (
+            len(serialized_actions)
+            if isinstance(serialized_actions, dict)
+            else 0
+        )
+        telemetry.set(serialized_action_count=serialized_action_count)
         if request_budget.response_exhausted():
             _record_deadline_fallback(telemetry)
             return fallback_payload
-        telemetry.set(response_action_count=len(validated.commands))
+        telemetry.set(response_action_count=serialized_action_count)
         return response
     except RequestDeadlineExceeded:
         _record_deadline_fallback(telemetry)
@@ -139,6 +156,26 @@ def _accepts_keyword(function: Planner, name: str) -> bool:
         or parameter.kind is Parameter.VAR_KEYWORD
         for parameter in parameters
     )
+
+
+def _validated_weapon_action_log(
+    observation: Observation,
+    decision: Decision,
+) -> tuple[str, ...]:
+    entries: list[str] = []
+    for weapon in sorted(observation.our.units, key=lambda item: item.unit_id):
+        if weapon.role_type not in _WEAPON_TYPES:
+            continue
+        action = decision.commands.get(weapon.unit_id)
+        final_action = action.kind.value if action is not None else 'none'
+        entries.append(
+            f'id={weapon.unit_id}:type={weapon.role_type}:'
+            f'hp={weapon.health}:pos={weapon.position.x},{weapon.position.y}:'
+            f'cooldown={weapon.cooldown}:final={final_action}'
+        )
+        if len(entries) >= _WEAPON_LOG_LIMIT:
+            break
+    return tuple(entries)
 
 
 def _record_deadline_fallback(telemetry: TelemetryRecorder) -> None:

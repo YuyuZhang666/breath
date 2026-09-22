@@ -139,6 +139,10 @@ class StrategyEngine:
             phase2_planner,
             'market_view',
         )
+        self._phase2_accepts_previous_decision = _accepts_keyword(
+            phase2_planner,
+            'previous_decision',
+        )
         self._treasure_agent = (
             treasure_agent if treasure_agent is not None else TreasureAgent()
         )
@@ -258,6 +262,9 @@ class StrategyEngine:
                             scenarios_per_root=compute_usage.scenarios_per_root,
                             exact_horizon=compute_usage.exact_horizon,
                             watchdog_hit=compute_usage.watchdog_hit,
+                            completed_phase3_ms=(
+                                compute_usage.completed_phase3_ms
+                            ),
                         )
                     except Exception:
                         LOGGER.exception(
@@ -322,7 +329,6 @@ class StrategyEngine:
             emergency_fire_action_count=action_count,
             emergency_fire_deadline_hit=plan.deadline_hit,
             decision_source=('emergency_fire' if action_count else 'safe'),
-            response_action_count=action_count,
         )
         return plan.decision
 
@@ -360,6 +366,12 @@ class StrategyEngine:
         fingerprint = observation_fingerprint(observation)
         signature = static_signature(observation)
         previous = self._sessions.get(team_id)
+        own_station_status = _own_station_status(observation, previous)
+        own_station_alive = own_station_status == 'alive'
+        self._telemetry.set(
+            own_station_alive=own_station_alive,
+            own_station_status=own_station_status,
+        )
         continuity = (
             classify_continuity(previous, observation)
             if previous is not None
@@ -382,7 +394,10 @@ class StrategyEngine:
 
         match_memory = None
         try:
-            match_memory = self._memory.observe(observation)
+            match_memory = self._memory.observe(
+                observation,
+                clear_forecast=not own_station_alive,
+            )
             opponent_memory = match_memory.opponent_memory
             (
                 capability_unknown_count,
@@ -412,9 +427,13 @@ class StrategyEngine:
                 ),
                 opponent_half_index=opponent_memory.half_index,
                 opponent_structure_log=(
-                    opponent_memory.structure_log_entries()
+                    opponent_memory.structure_log_entries(
+                        current_round=observation.time.round_no,
+                    )
                 ),
-                opponent_role_log=opponent_memory.role_log_entries(),
+                opponent_role_log=opponent_memory.role_log_entries(
+                    current_round=observation.time.round_no,
+                ),
                 opponent_evidence_log=(
                     opponent_memory.evidence_log_entries()
                 ),
@@ -487,7 +506,19 @@ class StrategyEngine:
             else None
         )
         forecast_invalidation_reason: str | None = None
-        if observation.time.phase is Phase.NIGHT:
+        if observation.time.phase is Phase.NIGHT and not own_station_alive:
+            night_forecast = None
+            self._telemetry.set(
+                forecast_update_kind='none',
+                forecast_mode='skipped',
+                forecast_reason=(
+                    'own_station_destroyed'
+                    if own_station_status == 'destroyed'
+                    else 'own_station_state_invalid'
+                ),
+                forecast_margin_source='invalid',
+            )
+        elif observation.time.phase is Phase.NIGHT:
             previous_observation = (
                 previous_for_director.observation
                 if previous_for_director is not None
@@ -520,6 +551,10 @@ class StrategyEngine:
                         night_risk_level=night_forecast.risk_level.value,
                         risk_ratio=float(night_forecast.risk_ratio),
                         survival_margin=night_forecast.survival_margin,
+                        **_forecast_provenance(
+                            night_forecast,
+                            observation.time.round_no,
+                        ),
                     )
             elif forecast_invalidation_reason is not None:
                 try:
@@ -588,6 +623,10 @@ class StrategyEngine:
                         night_risk_level=night_forecast.risk_level.value,
                         risk_ratio=float(night_forecast.risk_ratio),
                         survival_margin=night_forecast.survival_margin,
+                        **_forecast_provenance(
+                            night_forecast,
+                            observation.time.round_no,
+                        ),
                     )
                 except (DeadlineExceeded, RequestDeadlineExceeded):
                     compute_usage.watchdog_hit = True
@@ -600,6 +639,10 @@ class StrategyEngine:
                             'cached' if night_forecast is not None else 'skipped'
                         ),
                         forecast_reason='forecast_timeout',
+                        **_forecast_provenance(
+                            night_forecast,
+                            observation.time.round_no,
+                        ),
                     )
                     LOGGER.warning(
                         'NightForecast watchdog expired for team %s round %s',
@@ -615,6 +658,10 @@ class StrategyEngine:
                             'cached' if night_forecast is not None else 'skipped'
                         ),
                         forecast_reason='exception',
+                        **_forecast_provenance(
+                            night_forecast,
+                            observation.time.round_no,
+                        ),
                     )
                     LOGGER.exception(
                         'NightForecast failed for team %s round %s',
@@ -635,6 +682,10 @@ class StrategyEngine:
                     night_risk_level=night_forecast.risk_level.value,
                     risk_ratio=float(night_forecast.risk_ratio),
                     survival_margin=night_forecast.survival_margin,
+                    **_forecast_provenance(
+                        night_forecast,
+                        observation.time.round_no,
+                    ),
                 )
             except Exception:
                 night_forecast = None
@@ -726,6 +777,7 @@ class StrategyEngine:
         governor_emergency = request_budget.remaining_compute() <= reserve
         if (
             observation.time.phase is Phase.NIGHT
+            and own_station_alive
             and not governor_emergency
             and (
                 controller_assignments is None
@@ -789,8 +841,14 @@ class StrategyEngine:
                     else 0
                 ),
                 market_view,
+                (
+                    previous_for_director.decision
+                    if previous_for_director is not None
+                    else None
+                ),
             )
-            self._telemetry.set(decision_source='phase2')
+            if decision != Decision():
+                self._telemetry.set(decision_source='phase2')
         compute_usage.phase2_5_ms = max(0.0, float(
             self._telemetry.current('phase2_5_ms', 0.0)
         ) - phase2_5_before)
@@ -804,15 +862,18 @@ class StrategyEngine:
                 timeout_prevented=True,
             )
 
-        phase3_eligible = (
-            not director_failed
-            and observation.time.phase is Phase.NIGHT
-            and previous is not None
-            and continuity is SessionContinuity.CONSECUTIVE
-            and not _requires_emergency_medicine(observation, intent)
-            and not governor_emergency
-            and not compute_usage.watchdog_hit
+        phase3_skip_reason = _phase3_skip_reason(
+            observation=observation,
+            own_station_status=own_station_status,
+            director_failed=director_failed,
+            previous=previous,
+            continuity=continuity,
+            emergency_medicine=_requires_emergency_medicine(observation, intent),
+            governor_emergency=governor_emergency,
+            prior_watchdog=compute_usage.watchdog_hit,
         )
+        phase3_eligible = phase3_skip_reason == 'none'
+        self._telemetry.set(phase3_skip_reason=phase3_skip_reason)
 
         if phase3_eligible:
             trigger = select_phase3_level(
@@ -829,7 +890,9 @@ class StrategyEngine:
             ):
                 requested_level = Phase3Level.LITE
             self._telemetry.set(phase3_level=requested_level.value)
-            if requested_level is not Phase3Level.NONE:
+            if requested_level is Phase3Level.NONE:
+                self._telemetry.set(phase3_skip_reason='no_material_night_event')
+            else:
                 if continuity is SessionContinuity.CONSECUTIVE:
                     try:
                         weights = self._scenario_reconciler(
@@ -885,6 +948,11 @@ class StrategyEngine:
                     ),
                     ewma_phase2_5_ms=governor_state.ewma_phase2_5_ms,
                     ewma_root_rollout_ms=governor_state.ewma_root_rollout_ms,
+                    phase3_skip_reason=(
+                        'none'
+                        if compute_plan.attempts
+                        else _terminal_compute_reason(compute_plan.reasons)
+                    ),
                 )
                 for planned_attempt in compute_plan.attempts:
                     attempt = planned_attempt.level
@@ -942,12 +1010,38 @@ class StrategyEngine:
                                 ),
                                 simulation_ms=stats.simulation_ms,
                                 tail_estimator_ms=stats.tail_estimator_ms,
+                                phase3_completed_root_count=(
+                                    stats.roots_evaluated
+                                ),
                             )
                             if getattr(stats, 'deadline_hit', False):
                                 self._telemetry.set(watchdog_hit=True)
                                 compute_usage.watchdog_hit = True
+                        completed_attempt_ms = (
+                            perf_counter_ns() - phase3_started_ns
+                        ) / 1_000_000
+                        compute_usage.completed_phase3_ms += completed_attempt_ms
+                        if _eliminates_critical_night_fire(
+                            observation,
+                            night_forecast,
+                            decision,
+                            result.decision,
+                        ):
+                            self._telemetry.increment('phase3_fallback_count')
+                            self._telemetry.set(
+                                fallback_used=True,
+                                fallback_reason='phase3_attack_regression',
+                                phase3_executed_level=attempt.value,
+                                phase3_skip_reason='phase3_attack_regression',
+                            )
+                            break
+                        if result.decision != decision:
+                            self._telemetry.set(decision_source='phase3')
                         decision = result.decision
-                        self._telemetry.set(decision_source='phase3')
+                        self._telemetry.set(
+                            phase3_executed_level=attempt.value,
+                            phase3_skip_reason='none',
+                        )
                         simulation_action = result.simulation_action
                         certificate = result.certificate
                         fresh_certificate = result.certificate
@@ -959,6 +1053,7 @@ class StrategyEngine:
                             fallback_used=True,
                             watchdog_hit=True,
                             fallback_reason='phase3_timeout',
+                            phase3_skip_reason='phase3_timeout',
                             timeout_prevented=True,
                         )
                         LOGGER.warning(
@@ -970,7 +1065,10 @@ class StrategyEngine:
                         )
                     except UnsupportedSimulation:
                         self._telemetry.increment('phase3_fallback_count')
-                        self._telemetry.set(fallback_used=True)
+                        self._telemetry.set(
+                            fallback_used=True,
+                            phase3_skip_reason='unsupported_simulation',
+                        )
                         LOGGER.warning(
                             'Phase 3 %s unavailable for team %s round %s',
                             attempt.value,
@@ -978,9 +1076,13 @@ class StrategyEngine:
                             observation.time.round_no,
                             exc_info=True,
                         )
+                        break
                     except Exception:
                         self._telemetry.increment('phase3_fallback_count')
-                        self._telemetry.set(fallback_used=True)
+                        self._telemetry.set(
+                            fallback_used=True,
+                            phase3_skip_reason='exception',
+                        )
                         LOGGER.exception(
                             'Phase 3 %s failed for team %s round %s',
                             attempt.value,
@@ -1051,9 +1153,11 @@ class StrategyEngine:
                         intent,
                         **task_kwargs,
                     )
+                task_input_decision = decision
                 decision = task_result.decision
                 task_state = task_result.state
-                self._telemetry.set(decision_source='task')
+                if decision != task_input_decision:
+                    self._telemetry.set(decision_source='task')
                 pending_candidate = next(
                     (
                         candidate
@@ -1086,6 +1190,7 @@ class StrategyEngine:
                 )
             else:
                 try:
+                    treasure_input_decision = decision
                     with self._telemetry.measure('treasure_ms'):
                         treasure_result = self._treasure_agent.apply(
                             observation,
@@ -1100,7 +1205,6 @@ class StrategyEngine:
                     decision = treasure_result.decision
                     treasure_state = treasure_result.state
                     self._telemetry.set(
-                        decision_source='treasure',
                         treasure_candidate_count=len(treasure_state.candidates),
                         treasure_attempted=any(
                             action.kind is ActionKind.SUMMON_TREASURE
@@ -1108,6 +1212,8 @@ class StrategyEngine:
                         ),
                         treasure_result=observation.last_summon_treasure_result,
                     )
+                    if decision != treasure_input_decision:
+                        self._telemetry.set(decision_source='treasure')
                 except Exception:
                     self._telemetry.set(fallback_used=True)
                     LOGGER.exception(
@@ -1116,12 +1222,17 @@ class StrategyEngine:
                         observation.time.round_no,
                     )
 
-        if fresh_certificate is not None or night_forecast is not None:
+        if (
+            fresh_certificate is not None
+            or night_forecast is not None
+            or not own_station_alive
+        ):
             try:
                 self._memory.observe(
                     observation,
                     certificate=fresh_certificate,
                     forecast=night_forecast,
+                    clear_forecast=not own_station_alive,
                 )
             except Exception:
                 LOGGER.exception(
@@ -1150,7 +1261,6 @@ class StrategyEngine:
                 market_state=market_state,
             )
         )
-        self._telemetry.set(response_action_count=len(decision.commands))
         return decision
 
     def _plan_phase2(
@@ -1161,6 +1271,7 @@ class StrategyEngine:
         fortification_threats: tuple[Position, ...] = (),
         expected_wall_losses: int = 0,
         market_view: MarketView | None = None,
+        previous_decision: Decision | None = None,
     ) -> Decision:
         kwargs: dict[str, object] = {}
         if self._phase2_accepts_intent:
@@ -1175,6 +1286,8 @@ class StrategyEngine:
             kwargs['expected_wall_losses'] = expected_wall_losses
         if self._phase2_accepts_market_view:
             kwargs['market_view'] = market_view
+        if self._phase2_accepts_previous_decision:
+            kwargs['previous_decision'] = previous_decision
         try:
             with self._telemetry.measure('phase2_ms'):
                 return self._phase2_planner(observation, **kwargs)
@@ -1186,6 +1299,129 @@ class StrategyEngine:
                 observation.time.round_no,
             )
             return Decision()
+
+
+def _eliminates_critical_night_fire(
+    observation: Observation,
+    forecast: NightForecast | None,
+    baseline: Decision,
+    candidate: Decision,
+) -> bool:
+    if (
+        observation.time.phase is not Phase.NIGHT
+        or forecast is None
+        or forecast.risk_level not in {RiskLevel.CRITICAL, RiskLevel.LETHAL}
+    ):
+        return False
+    baseline_attacks = sum(
+        action.kind is ActionKind.ATTACK
+        for action in baseline.commands.values()
+    )
+    candidate_attacks = sum(
+        action.kind is ActionKind.ATTACK
+        for action in candidate.commands.values()
+    )
+    return baseline_attacks > 0 and candidate_attacks == 0
+
+
+def _own_station_status(
+    observation: Observation,
+    previous: StrategySession | None,
+) -> str:
+    stations = tuple(
+        unit for unit in observation.our.units if unit.role_type == 'station'
+    )
+    living = tuple(unit for unit in stations if unit.health > 0)
+    if len(living) == 1:
+        return 'alive'
+    if len(living) > 1:
+        return 'state_invalid'
+    if any(unit.health <= 0 for unit in stations):
+        return 'destroyed'
+    if previous is not None and observation.time.round_no > previous.last_round:
+        prior_stations = tuple(
+            unit
+            for unit in previous.observation.our.units
+            if unit.role_type == 'station'
+        )
+        if any(unit.health > 0 for unit in prior_stations) or any(
+            unit.health <= 0 for unit in prior_stations
+        ):
+            return 'destroyed'
+    return 'state_invalid'
+
+
+def _phase3_skip_reason(
+    *,
+    observation: Observation,
+    own_station_status: str,
+    director_failed: bool,
+    previous: StrategySession | None,
+    continuity: SessionContinuity,
+    emergency_medicine: bool,
+    governor_emergency: bool,
+    prior_watchdog: bool,
+) -> str:
+    if own_station_status == 'destroyed':
+        return 'own_station_destroyed'
+    if own_station_status != 'alive':
+        return 'own_station_state_invalid'
+    if director_failed:
+        return 'director_failed'
+    if observation.time.phase is not Phase.NIGHT:
+        return 'not_night'
+    if previous is None:
+        return 'no_previous_observation'
+    if continuity is not SessionContinuity.CONSECUTIVE:
+        return 'non_consecutive_observation'
+    if emergency_medicine:
+        return 'emergency_medicine'
+    if governor_emergency:
+        return 'emergency_reserve'
+    if prior_watchdog:
+        return 'prior_watchdog'
+    return 'none'
+
+
+def _terminal_compute_reason(reasons: tuple[str, ...]) -> str:
+    for reason in reversed(reasons):
+        if reason in {
+            'compute_exhausted',
+            'emergency_reserve',
+            'watchdog_cooldown',
+            'not_requested',
+        }:
+            return reason
+    return reasons[-1] if reasons else 'compute_exhausted'
+
+
+def _forecast_provenance(
+    forecast: NightForecast | None,
+    current_round: int,
+) -> dict[str, object]:
+    if forecast is None:
+        return {
+            'forecast_generated_round': 0,
+            'forecast_updated_round': 0,
+            'forecast_age_rounds': 0,
+            'forecast_margin_source': 'none',
+            'forecast_conservative_bound': False,
+        }
+    conservative = (
+        'incremental_cache_lightweight_correction'
+        in forecast.uncertainty_reasons
+    )
+    return {
+        'forecast_generated_round': forecast.generated_round,
+        'forecast_updated_round': forecast.updated_round,
+        'forecast_age_rounds': max(0, current_round - forecast.updated_round),
+        'forecast_margin_source': (
+            'conservative_bound'
+            if conservative
+            else forecast.update_kind.value
+        ),
+        'forecast_conservative_bound': conservative,
+    }
 
 
 def _accepts_intent(planner: Phase2Planner) -> bool:

@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from itertools import combinations, product
 from time import perf_counter_ns
@@ -47,6 +47,7 @@ class JointFireConfig:
 
 
 DEFAULT_JOINT_FIRE_CONFIG = JointFireConfig()
+_WEAPON_DIAGNOSTIC_LIMIT = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +101,36 @@ class FireOption:
 
 
 @dataclass(frozen=True, slots=True)
+class WeaponFireDiagnostic:
+    weapon_id: int
+    weapon_type: str
+    health: int
+    position: Position
+    cooldown: int
+    controller_id: int | None = None
+    controller_position: Position | None = None
+    candidate_count: int = 0
+    no_candidate_reason: str = 'unassigned'
+    selected_action: str = 'none'
+
+    def log_entry(self) -> str:
+        controller_position = (
+            f'{self.controller_position.x},{self.controller_position.y}'
+            if self.controller_position is not None
+            else 'none'
+        )
+        return (
+            f'id={self.weapon_id}:type={self.weapon_type}:'
+            f'hp={self.health}:pos={self.position.x},{self.position.y}:'
+            f'cooldown={self.cooldown}:controller={self.controller_id}:'
+            f'controller_pos={controller_position}:'
+            f'candidates={self.candidate_count}:'
+            f'reason={self.no_candidate_reason}:'
+            f'selected={self.selected_action}'
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class JointFirePlan:
     decision: Decision
     combinations_evaluated: int
@@ -107,6 +138,7 @@ class JointFirePlan:
     attack_option_count: int
     candidate_generation_ms: float
     scoring_ms: float
+    weapon_log: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +147,7 @@ class JointFireSelection:
     combinations_evaluated: int
     active_weapon_count: int
     attack_option_count: int
+    weapon_diagnostics: tuple[WeaponFireDiagnostic, ...] = ()
 
 
 def plan_joint_fire(
@@ -184,6 +217,7 @@ def plan_joint_fire(
             attack_option_count=0,
             candidate_generation_ms=candidate_generation_ms,
             scoring_ms=0.0,
+            weapon_log=_weapon_log(selection),
         )
 
     commands = dict(base_commands)
@@ -201,6 +235,7 @@ def plan_joint_fire(
         # Candidate construction and exact combination scoring now share the
         # cached selector above, so the combined cost is reported once.
         scoring_ms=0.0,
+        weapon_log=_weapon_log(selection),
     )
 
 
@@ -233,6 +268,13 @@ def choose_joint_fire_attacks(
     return result
 
 
+def _weapon_log(selection: JointFireSelection) -> tuple[str, ...]:
+    return tuple(
+        item.log_entry()
+        for item in selection.weapon_diagnostics[:_WEAPON_DIAGNOSTIC_LIMIT]
+    )
+
+
 @lru_cache(maxsize=2048)
 def _choose_joint_fire_attacks_cached(
     state: SimState,
@@ -245,6 +287,16 @@ def _choose_joint_fire_attacks_cached(
     deadline_check = _DEADLINE_CHECK.get()
     threats = assess_threats(state)
     weapon_by_id = {weapon.unit_id: weapon for weapon in state.weapons}
+    diagnostics = {
+        weapon.unit_id: WeaponFireDiagnostic(
+            weapon_id=weapon.unit_id,
+            weapon_type=weapon.role_type,
+            health=weapon.health,
+            position=weapon.position,
+            cooldown=weapon.cooldown,
+        )
+        for weapon in state.weapons
+    }
     option_sets: list[tuple[FireOption | None, ...]] = []
     option_count = 0
     used_weapons: set[int] = set()
@@ -252,21 +304,53 @@ def _choose_joint_fire_attacks_cached(
     for role in sorted(state.roles, key=lambda item: item.unit_id):
         if deadline_check is not None:
             deadline_check()
-        if (
-            role.health <= 0
-            or role.unit_id in excluded_controller_ids
-            or role.assigned_weapon_id is None
-            or role.assigned_stand is None
-            or role.position != role.assigned_stand
-            or role.assigned_weapon_id in used_weapons
-        ):
+        if role.assigned_weapon_id is None:
             continue
         weapon = weapon_by_id.get(role.assigned_weapon_id)
-        if (
-            weapon is None
-            or weapon.health <= 0
-            or (hold_rockets and weapon.role_type == 'rocket')
-        ):
+        if weapon is None:
+            continue
+        diagnostic = replace(
+            diagnostics[weapon.unit_id],
+            controller_id=role.unit_id,
+            controller_position=role.position,
+        )
+        if role.health <= 0:
+            diagnostics[weapon.unit_id] = replace(
+                diagnostic,
+                no_candidate_reason='controller_dead',
+            )
+            continue
+        if role.unit_id in excluded_controller_ids:
+            diagnostics[weapon.unit_id] = replace(
+                diagnostic,
+                no_candidate_reason='controller_has_other_action',
+            )
+            continue
+        if role.assigned_stand is None:
+            diagnostics[weapon.unit_id] = replace(
+                diagnostic,
+                no_candidate_reason='controller_stand_missing',
+            )
+            continue
+        if role.position != role.assigned_stand:
+            diagnostics[weapon.unit_id] = replace(
+                diagnostic,
+                no_candidate_reason='controller_not_at_stand',
+            )
+            continue
+        if role.assigned_weapon_id in used_weapons:
+            continue
+        if weapon.health <= 0:
+            diagnostics[weapon.unit_id] = replace(
+                diagnostic,
+                no_candidate_reason='weapon_destroyed',
+            )
+            continue
+        if hold_rockets and weapon.role_type == 'rocket':
+            diagnostics[weapon.unit_id] = replace(
+                diagnostic,
+                no_candidate_reason='rocket_held',
+            )
             continue
         options = generate_fire_options(
             state,
@@ -278,13 +362,35 @@ def _choose_joint_fire_attacks_cached(
             simulation_config=simulation_config,
         )
         if not options:
+            reason = (
+                'cooldown'
+                if weapon.cooldown != 0
+                else 'invalid_weapon'
+                if weapon.attack_range <= 0 or weapon.level <= 0
+                else 'no_targets'
+            )
+            diagnostics[weapon.unit_id] = replace(
+                diagnostic,
+                no_candidate_reason=reason,
+            )
             continue
+        diagnostics[weapon.unit_id] = replace(
+            diagnostic,
+            candidate_count=len(options),
+            no_candidate_reason='none',
+        )
         used_weapons.add(weapon.unit_id)
         option_count += len(options)
         option_sets.append((None,) + options)
 
     if not option_sets:
-        return JointFireSelection((), 0, 0, 0)
+        return JointFireSelection(
+            (),
+            0,
+            0,
+            0,
+            tuple(diagnostics[weapon_id] for weapon_id in sorted(diagnostics)),
+        )
 
     robot_by_id = {robot.robot_id: robot for robot in state.robots}
     winner: tuple[FireOption, ...] = ()
@@ -307,11 +413,22 @@ def _choose_joint_fire_attacks_cached(
             winner_score = score
             winner_key = stable_key
 
+    selected_weapon_ids = {item.attack.weapon_id for item in winner}
+    final_diagnostics = tuple(
+        replace(
+            diagnostics[weapon_id],
+            selected_action=(
+                'attack' if weapon_id in selected_weapon_ids else 'none'
+            ),
+        )
+        for weapon_id in sorted(diagnostics)
+    )
     return JointFireSelection(
         attacks=tuple(option.attack for option in winner),
         combinations_evaluated=combinations_evaluated,
         active_weapon_count=len(option_sets),
         attack_option_count=option_count,
+        weapon_diagnostics=final_diagnostics,
     )
 
 
