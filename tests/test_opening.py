@@ -50,6 +50,36 @@ class OpeningDefenseTests(unittest.TestCase):
         self.assertEqual(planned.commands[10010].kind, ActionKind.COLLECT)
         self.assertEqual(planned.commands[10012].kind, ActionKind.BUILD)
 
+    def test_wall_supply_lock_follows_inventory_instead_of_worker_id(
+        self,
+    ) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 5, 'worker'),
+                unit(10012, 3, 5, 'worker', backpack=('stone',) * 4),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            zones=(Zone(Position(1, 5), 'stone'),),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        opening = build_opening_plan(
+            observed,
+            world,
+            build_defensive_layout(world),
+            DEFAULT_STRATEGIC_INTENT,
+        )
+
+        self.assertEqual(opening.stone_worker_id, 10012)
+        self.assertEqual(
+            opening.assignment_for(10012),
+            'opening_wall_supply',
+        )
+        self.assertEqual(
+            opening.assignment_for(10010),
+            'opening_weapon_builder',
+        )
+
     def test_worker_with_stone_owns_wall_build_through_response(self) -> None:
         base = observation(
             our_units=(unit(10013, 5, 5, 'station', level=1),),

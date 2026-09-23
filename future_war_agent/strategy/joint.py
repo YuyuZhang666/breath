@@ -472,11 +472,13 @@ def solve_joint(
         gold_reserve=gold_reserve,
     ):
         score: tuple[object, ...] = (
+            # A worker may wait only when no fully-active legal joint exists.
+            # Candidate priorities still decide between equally active plans.
+            sum(item.action is not None for item in joint),
             sum(item.priority for item in joint),
             sum(item.completes_job for item in joint),
             sum(item.utility for item in joint),
             sum(item.progress for item in joint),
-            sum(item.action is not None for item in joint),
             tuple(
                 (item.command_actor_id, repr(item.action))
                 for item in sorted(

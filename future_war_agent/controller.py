@@ -135,6 +135,7 @@ def handle_payload(
             opening_final_action_log=_opening_final_action_log(
                 observation,
                 validated,
+                tuple(telemetry.current('opening_worker_log', ())),
             ),
             validated_weapon_action_log=_validated_weapon_action_log(
                 observation,
@@ -293,17 +294,32 @@ def _decision_override_log(
 def _opening_final_action_log(
     observation: Observation,
     decision: Decision,
+    assignment_log: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
+    assignments = {
+        entry.split(':', 1)[0]: entry
+        for entry in assignment_log
+        if entry.startswith('id=')
+    }
     entries: list[str] = []
     for role in sorted(observation.our.units, key=lambda item: item.unit_id):
         if role.role_type != 'worker':
             continue
         action = decision.commands.get(role.unit_id)
         stone = sum(item.casefold() == 'stone' for item in role.backpack)
+        assignment = assignments.get(f'id={role.unit_id}', '')
+        assignment_context = assignment or 'unavailable'
+        wait_decision = (
+            'no_wait=validated_legal_action'
+            if action is not None
+            else 'wait_reason=no_legal_nonconflicting_action'
+        )
         entries.append(
             f'id={role.unit_id}:pos={role.position.x},{role.position.y}:'
             f'stone={stone}:final={_optional_action_summary(action)}:'
-            f'last_result={observation.last_action_results.get(role.unit_id)}'
+            f'last_result={observation.last_action_results.get(role.unit_id)}:'
+            f'{wait_decision}:'
+            f'assignment_context={assignment_context}'
         )
     return tuple(entries)
 

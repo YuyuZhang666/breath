@@ -915,13 +915,27 @@ def _opening_worker_log(
         target = (
             f'{top.target.x},{top.target.y}' if top is not None else 'none'
         )
+        eta = _job_eta(worker, top, world) if top is not None else -1
+        decision_reason = (
+            f'candidate=reachable_{top.kind.value}'
+            if top is not None
+            else 'wait_reason=no_reachable_legal_job'
+        )
         entries.append(
             f'id={worker.unit_id}:pos={worker.position.x},{worker.position.y}:'
             f'stone={count_item(worker.backpack, world.rules.wall_material)}:'
             f'assigned={opening.assignment_for(worker.unit_id)}:'
-            f'intended={action}:target={target}'
+            f'intended={action}:target={target}:eta={eta}:'
+            f'{decision_reason}'
         )
     return tuple(entries)
+
+
+def _job_eta(worker: UnitState, job: Job, world: WorldGrid) -> int:
+    path = path_to_interaction(world, worker.position, job.target)
+    if path is None:
+        return -1
+    return path.cost + 1
 
 
 def _planned_wall_positions(

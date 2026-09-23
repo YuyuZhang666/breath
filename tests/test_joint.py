@@ -438,6 +438,87 @@ class JointSolverTests(unittest.TestCase):
         }
         self.assertEqual(len(build_keys), 2)
 
+    def test_candidate_limit_keeps_all_three_opening_work_families(
+        self,
+    ) -> None:
+        observed = observation(
+            our_units=(
+                unit(1, 1, 1, 'worker', backpack=('stone',)),
+            ),
+            zones=(Zone(Position(2, 2), 'stone'),),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        role = world.unit_by_id(1)
+        jobs = (
+            Job(1, JobKind.BUILD_WEAPON, Position(5, 5), 450, 0, 'gatling'),
+            Job(1, JobKind.COLLECT, Position(2, 2), 426, 0, 'stone'),
+            Job(1, JobKind.BUILD_WALL, Position(5, 6), 425, 0, 'wall'),
+        )
+
+        choices = candidates_for_jobs(observed, world, role, jobs, limit=4)
+
+        self.assertTrue(
+            {
+                JobKind.BUILD_WEAPON,
+                JobKind.COLLECT,
+                JobKind.BUILD_WALL,
+            }.issubset({item.job_kind for item in choices})
+        )
+        self.assertTrue(any(item.action is None for item in choices))
+
+    def test_solver_chooses_fully_active_joint_before_waiting(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(1, 1, 1, 'worker'),
+                unit(2, 3, 1, 'worker'),
+            ),
+        )
+        world = WorldGrid.from_observation(observed)
+        choices = {
+            1: (
+                TacticalCandidate(
+                    role_id=1,
+                    command_actor_id=1,
+                    action=Action.move(Position(2, 1)),
+                    job_kind=JobKind.RECALL,
+                    start=Position(1, 1),
+                    move_target=Position(2, 1),
+                    priority=500,
+                ),
+                TacticalCandidate.wait(1, Position(1, 1)),
+            ),
+            2: (
+                TacticalCandidate(
+                    role_id=2,
+                    command_actor_id=2,
+                    action=Action.move(Position(2, 1)),
+                    job_kind=JobKind.BUILD_WEAPON,
+                    start=Position(3, 1),
+                    move_target=Position(2, 1),
+                    priority=500,
+                ),
+                TacticalCandidate(
+                    role_id=2,
+                    command_actor_id=2,
+                    action=Action.move(Position(3, 2)),
+                    job_kind=JobKind.COLLECT,
+                    start=Position(3, 1),
+                    move_target=Position(3, 2),
+                    priority=-10,
+                ),
+                TacticalCandidate.wait(2, Position(3, 1)),
+            ),
+        }
+
+        decision = solve_joint(observed, world, choices)
+
+        self.assertEqual(set(decision.commands), {1, 2})
+        self.assertEqual(
+            decision.commands[2].target_positions,
+            (Position(3, 2),),
+        )
+
     def test_use_item_matches_inventory_name_case_insensitively(self) -> None:
         observed = observation(
             our_units=(
