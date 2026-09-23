@@ -34,6 +34,32 @@ def defended_observation(
 
 
 class StrategicDirectorTests(unittest.TestCase):
+    def test_runtime_defaults_enable_only_verified_defensive_items(self) -> None:
+        flags = StrategicDirector().select(defended_observation()).intent.feature_flags
+
+        self.assertTrue(flags.enable_bomb)
+        self.assertTrue(flags.enable_stun)
+        self.assertTrue(flags.enable_repairs)
+        self.assertTrue(flags.enable_upgrades)
+        self.assertTrue(flags.enable_collapse_summons)
+        self.assertFalse(flags.enable_pressure)
+        self.assertFalse(flags.enable_attack_enemy_station)
+        self.assertFalse(flags.enable_attack_enemy_role)
+        self.assertFalse(flags.enable_enemy_wall_removal)
+        self.assertFalse(flags.enable_cross_team_robot_attack)
+        self.assertFalse(flags.enable_task_execute_commands)
+
+    def test_explicit_deny_by_default_flags_disable_runtime_items(self) -> None:
+        flags = StrategicDirector(
+            feature_flags=RuleFeatureFlags()
+        ).select(defended_observation()).intent.feature_flags
+
+        self.assertFalse(flags.enable_bomb)
+        self.assertFalse(flags.enable_stun)
+        self.assertFalse(flags.enable_repairs)
+        self.assertFalse(flags.enable_upgrades)
+        self.assertFalse(flags.enable_collapse_summons)
+
     def test_day_one_missing_core_weapon_can_consume_economy_reserve(self) -> None:
         observed = observation(
             round_no=20,

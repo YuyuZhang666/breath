@@ -12,6 +12,7 @@ MAX_STRUCTURE_SIGHTINGS = 128
 MAX_ROLE_SIGHTINGS = 64
 MAX_GROWTH_OBSERVATIONS = 32
 MAX_DAMAGE_PATTERNS = 32
+MAX_STATION_DAMAGE_OBSERVATIONS = 32
 MAX_HALF_SUMMARIES = 8
 MAX_HALF_TRANSITIONS = 8
 MAX_KNOWN_STRUCTURE_IDS = 256
@@ -78,6 +79,23 @@ class DamagePatternObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class OpponentStationDamageObservation:
+    half_index: int
+    round_no: int
+    day_no: int
+    phase: str
+    elapsed_ticks: int
+    health_loss: int
+    health_after: int
+
+    def __post_init__(self) -> None:
+        if self.elapsed_ticks <= 0 or self.health_loss <= 0:
+            raise ValueError('station damage observation needs positive deltas')
+        if self.health_after < 0:
+            raise ValueError('station health cannot be negative')
+
+
+@dataclass(frozen=True, slots=True)
 class OpponentHalfSummary:
     half_index: int
     epoch: int
@@ -118,6 +136,7 @@ class OpponentMemory:
     known_structure_ids: tuple[int, ...] = ()
     defense_growth: tuple[DefenseGrowthObservation, ...] = ()
     damage_patterns: tuple[DamagePatternObservation, ...] = ()
+    station_damage_history: tuple[OpponentStationDamageObservation, ...] = ()
     half_summaries: tuple[OpponentHalfSummary, ...] = ()
     half_transitions: tuple[HalfTransitionObservation, ...] = ()
     visible_structure_count: int = 0
@@ -201,6 +220,15 @@ class OpponentMemory:
             )
             for item in self.damage_patterns
         )
+        station_damage = tuple(
+            (
+                f'station_damage:half={item.half_index}:'
+                f'round={item.round_no}:day={item.day_no}:'
+                f'phase={item.phase}:elapsed={item.elapsed_ticks}:'
+                f'loss={item.health_loss}:after={item.health_after}'
+            )
+            for item in self.station_damage_history
+        )
         halves = tuple(
             (
                 f'half:{item.half_index}:epoch={item.epoch}:'
@@ -224,7 +252,7 @@ class OpponentMemory:
             )
             for item in self.half_transitions
         )
-        return (*growth, *damage, *halves, *transitions)
+        return (*growth, *damage, *station_damage, *halves, *transitions)
 
 
 PositionNormalizer = Callable[[Position], Position]
@@ -269,6 +297,42 @@ def update_opponent_memory(
         for unit in observation.enemy.units
         if unit.health > 0 and unit.role_type not in STRUCTURE_ROLES
     )
+    elapsed_ticks = max(0, observation_tick - previous.last_observation_tick)
+    current_station = next(
+        (unit for unit in visible_structures if unit.role_type == 'station'),
+        None,
+    )
+    prior_station = next(
+        (
+            item
+            for item in previous.structures
+            if item.role_type == 'station'
+            and current_station is not None
+            and item.unit_id == current_station.unit_id
+        ),
+        None,
+    )
+    station_damage_history = (
+        () if half_changed else previous.station_damage_history
+    )
+    station_loss = (
+        max(0, prior_station.health - current_station.health)
+        if prior_station is not None and current_station is not None
+        else 0
+    )
+    if elapsed_ticks > 0 and station_loss > 0:
+        station_damage_history = (
+            *station_damage_history,
+            OpponentStationDamageObservation(
+                half_index=half_index,
+                round_no=observation.time.round_no,
+                day_no=observation.time.day_no,
+                phase=observation.time.phase.value,
+                elapsed_ticks=elapsed_ticks,
+                health_loss=station_loss,
+                health_after=current_station.health,
+            ),
+        )[-MAX_STATION_DAMAGE_OBSERVATIONS:]
 
     structures_by_id = {item.unit_id: item for item in previous.structures}
     for unit in visible_structures:
@@ -312,7 +376,6 @@ def update_opponent_memory(
     previously_known = set(previous.known_structure_ids)
     visible_ids = {unit.unit_id for unit in visible_structures}
     added_ids = tuple(sorted(visible_ids - previously_known))
-    elapsed_ticks = max(0, observation_tick - previous.last_observation_tick)
     ids_safe_to_commit = (
         visible_ids
         if (
@@ -519,6 +582,7 @@ def update_opponent_memory(
         known_structure_ids=known_ids,
         defense_growth=growth,
         damage_patterns=damage_patterns,
+        station_damage_history=station_damage_history,
         half_summaries=summaries,
         half_transitions=transitions,
         visible_structure_count=len(visible_structures),

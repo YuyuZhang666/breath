@@ -5,7 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from future_war_agent.controller import default_planner, handle_payload
+from future_war_agent.controller import (
+    DEFAULT_STRATEGY_ENGINE,
+    _SOP_PATH,
+    default_planner,
+    handle_payload,
+)
 from future_war_agent.deadline import RequestBudget, RequestDeadlineExceeded
 from future_war_agent.decision.actions import Action
 from future_war_agent.decision.decision import Decision
@@ -35,6 +40,12 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(response["roleCommandMap"])
         self.assertEqual(response["prompt"], "")
         self.assertEqual(response["executeCmd"], "")
+
+    def test_default_controller_enables_bounded_task_runtime(self) -> None:
+        task_agent = DEFAULT_STRATEGY_ENGINE._task_agent
+
+        self.assertTrue(task_agent._commands_enabled)
+        self.assertEqual(task_agent._sop_store.path, _SOP_PATH)
 
     def test_default_planner_delegates_to_process_engine(self) -> None:
         observation = parse_observation(self.payload)

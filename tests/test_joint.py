@@ -411,6 +411,33 @@ class JointSolverTests(unittest.TestCase):
         self.assertEqual(len(choices), 1)
         self.assertIsNone(choices[0].action)
 
+    def test_candidate_limit_preserves_distinct_work_families(self) -> None:
+        observed = observation(
+            our_units=(unit(1, 1, 1, 'worker'),),
+            zones=(Zone(Position(2, 2), 'stone'),),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        role = world.unit_by_id(1)
+        jobs = (
+            Job(1, JobKind.BUILD_WEAPON, Position(5, 5), 450, 0, 'gatling'),
+            Job(1, JobKind.BUILD_WEAPON, Position(5, 6), 450, 0, 'railgun'),
+            Job(1, JobKind.BUILD_WEAPON, Position(6, 5), 450, 0, 'rocket'),
+            Job(1, JobKind.COLLECT, Position(2, 2), 426, 0, 'stone'),
+        )
+
+        choices = candidates_for_jobs(observed, world, role, jobs, limit=4)
+
+        self.assertIn(JobKind.BUILD_WEAPON, {item.job_kind for item in choices})
+        self.assertIn(JobKind.COLLECT, {item.job_kind for item in choices})
+        self.assertTrue(any(item.action is None for item in choices))
+        build_keys = {
+            item.exclusive_job_key
+            for item in choices
+            if item.job_kind is JobKind.BUILD_WEAPON
+        }
+        self.assertEqual(len(build_keys), 2)
+
     def test_use_item_matches_inventory_name_case_insensitively(self) -> None:
         observed = observation(
             our_units=(

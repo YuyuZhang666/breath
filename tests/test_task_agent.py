@@ -1,6 +1,8 @@
 import unittest
 from dataclasses import replace
 from hashlib import sha256
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from future_war_agent.decision.actions import Action, ActionKind
 from future_war_agent.decision.decision import Decision
@@ -23,6 +25,7 @@ from future_war_agent.strategy.task_agent import (
     TaskAgent,
     TaskAgentState,
     TaskSop,
+    TaskSopStore,
     parse_command_result,
 )
 from tests.strategy_helpers import observation, unit
@@ -1010,6 +1013,135 @@ class TaskAgentTests(unittest.TestCase):
                 for action in result.decision.commands.values()
             )
         )
+
+
+    def test_llm_exec_uses_strict_active_task_protocol(self) -> None:
+        enabled = intent_for_profile(
+            StrategyProfile.ECONOMY,
+            'sandbox enabled',
+            feature_flags=RuleFeatureFlags(enable_task_execute_commands=True),
+        )
+        task_text = 'Inspect solve.py and compute the answer.'
+        observed = observation(
+            round_no=2,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            phase_task=task_text,
+            llm_response='EXEC: python solve.py',
+        )
+
+        result = TaskAgent().apply(
+            observed, Decision(), enabled,
+            previous_state=prompted_state('code', task_text),
+        )
+
+        self.assertEqual(result.decision.execute_command, 'python solve.py')
+        self.assertNotIn(2, result.decision.commands)
+        self.assertEqual(result.state.command_step, 1)
+
+    def test_runtime_command_mode_does_not_require_intent_flag(self) -> None:
+        task_text = 'Inspect solve.py.'
+        result = TaskAgent(commands_enabled=True).apply(
+            observation(
+                round_no=2,
+                our_units=(unit(2, 1, 1, 'pioneer'),),
+                phase_task=task_text,
+                llm_response='EXEC: python solve.py',
+            ),
+            Decision(), ECONOMY_INTENT,
+            previous_state=prompted_state('code', task_text),
+        )
+
+        self.assertEqual(result.decision.execute_command, 'python solve.py')
+
+    def test_active_task_never_overrides_night_fire(self) -> None:
+        task_text = 'Return 42.'
+        base = Decision(
+            commands={10: Action.attack(2, (Position(3, 3),))},
+        )
+        observed = observation(
+            round_no=71,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            phase_task=task_text,
+            llm_response='42',
+        )
+
+        result = TaskAgent().apply(
+            observed, base, SCORE_INTENT,
+            previous_state=prompted_state('math', task_text),
+        )
+
+        self.assertEqual(result.decision, base)
+
+    def test_llm_exec_rejects_code_flags_and_shell_operators(self) -> None:
+        enabled = intent_for_profile(
+            StrategyProfile.ECONOMY,
+            'sandbox enabled',
+            feature_flags=RuleFeatureFlags(enable_task_execute_commands=True),
+        )
+        task_text = 'Inspect files.'
+        responses = (
+            'EXEC: python -c print(1)',
+            'EXEC: ls | cat',
+            'EXEC: find . -ok=rm',
+            'EXEC: find . -okdir=rm',
+            'EXEC: find . -fprint=out.txt',
+            'EXEC: find . -fprintf=out.txt',
+            'EXEC: find . -fls=out.txt',
+        )
+        for response in responses:
+            with self.subTest(response=response):
+                observed = observation(
+                    round_no=2,
+                    our_units=(unit(2, 1, 1, 'pioneer'),),
+                    phase_task=task_text,
+                    llm_response=response,
+                )
+                result = TaskAgent().apply(
+                    observed, Decision(), enabled,
+                    previous_state=prompted_state('code', task_text),
+                )
+                self.assertEqual(result.decision.execute_command, '')
+                self.assertNotIn(2, result.decision.commands)
+
+    def test_sop_store_round_trips_and_corruption_falls_back(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / 'task-sops.json'
+            store = TaskSopStore(path)
+            expected = (TaskSop('math', '42', task_fingerprint='abc'),)
+
+            self.assertTrue(store.save(expected))
+            self.assertEqual(store.load(), expected)
+            path.write_text('{broken', encoding='utf-8')
+            self.assertEqual(store.load(), ())
+
+    def test_task_metrics_track_first_best_and_final_success(self) -> None:
+        agent = TaskAgent()
+        task_text = 'Return 42.'
+        first = agent.apply(
+            observation(
+                round_no=2,
+                our_units=(unit(2, 1, 1, 'pioneer'),),
+                phase_task=task_text,
+                llm_response='partial',
+            ),
+            Decision(), SCORE_INTENT,
+            previous_state=replace(
+                prompted_state('math', task_text), accepted_round=1,
+            ),
+        )
+        completed = agent.reconcile(
+            observation(
+                round_no=3,
+                our_units=(unit(2, 1, 1, 'pioneer'),),
+                last_action_results={2: True},
+            ),
+            first.state,
+        )
+
+        self.assertEqual(completed.first_answer_latency_rounds, 1)
+        self.assertEqual(completed.finalized_task_count, 1)
+        self.assertEqual(completed.successful_task_count, 1)
+        self.assertEqual(completed.final_pass_rate, 1.0)
 
 
 if __name__ == '__main__':

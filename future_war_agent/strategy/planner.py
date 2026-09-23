@@ -8,14 +8,21 @@ from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
 from .joint_fire import plan_joint_fire
 from .build_recovery import EMPTY_BUILD_RECOVERY_STATE, BuildRecoveryState
+from .collapse_summons import generate_collapse_summon_jobs
 from .jobs import JobKind, generate_day_jobs
 from .joint import candidates_for_jobs, solve_joint
 from .layout import build_defensive_layout
 from .market import MarketView
 from .night import ControllerAssignment, generate_night_candidates
+from .opponent_memory import OpponentMemory
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent
 from .rules import DEFAULT_RULES, RulesConfig
 from .simulation.errors import UnsupportedSimulation
+from .strategic_items import (
+    apply_emergency_combat_items,
+    generate_strategic_item_jobs,
+    merge_strategic_item_jobs,
+)
 from .world import WorldGrid
 
 
@@ -28,6 +35,7 @@ def plan_turn(
     rules: RulesConfig = DEFAULT_RULES,
     *,
     intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
+    world: WorldGrid | None = None,
     controller_assignments: tuple[ControllerAssignment, ...] | None = None,
     telemetry: TelemetryRecorder = DEFAULT_TELEMETRY,
     fortification_threats: tuple[Position, ...] = (),
@@ -36,8 +44,9 @@ def plan_turn(
     previous_decision: Decision | None = None,
     previously_built_wall_sites: frozenset[Position] = frozenset(),
     build_recovery: BuildRecoveryState = EMPTY_BUILD_RECOVERY_STATE,
+    opponent_memory: OpponentMemory | None = None,
 ) -> Decision:
-    world = WorldGrid.from_observation(observation, rules)
+    world = WorldGrid.from_observation(observation, rules) if world is None else world
     if not world.friendly_roles:
         return Decision()
     if observation.time.phase is Phase.NIGHT:
@@ -55,7 +64,11 @@ def plan_turn(
                 candidate_generation_ms=plan.candidate_generation_ms,
                 phase2_5_weapon_log=plan.weapon_log,
             )
-            return plan.decision
+            return apply_emergency_combat_items(
+                observation,
+                plan.decision,
+                intent,
+            )
         except UnsupportedSimulation:
             telemetry.increment('phase2_5_fallback_count')
             telemetry.set(fallback_used=True)
@@ -70,12 +83,13 @@ def plan_turn(
             intent,
             controller_assignments=controller_assignments,
         )
-        return solve_joint(
+        baseline = solve_joint(
             observation,
             world,
             candidates,
             gold_reserve=intent.gold_reserve,
         )
+        return apply_emergency_combat_items(observation, baseline, intent)
 
     layout = build_defensive_layout(
         world,
@@ -93,6 +107,26 @@ def plan_turn(
         previously_built_wall_sites=previously_built_wall_sites,
         build_recovery=build_recovery,
         telemetry=telemetry,
+    )
+    jobs = merge_strategic_item_jobs(
+        jobs,
+        generate_strategic_item_jobs(
+            observation,
+            world,
+            layout,
+            intent,
+            expected_wall_losses=expected_wall_losses,
+        ),
+    )
+    jobs = merge_strategic_item_jobs(
+        jobs,
+        generate_collapse_summon_jobs(
+            observation,
+            world,
+            layout,
+            intent,
+            opponent_memory,
+        ),
     )
     candidates = {
         role.unit_id: candidates_for_jobs(

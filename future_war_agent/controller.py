@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable
 from inspect import Parameter, signature
+from pathlib import Path
 from time import monotonic
 
 from future_war_agent.deadline import RequestBudget, RequestDeadlineExceeded
@@ -11,6 +12,7 @@ from future_war_agent.fallback import safe_payload
 from future_war_agent.protocol.models import Observation
 from future_war_agent.protocol.parser import parse_observation
 from future_war_agent.strategy.engine import StrategyEngine
+from future_war_agent.strategy.task_agent import TaskAgent, TaskSopStore
 from future_war_agent.telemetry import DEFAULT_TELEMETRY, TelemetryRecorder
 
 
@@ -22,7 +24,13 @@ Planner = Callable[..., Decision]
 RESPONSE_BUDGET_SECONDS = 3.5
 COMPUTE_BUDGET_SECONDS = 3.0
 
-DEFAULT_STRATEGY_ENGINE = StrategyEngine()
+_SOP_PATH = Path(__file__).resolve().parents[1] / 'task_sops.json'
+DEFAULT_STRATEGY_ENGINE = StrategyEngine(
+    task_agent=TaskAgent(
+        sop_store=TaskSopStore(_SOP_PATH),
+        commands_enabled=True,
+    ),
+)
 _WEAPON_TYPES = frozenset({'gatling', 'railgun', 'rocket'})
 _WEAPON_LOG_LIMIT = 16
 _ACTION_LOG_LIMIT = 32

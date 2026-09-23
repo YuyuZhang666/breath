@@ -29,6 +29,7 @@ class RuleFeatureFlags:
     enable_night_mining: bool = False
     enable_controller_personal_action: bool = False
     enable_task_execute_commands: bool = False
+    enable_collapse_summons: bool = False
 
 
 @dataclass(frozen=True, slots=True)

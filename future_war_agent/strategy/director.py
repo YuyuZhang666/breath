@@ -48,6 +48,13 @@ class DirectorConfig:
 
 
 DEFAULT_DIRECTOR_CONFIG = DirectorConfig()
+DEFAULT_RUNTIME_FEATURE_FLAGS = RuleFeatureFlags(
+    enable_bomb=True,
+    enable_stun=True,
+    enable_repairs=True,
+    enable_upgrades=True,
+    enable_collapse_summons=True,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +83,9 @@ class StrategicDirector:
     ) -> None:
         self._config = config
         self._feature_flags = (
-            feature_flags if feature_flags is not None else RuleFeatureFlags()
+            feature_flags
+            if feature_flags is not None
+            else DEFAULT_RUNTIME_FEATURE_FLAGS
         )
 
     def select(

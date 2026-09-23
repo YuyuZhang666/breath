@@ -38,11 +38,25 @@ class OpeningPlan:
     return_eta: int = -1
     construction_eta: int = 0
     recall_eta: int = -1
+    stone_worker_id: int | None = None
+    early_weapon_target: int = 0
+    weapon_deadline_at_risk: bool = False
 
     def assignment_for(self, worker_id: int) -> str:
-        if self.active:
-            return 'opening_dynamic_builder'
-        return 'ordinary'
+        if not self.active:
+            return 'ordinary'
+        if self.stage is OpeningStage.RECALL:
+            return 'opening_recall'
+        if (
+            self.weapon_deadline_at_risk
+            and self.weapon_count < self.early_weapon_target
+        ):
+            return 'opening_weapon_recovery'
+        if worker_id == self.stone_worker_id:
+            return 'opening_wall_supply'
+        if self.weapon_count < self.early_weapon_target:
+            return 'opening_weapon_builder'
+        return 'opening_flex_builder'
 
 
 def build_opening_plan(
@@ -62,15 +76,36 @@ def build_opening_plan(
             key=lambda role: role.unit_id,
         )
     )
-    stone_worker = workers[0] if workers else None
     existing_walls = {wall.position for wall in world.walls}
     wall_count = sum(position in existing_walls for position in layout.wall_sites)
     critical_wall_count = sum(
         position in existing_walls for position in layout.critical_wall_sites
     )
+    missing_critical = tuple(
+        position
+        for position in layout.critical_wall_sites
+        if position not in existing_walls
+    )
     readiness = core_weapon_readiness(
         observation.our.units,
         intent.build_plan.weapon_loadout,
+    )
+    early_weapon_target = min(
+        intent.build_plan.opening_early_weapon_target,
+        readiness.required_count,
+        len(layout.weapon_sites),
+    )
+    stone_worker = _select_stone_worker(world, workers, missing_critical)
+    weapon_deadline_at_risk = _weapon_deadline_at_risk(
+        observation,
+        world,
+        workers,
+        layout,
+        readiness.missing_types,
+        readiness.ready_count,
+        early_weapon_target,
+        stone_worker,
+        intent.build_plan.opening_early_weapon_deadline_round,
     )
     workers_with_stone = sum(
         count_item(worker.backpack, world.rules.wall_material)
@@ -95,6 +130,11 @@ def build_opening_plan(
         controllers_ready=controllers_ready,
         gate_closed=gate_closed,
         remaining_daylight=remaining_daylight,
+        stone_worker_id=(
+            stone_worker.unit_id if stone_worker is not None else None
+        ),
+        early_weapon_target=early_weapon_target,
+        weapon_deadline_at_risk=weapon_deadline_at_risk,
     )
     if (
         observation.time.day_no != 1
@@ -132,11 +172,6 @@ def build_opening_plan(
             **common,
         )
 
-    missing_critical = tuple(
-        position
-        for position in layout.critical_wall_sites
-        if position not in existing_walls
-    )
     primary_missing_critical = missing_critical
     stone_count = count_item(
         stone_worker.backpack,
@@ -246,6 +281,105 @@ def _stone_route_eta(
         if (path := shortest_path(world, start, goals)) is not None
     )
     return mine_eta, min(return_paths, default=-1)
+
+
+def _select_stone_worker(
+    world: WorldGrid,
+    workers: tuple[UnitState, ...],
+    wall_targets: tuple[Position, ...],
+) -> UnitState | None:
+    if not workers:
+        return None
+    material = world.rules.wall_material
+    stocked = tuple(
+        worker for worker in workers if count_item(worker.backpack, material) > 0
+    )
+    if stocked:
+        def wall_distance(worker: UnitState) -> int:
+            costs = tuple(
+                path.cost
+                for target in wall_targets
+                if (path := path_to_interaction(
+                    world,
+                    worker.position,
+                    target,
+                )) is not None
+            )
+            return min(costs, default=1_000_000)
+
+        return min(
+            stocked,
+            key=lambda worker: (
+                -count_item(worker.backpack, material),
+                wall_distance(worker),
+                worker.unit_id,
+            ),
+        )
+
+    return min(
+        workers,
+        key=lambda worker: (
+            _route_sort_key(
+                _stone_route_eta(world, worker, wall_targets)
+            ),
+            worker.unit_id,
+        ),
+    )
+
+
+def _route_sort_key(route: tuple[int, int]) -> tuple[int, int, int]:
+    mine_eta, return_eta = route
+    if mine_eta < 0 or return_eta < 0:
+        return (1, 1_000_000, 1_000_000)
+    return (0, mine_eta + return_eta, mine_eta)
+
+
+def _weapon_deadline_at_risk(
+    observation: Observation,
+    world: WorldGrid,
+    workers: tuple[UnitState, ...],
+    layout: DefensiveLayout,
+    missing_types: tuple[str, ...],
+    ready_count: int,
+    early_target: int,
+    stone_worker: UnitState | None,
+    deadline_round: int,
+) -> bool:
+    needed = max(0, early_target - ready_count)
+    if needed == 0 or len(workers) < 2:
+        return False
+    remaining_types = list(missing_types)
+    targets: list[Position] = []
+    for site in layout.weapon_sites:
+        if site.weapon_type not in remaining_types:
+            continue
+        targets.append(site.position)
+        remaining_types.remove(site.weapon_type)
+    builders = tuple(
+        worker
+        for worker in workers
+        if stone_worker is None or worker.unit_id != stone_worker.unit_id
+    ) or workers
+    def builder_eta(worker: UnitState) -> int:
+        costs = sorted(
+            path.cost
+            for target in targets
+            if (path := path_to_interaction(
+                world,
+                worker.position,
+                target,
+            )) is not None
+        )
+        if len(costs) < needed:
+            return 1_000_000
+        return sum(costs[:needed]) + needed
+
+    single_builder_eta = min(builder_eta(worker) for worker in builders)
+    rounds_available = max(
+        0,
+        deadline_round - observation.time.round_in_phase,
+    )
+    return single_builder_eta > rounds_available
 
 
 def _recall_eta(world: WorldGrid) -> int:

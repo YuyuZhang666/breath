@@ -14,7 +14,7 @@ from tests.strategy_helpers import observation, unit
 
 
 class OpeningDefenseTests(unittest.TestCase):
-    def test_round_one_makes_both_workers_available_for_weapons(self) -> None:
+    def test_round_one_splits_stone_supply_and_weapon_building(self) -> None:
         observed = observation(
             our_units=(
                 unit(10010, 2, 5, 'worker'),
@@ -38,14 +38,17 @@ class OpeningDefenseTests(unittest.TestCase):
         self.assertEqual(opening.stage, OpeningStage.STONE_SUPPLY)
         self.assertEqual(
             opening.assignment_for(10010),
-            'opening_dynamic_builder',
+            'opening_wall_supply',
         )
         self.assertEqual(
             opening.assignment_for(10012),
-            'opening_dynamic_builder',
+            'opening_weapon_builder',
         )
-        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
+        self.assertEqual(jobs[10010][0].kind, JobKind.COLLECT)
         self.assertEqual(jobs[10012][0].kind, JobKind.BUILD_WEAPON)
+        planned = plan_turn(observed)
+        self.assertEqual(planned.commands[10010].kind, ActionKind.COLLECT)
+        self.assertEqual(planned.commands[10012].kind, ActionKind.BUILD)
 
     def test_worker_with_stone_owns_wall_build_through_response(self) -> None:
         base = observation(
@@ -93,7 +96,9 @@ class OpeningDefenseTests(unittest.TestCase):
             'build',
         )
 
-    def test_second_worker_collects_own_stone_after_two_weapons(self) -> None:
+    def test_flex_worker_builds_third_weapon_while_wall_pipeline_is_ready(
+        self,
+    ) -> None:
         base = observation(
             our_units=(unit(10013, 5, 5, 'station', level=1),),
         )
@@ -131,11 +136,117 @@ class OpeningDefenseTests(unittest.TestCase):
 
         self.assertEqual(
             opening.assignment_for(10012),
-            'opening_dynamic_builder',
+            'opening_flex_builder',
         )
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertEqual(jobs[10012][0].kind, JobKind.BUILD_WEAPON)
+
+    def test_flex_worker_collects_stone_after_third_weapon(self) -> None:
+        base = observation(
+            our_units=(unit(10013, 5, 5, 'station', level=1),),
+        )
+        layout = build_defensive_layout(WorldGrid.from_observation(base))
+        weapons = tuple(
+            unit(
+                20000 + index,
+                site.position.x,
+                site.position.y,
+                site.weapon_type,
+                level=1,
+            )
+            for index, site in enumerate(layout.weapon_sites)
+        )
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 4, 'worker', backpack=('stone',) * 6),
+                unit(10012, 2, 5, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+                *weapons,
+            ),
+            zones=(Zone(Position(3, 5), 'stone'),),
+            gold=0,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+
+        jobs = generate_day_jobs(observed, world, layout)
+
         self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
         self.assertEqual(jobs[10012][0].kind, JobKind.COLLECT)
         self.assertEqual(jobs[10012][0].name, 'stone')
+
+    def test_weapon_deadline_risk_temporarily_uses_both_workers(self) -> None:
+        observed = observation(
+            round_no=14,
+            our_units=(
+                unit(10010, 1, 1, 'worker'),
+                unit(10012, 1, 2, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            zones=(Zone(Position(2, 1), 'stone'),),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+
+        opening = build_opening_plan(
+            observed,
+            world,
+            layout,
+            DEFAULT_STRATEGIC_INTENT,
+        )
+        jobs = generate_day_jobs(observed, world, layout)
+        planned = plan_turn(observed)
+
+        self.assertTrue(opening.weapon_deadline_at_risk)
+        self.assertEqual(
+            opening.assignment_for(10010),
+            'opening_weapon_recovery',
+        )
+        self.assertEqual(
+            opening.assignment_for(10012),
+            'opening_weapon_recovery',
+        )
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
+        self.assertEqual(jobs[10012][0].kind, JobKind.BUILD_WEAPON)
+        self.assertEqual(set(planned.commands), {10010, 10012})
+
+    def test_late_wall_shortfall_blocks_optional_third_weapon(self) -> None:
+        base = observation(
+            our_units=(unit(10013, 5, 5, 'station', level=1),),
+        )
+        layout = build_defensive_layout(WorldGrid.from_observation(base))
+        weapons = tuple(
+            unit(
+                20000 + index,
+                site.position.x,
+                site.position.y,
+                site.weapon_type,
+                level=1,
+            )
+            for index, site in enumerate(layout.weapon_sites[:2])
+        )
+        observed = observation(
+            round_no=60,
+            our_units=(
+                unit(10010, 2, 4, 'worker', backpack=('stone',)),
+                unit(10012, 2, 5, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+                *weapons,
+            ),
+            zones=(Zone(Position(3, 5), 'stone'),),
+            gold=25,
+        )
+        world = WorldGrid.from_observation(observed)
+
+        jobs = generate_day_jobs(
+            observed,
+            world,
+            build_defensive_layout(world),
+        )
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertEqual(jobs[10012][0].kind, JobKind.COLLECT)
 
     def test_two_wall_workers_build_distinct_nearby_targets(self) -> None:
         base = observation(
@@ -155,7 +266,7 @@ class OpeningDefenseTests(unittest.TestCase):
                 site.weapon_type,
                 level=1,
             )
-            for index, site in enumerate(initial_layout.weapon_sites[:2])
+            for index, site in enumerate(initial_layout.weapon_sites)
         )
         observed = observation(
             our_units=(

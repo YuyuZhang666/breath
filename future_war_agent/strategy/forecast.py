@@ -23,7 +23,8 @@ from .simulation.tail import estimate_tail
 from .world import WorldGrid
 
 
-MODEL_VERSION = 'night-forecast-v1'
+MODEL_VERSION = 'night-forecast-v2'
+_LIGHTWEIGHT_JOINT_FIRE_HORIZON = 2
 _PERSONAL_ROLES = frozenset({'worker', 'pioneer'})
 _WEAPON_ROLES = frozenset({'gatling', 'railgun', 'rocket'})
 
@@ -92,6 +93,7 @@ class ForecastRefresh:
 def refresh_night_forecast(
     observation: Observation,
     *,
+    world: WorldGrid | None = None,
     previous_observation: Observation | None = None,
     previous_forecast: NightForecast | None = None,
     previous_decision: Decision | None = None,
@@ -125,6 +127,8 @@ def refresh_night_forecast(
             try:
                 lightweight = build_lightweight_forecast(
                     observation,
+                    world=world,
+                    controller_assignments=controller_assignments,
                     config=config,
                     clock=clock,
                     deadline=deadline,
@@ -150,6 +154,7 @@ def refresh_night_forecast(
         try:
             forecast = build_night_forecast(
                 observation,
+                world=world,
                 controller_assignments=controller_assignments,
                 config=config,
                 clock=clock,
@@ -158,6 +163,8 @@ def refresh_night_forecast(
         except UnsupportedSimulation as exc:
             forecast = build_lightweight_forecast(
                 observation,
+                world=world,
+                controller_assignments=controller_assignments,
                 config=config,
                 clock=clock,
                 deadline=deadline,
@@ -188,6 +195,7 @@ def refresh_night_forecast(
 def build_night_forecast(
     observation: Observation,
     *,
+    world: WorldGrid | None = None,
     controller_assignments: tuple[ControllerAssignment, ...] | None = None,
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
     clock: Callable[[], float] = monotonic,
@@ -198,7 +206,7 @@ def build_night_forecast(
             raise DeadlineExceeded('NightForecast deadline expired')
 
     check_deadline()
-    world = WorldGrid.from_observation(observation)
+    world = WorldGrid.from_observation(observation) if world is None else world
     check_deadline()
     assignments = tuple(
         AssignedStand(item.role_id, item.weapon_id, item.stand)
@@ -310,6 +318,8 @@ def build_night_forecast(
 def build_lightweight_forecast(
     observation: Observation,
     *,
+    world: WorldGrid | None = None,
+    controller_assignments: tuple[ControllerAssignment, ...] | None = None,
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
     clock: Callable[[], float] = monotonic,
     deadline: float | None = None,
@@ -339,6 +349,133 @@ def build_lightweight_forecast(
         0,
         NIGHT_ROUNDS - observation.time.round_in_phase + 1,
     )
+    rollout_failure_reason: str | None = None
+    try:
+        check_deadline()
+        world = WorldGrid.from_observation(observation) if world is None else world
+        assignments = tuple(
+            AssignedStand(item.role_id, item.weapon_id, item.stand)
+            for item in (
+                assign_controllers(observation, world)
+                if controller_assignments is None
+                else controller_assignments
+            )
+        )
+        check_deadline()
+        state = build_sim_state(observation, assignments, config)
+        initial_wall_ids = frozenset(wall.unit_id for wall in state.walls)
+        initial_weapon_ids = frozenset(weapon.unit_id for weapon in state.weapons)
+        initial_role_ids = frozenset(role.unit_id for role in state.roles)
+        expected_next_hp = station_hp
+        lethal_round = None
+        horizon = min(
+            _LIGHTWEIGHT_JOINT_FIRE_HORIZON,
+            state.remaining_night_turns,
+        )
+        for step_index in range(horizon):
+            check_deadline()
+            action = choose_future_action(
+                state,
+                config,
+                profile=StrategyProfile.SURVIVE,
+                deadline_check=check_deadline,
+            )
+            state = step_simulation(
+                state,
+                action,
+                RobotPolicy.MAXIMUM_STATION_PROGRESS,
+                config,
+                deadline_check=check_deadline,
+            )
+            if step_index == 0:
+                expected_next_hp = state.station.health
+            if state.station.health <= 0:
+                lethal_round = state.round_no
+                break
+
+        check_deadline()
+        tail = estimate_tail(
+            state,
+            config,
+            clock=clock,
+            deadline=deadline,
+        )
+        if lethal_round is None:
+            lethal_round = tail.lethal_round
+        exact_station_damage = max(0, station_hp - state.station.health)
+        predicted_damage = exact_station_damage + tail.incoming_damage
+        effective_defense = (
+            station_hp
+            + max(0, tail.effective_hp - state.station.health)
+        )
+        survival_margin = (
+            effective_defense + tail.future_firepower - predicted_damage
+        )
+        risk_ratio = Fraction(predicted_damage, max(1, effective_defense))
+        surviving_wall_ids = frozenset(wall.unit_id for wall in state.walls)
+        surviving_weapon_ids = frozenset(
+            weapon.unit_id for weapon in state.weapons
+        )
+        surviving_role_ids = frozenset(role.unit_id for role in state.roles)
+        uncertainty = tuple(
+            dict.fromkeys(
+                (
+                    'lightweight_conservative_estimate',
+                    'bounded_joint_fire_rollout',
+                    *tail.uncertainty_reasons,
+                )
+            )
+        )
+        input_summary = summarize_forecast_inputs(observation)
+        return NightForecast(
+            expected_station_hp_at_dawn=tail.expected_station_hp_at_dawn,
+            predicted_damage_before_dawn=predicted_damage,
+            effective_defense_hp=effective_defense,
+            future_firepower=tail.future_firepower,
+            survival_margin=survival_margin,
+            risk_ratio=risk_ratio,
+            risk_level=classify_risk(
+                risk_ratio,
+                survival_margin,
+                lethal_round,
+                observation.time.round_no,
+                complete=False,
+            ),
+            expected_wall_losses=(
+                len(initial_wall_ids - surviving_wall_ids)
+                + tail.expected_wall_losses
+            ),
+            expected_weapon_losses=(
+                len(initial_weapon_ids - surviving_weapon_ids)
+                + tail.expected_weapon_losses
+            ),
+            expected_role_losses=(
+                len(initial_role_ids - surviving_role_ids)
+                + tail.expected_role_losses
+            ),
+            lethal_round=lethal_round,
+            critical_robot_ids=tail.critical_robot_ids,
+            critical_wall_ids=tail.critical_wall_ids,
+            generated_round=observation.time.round_no,
+            updated_round=observation.time.round_no,
+            day_no=observation.time.day_no,
+            model_version=MODEL_VERSION,
+            update_kind=ForecastUpdateKind.LIGHTWEIGHT,
+            complete=False,
+            uncertainty_reasons=uncertainty,
+            observed_station_hp=station_hp,
+            expected_next_station_hp=expected_next_hp,
+            input_signature=input_summary.signature,
+        )
+    except DeadlineExceeded:
+        raise
+    except UnsupportedSimulation:
+        rollout_failure_reason = 'joint_fire_rollout_unsupported'
+    except Exception:
+        # Fail closed: never assume friendly fire when the deterministic
+        # baseline cannot be established.
+        rollout_failure_reason = 'joint_fire_rollout_failed'
+
     incoming_damage = 0
     next_damage = 0
     critical_robots: list[tuple[int, int]] = []
@@ -388,6 +525,8 @@ def build_lightweight_forecast(
         else None
     )
     uncertainty = ['lightweight_conservative_estimate']
+    if rollout_failure_reason is not None:
+        uncertainty.append(rollout_failure_reason)
     if not config.tail_visible_roster_complete:
         uncertainty.append('future_robot_roster_unconfirmed')
     if any(
@@ -672,6 +811,9 @@ def summarize_forecast_inputs(
             unit.position.y,
             unit.cooldown,
             unit.level,
+            unit.attack_power,
+            unit.attack_range,
+            tuple(sorted(unit.provided_fields)),
         )
         for unit in sorted(
             observation.our.units,
@@ -693,13 +835,34 @@ def summarize_forecast_inputs(
             key=lambda robot: robot.robot_id,
         )
     )
+    enemy_state = tuple(
+        (
+            unit.unit_id,
+            unit.role_type,
+            unit.health,
+            unit.position.x,
+            unit.position.y,
+        )
+        for unit in sorted(
+            observation.enemy.units,
+            key=lambda unit: unit.unit_id,
+        )
+    )
+    zone_state = tuple(
+        sorted((zone.position.x, zone.position.y) for zone in observation.zones)
+    )
     signature_payload = repr(
         (
             MODEL_VERSION,
+            observation.width,
+            observation.height,
             observation.time.day_no,
             observation.time.round_in_phase,
+            observation.our.team_type,
             bool(observation.phase_task.strip()),
             friendly_state,
+            enemy_state,
+            zone_state,
             robot_state,
         )
     ).encode('utf-8')

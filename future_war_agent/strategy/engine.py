@@ -36,7 +36,11 @@ from .night import (
 )
 from .planner import plan_turn
 from .policy import DEFAULT_STRATEGIC_INTENT, StrategicIntent, StrategyProfile
-from .reconcile import reconcile_scenario_weights, uniform_scenario_weights
+from .reconcile import (
+    ScenarioStateCache,
+    reconcile_scenario_weights,
+    uniform_scenario_weights,
+)
 from .session import (
     SessionContinuity,
     SessionStore,
@@ -126,6 +130,7 @@ class StrategyEngine:
             night_searcher,
             'budget',
         )
+        self._search_accepts_world = _accepts_keyword(night_searcher, 'world')
         self._objective_provider = objective_provider
         self._director = director if director is not None else StrategicDirector()
         self._task_agent = task_agent if task_agent is not None else TaskAgent()
@@ -153,6 +158,11 @@ class StrategyEngine:
             phase2_planner,
             'build_recovery',
         )
+        self._phase2_accepts_world = _accepts_keyword(phase2_planner, 'world')
+        self._phase2_accepts_opponent_memory = _accepts_keyword(
+            phase2_planner,
+            'opponent_memory',
+        )
         self._treasure_agent = (
             treasure_agent if treasure_agent is not None else TreasureAgent()
         )
@@ -162,6 +172,13 @@ class StrategyEngine:
         self._clock = clock
         self._sessions = session_store if session_store is not None else SessionStore()
         self._scenario_reconciler = scenario_reconciler
+        self._scenario_state_cache = ScenarioStateCache()
+        self._reconciler_accepts_state_cache = _accepts_keyword(
+            scenario_reconciler, 'state_cache',
+        )
+        self._reconciler_accepts_current_world = _accepts_keyword(
+            scenario_reconciler, 'current_world',
+        )
         self._controller_assignments = (
             controller_assignment_cache
             if controller_assignment_cache is not None
@@ -183,6 +200,9 @@ class StrategyEngine:
         self._forecast_accepts_allow_full = _accepts_keyword(
             night_forecaster,
             'allow_full',
+        )
+        self._forecast_accepts_world = _accepts_keyword(
+            night_forecaster, 'world',
         )
         self._telemetry = telemetry
         self._compute_governor = (
@@ -474,6 +494,8 @@ class StrategyEngine:
             self._telemetry.set(duplicate_request=True)
             return previous.decision
 
+        world = WorldGrid.from_observation(observation)
+
         match_memory = None
         try:
             match_memory = self._memory.observe(
@@ -674,7 +696,7 @@ class StrategyEngine:
                     controller_assignments, cache_hit = (
                         self._controller_assignments.resolve(
                             observation,
-                            WorldGrid.from_observation(observation),
+                            world,
                             mode_key=StrategyProfile.SURVIVE.value,
                             excluded_role_ids=task_controller_exclusions,
                         )
@@ -721,6 +743,8 @@ class StrategyEngine:
                         forecast_kwargs['allow_full'] = (
                             self._compute_governor.config.night_full_forecast_enabled
                         )
+                    if self._forecast_accepts_world:
+                        forecast_kwargs['world'] = world
                     with self._telemetry.measure('forecast_ms'):
                         forecast_refresh = self._night_forecaster(
                             observation,
@@ -939,7 +963,7 @@ class StrategyEngine:
                 controller_assignments, cache_hit = (
                     self._controller_assignments.resolve(
                         observation,
-                        WorldGrid.from_observation(observation),
+                        world,
                         mode_key=intent.profile.value,
                         excluded_role_ids=desired_controller_exclusions,
                     )
@@ -1007,6 +1031,12 @@ class StrategyEngine:
                 ),
                 previously_built_wall_sites,
                 build_recovery,
+                world=world,
+                opponent_memory=(
+                    match_memory.opponent_memory
+                    if match_memory is not None
+                    else None
+                ),
             )
             if decision != Decision():
                 self._telemetry.set(decision_source='phase2')
@@ -1056,10 +1086,19 @@ class StrategyEngine:
             else:
                 if continuity is SessionContinuity.CONSECUTIVE:
                     try:
+                        reconcile_kwargs: dict[str, object] = {
+                            'config': self._config,
+                        }
+                        if self._reconciler_accepts_state_cache:
+                            reconcile_kwargs['state_cache'] = (
+                                self._scenario_state_cache
+                            )
+                        if self._reconciler_accepts_current_world:
+                            reconcile_kwargs['current_world'] = world
                         weights = self._scenario_reconciler(
                             previous,
                             observation,
-                            config=self._config,
+                            **reconcile_kwargs,
                         )
                     except Exception:
                         self._telemetry.set(fallback_used=True)
@@ -1139,6 +1178,8 @@ class StrategyEngine:
                         search_kwargs['intent'] = intent
                     if self._search_accepts_baseline:
                         search_kwargs['baseline_decision'] = decision
+                    if self._search_accepts_world:
+                        search_kwargs['world'] = world
                     phase3_started_ns = perf_counter_ns()
                     try:
                         request_budget.checkpoint('phase 3 search')
@@ -1351,6 +1392,17 @@ class StrategyEngine:
                         pending_candidate is not None
                         and pending_candidate.source == 'sop'
                     ),
+                    task_first_answer_latency_rounds=(
+                        task_state.first_answer_latency_rounds
+                        if task_state.first_answer_latency_rounds is not None
+                        else -1
+                    ),
+                    task_first_to_best_latency_rounds=(
+                        task_state.first_to_best_latency_rounds
+                    ),
+                    task_finalized_count=task_state.finalized_task_count,
+                    task_success_count=task_state.successful_task_count,
+                    task_final_pass_rate=task_state.final_pass_rate,
                 )
             except Exception:
                 self._telemetry.set(fallback_used=True)
@@ -1460,6 +1512,9 @@ class StrategyEngine:
         previous_decision: Decision | None = None,
         previously_built_wall_sites: frozenset[Position] = frozenset(),
         build_recovery: BuildRecoveryState = EMPTY_BUILD_RECOVERY_STATE,
+        *,
+        world: WorldGrid | None = None,
+        opponent_memory=None,
     ) -> Decision:
         kwargs: dict[str, object] = {}
         if self._phase2_accepts_intent:
@@ -1482,6 +1537,10 @@ class StrategyEngine:
             )
         if self._phase2_accepts_build_recovery:
             kwargs['build_recovery'] = build_recovery
+        if self._phase2_accepts_world and world is not None:
+            kwargs['world'] = world
+        if self._phase2_accepts_opponent_memory:
+            kwargs['opponent_memory'] = opponent_memory
         try:
             with self._telemetry.measure('phase2_ms'):
                 return self._phase2_planner(observation, **kwargs)

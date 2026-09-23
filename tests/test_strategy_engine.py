@@ -7,6 +7,7 @@ from fractions import Fraction
 from math import ceil
 from pathlib import Path
 from statistics import median
+from unittest.mock import patch
 
 from future_war_agent.decision.actions import Action
 from future_war_agent.decision.decision import Decision
@@ -44,6 +45,7 @@ from future_war_agent.strategy.simulation.search import (
     SearchResult,
     SearchStats,
 )
+from future_war_agent.strategy.world import WorldGrid
 from future_war_agent.telemetry import TelemetryRecorder
 from tests.strategy_helpers import observation, robot, unit
 
@@ -199,6 +201,18 @@ class StrategyEngineTests(unittest.TestCase):
         self.assertIs(duplicate, first)
         self.assertEqual(len(phase2.observations), 1)
         self.assertEqual(search.calls, [])
+
+    def test_night_pipeline_constructs_current_world_grid_once(self) -> None:
+        engine, _, _ = self.make_engine()
+
+        with patch.object(
+            WorldGrid,
+            'from_observation',
+            wraps=WorldGrid.from_observation,
+        ) as build_world:
+            engine.plan(self.night)
+
+        self.assertEqual(build_world.call_count, 1)
 
     def test_phase2_receives_daily_anchor_and_historical_wall_sites(self) -> None:
         captured: list[tuple[tuple[Position, ...], frozenset[Position]]] = []

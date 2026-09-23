@@ -58,6 +58,7 @@ class WorldGridTests(unittest.TestCase):
             Position(10, 10),
         ):
             self.assertIn(blocked, world.hard_blocked)
+        self.assertIs(world.hard_blocked, world.hard_blocked)
 
     def test_interaction_cells_are_adjacent_and_traversable(self) -> None:
         target = Position(3, 3)

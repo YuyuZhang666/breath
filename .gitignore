@@ -6,3 +6,4 @@ venv/
 htmlcov/
 /log_secret.key
 /log_secret.*.key
+/task_sops.json

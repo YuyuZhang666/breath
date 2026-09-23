@@ -303,6 +303,22 @@ def assign_controllers(
     preferred_weapon_by_role = {
         item.role_id: item.weapon_id for item in preferred_assignments
     }
+    risk_by_role_position = {
+        (role.unit_id, position): _operator_risk(observation, position)
+        for role in roles
+        for position in {
+            role.position,
+            *(
+                option.stand
+                for weapon in weapons
+                for option in options_by_pair[(role.unit_id, weapon.unit_id)]
+            ),
+        }
+    }
+    weapon_values = {
+        weapon.unit_id: _assignment_weapon_value(weapon, mode_key)
+        for weapon in weapons
+    }
     for size in range(min(len(roles), len(weapons)), 0, -1):
         best: tuple[ControllerAssignment, ...] | None = None
         best_score: tuple[object, ...] | None = None
@@ -315,6 +331,38 @@ def assign_controllers(
                         break
                     pair_options.append(options)
                 else:
+                    selected_role_ids = {
+                        role.unit_id for role in selected_roles
+                    }
+                    optimistic_risks = [
+                        risk_by_role_position[(role.unit_id, role.position)]
+                        for role in roles
+                        if role.unit_id not in selected_role_ids
+                    ]
+                    optimistic_ready = 0
+                    for role, weapon, options in zip(
+                        selected_roles, selected_weapons, pair_options,
+                    ):
+                        optimistic_risks.append(min(
+                            risk_by_role_position[(role.unit_id, option.stand)]
+                            for option in options
+                        ))
+                        optimistic_ready += int(
+                            weapon.cooldown == 0
+                            and weapon.attack_range > 0
+                            and any(option.stand == role.position for option in options)
+                        )
+                    optimistic_unsafe = sum(
+                        risk >= 3 for risk in optimistic_risks
+                    )
+                    if best_score is not None and (
+                        optimistic_unsafe > best_score[0]
+                        or (
+                            optimistic_unsafe == best_score[0]
+                            and -optimistic_ready > best_score[1]
+                        )
+                    ):
+                        continue
                     for possible in product(*pair_options):
                         if len({item.stand for item in possible}) != size:
                             continue
@@ -334,10 +382,7 @@ def assign_controllers(
                             for item in ordered
                         )
                         attack_value = sum(
-                            _assignment_weapon_value(
-                                weapon_by_id[item.weapon_id],
-                                mode_key,
-                            )
+                            weapon_values[item.weapon_id]
                             for item in ordered
                         )
                         switch_count = sum(
@@ -353,8 +398,8 @@ def assign_controllers(
                             (item.role_id, item.stand) for item in ordered
                         )
                         operator_risks = tuple(
-                            _operator_risk(observation, position)
-                            for position in final_positions.values()
+                            risk_by_role_position[(role_id, position)]
+                            for role_id, position in final_positions.items()
                         )
                         unsafe_controller_count = sum(
                             risk >= 3 for risk in operator_risks

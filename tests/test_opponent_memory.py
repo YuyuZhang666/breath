@@ -229,6 +229,31 @@ class OpponentMemoryTests(unittest.TestCase):
         memory = store.get('team').opponent_memory
         self.assertEqual(len(memory.damage_patterns), MAX_DAMAGE_PATTERNS)
 
+    def test_enemy_station_damage_is_recorded_for_collapse_evidence(self) -> None:
+        store = MatchMemoryStore()
+        ours = (station(10, 12, 12),)
+        store.observe(
+            observation(
+                round_no=71,
+                our_units=ours,
+                enemy_units=(station(90, 2, 2, health=1000),),
+            )
+        )
+
+        memory = store.observe(
+            observation(
+                round_no=72,
+                our_units=ours,
+                enemy_units=(station(90, 2, 2, health=900),),
+            )
+        ).opponent_memory
+
+        self.assertEqual(len(memory.station_damage_history), 1)
+        sample = memory.station_damage_history[0]
+        self.assertEqual(sample.health_loss, 100)
+        self.assertEqual(sample.health_after, 900)
+        self.assertEqual(sample.phase, 'night')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -20,6 +20,16 @@ _PIONEER_ACTIONS = frozenset(
         ActionKind.SUMMON_TREASURE,
     }
 )
+_TARGETED_REMOTE_ITEMS = frozenset({'dizzyweapon', 'bomb'})
+_TARGETED_ADJACENT_ITEMS = frozenset({
+    'wallfixer',
+    'weaponupgradevoucher1',
+    'weaponupgradevoucher2',
+    'wallupgradevoucher1',
+    'wallupgradevoucher2',
+    'stationupgradevoucher1',
+    'stationupgradevoucher2',
+})
 
 
 def _is_non_blank(value: object) -> bool:
@@ -161,6 +171,8 @@ def _is_valid_personal_action(
     if action.kind is ActionKind.USE:
         if action.name is None or backpack[action.name.casefold()] <= 0:
             return False
+        if not _valid_strategic_item_use(observation, unit, action):
+            return False
     if action.kind is ActionKind.BUY:
         if not _valid_buy(observation, unit, action):
             return False
@@ -179,6 +191,49 @@ def _is_valid_personal_action(
         ):
             return False
     return True
+
+
+def _valid_strategic_item_use(
+    observation: Observation,
+    unit: UnitState,
+    action: Action,
+) -> bool:
+    name = (action.name or '').casefold()
+    targeted = _TARGETED_REMOTE_ITEMS | _TARGETED_ADJACENT_ITEMS
+    if name not in targeted:
+        return True
+    if len(action.target_positions) != 1:
+        return False
+    target = action.target_positions[0]
+    if (
+        name in _TARGETED_ADJACENT_ITEMS
+        and unit.position.chebyshev_distance(target) > 1
+    ):
+        return False
+    if name in _TARGETED_REMOTE_ITEMS:
+        return True
+
+    target_unit = next(
+        (
+            candidate
+            for candidate in observation.our.units
+            if candidate.health > 0 and candidate.position == target
+        ),
+        None,
+    )
+    if target_unit is None:
+        return False
+    if name == 'wallfixer':
+        return target_unit.role_type == 'wall'
+
+    expected_level = 1 if name.endswith('1') else 2
+    if target_unit.level != expected_level:
+        return False
+    if name.startswith('station'):
+        return target_unit.role_type == 'station'
+    if name.startswith('wall'):
+        return target_unit.role_type == 'wall'
+    return target_unit.role_type in _WEAPON_ROLES
 
 
 def _valid_buy(

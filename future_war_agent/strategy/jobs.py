@@ -44,6 +44,7 @@ class Job:
     quantity: int | None = None
     weapon_id: int | None = None
     reserve_eligible: bool = False
+    targeted: bool = False
 
     @property
     def sort_key(self) -> tuple[object, ...]:
@@ -311,6 +312,32 @@ def generate_day_jobs(
         // max(1, len(workers))
         * world.rules.wall_material_cost
     )
+    worker_count = max(1, len(workers))
+    stone_shortfall = max(
+        0,
+        missing_critical_count * world.rules.wall_material_cost
+        - current_stone,
+    )
+    supply_travel = 0
+    if stone_shortfall:
+        if opening.mine_eta < 0 or opening.return_eta < 0:
+            supply_travel = 1_000_000
+        else:
+            supply_travel = opening.mine_eta + opening.return_eta
+    estimated_wall_rounds = (
+        supply_travel
+        + (stone_shortfall + worker_count - 1) // worker_count
+        + (missing_critical_count + worker_count - 1) // worker_count
+    )
+    wall_round_budget = (
+        opening.remaining_daylight
+        - max(0, opening.recall_eta)
+        - world.rules.twilight_safety_margin
+    )
+    stone_pipeline_ready = (
+        has_actionable_stone_worker
+        and estimated_wall_rounds < wall_round_budget
+    )
 
     for role in roles:
         policy = intent.item_policy
@@ -331,6 +358,34 @@ def generate_day_jobs(
             )
 
     for worker in workers:
+        opening_assignment = opening.assignment_for(worker.unit_id)
+        opening_wall_lead = (
+            opening.active
+            and opening_assignment == 'opening_wall_supply'
+            and missing_critical_count > 0
+            and len(workers) > 1
+        )
+        worker_weapon_priority = early_weapon_priority
+        if opening_wall_lead:
+            worker_weapon_priority = min(
+                worker_weapon_priority,
+                priorities.build_wall - 1,
+            )
+        elif (
+            opening.active
+            and opening_assignment == 'opening_flex_builder'
+            and missing_weapon_sites
+            and stone_pipeline_ready
+        ):
+            worker_weapon_priority = max(
+                worker_weapon_priority,
+                min(
+                    priorities.recall - 1,
+                    priorities.build_wall
+                    + intent.build_plan.critical_wall_priority_boost
+                    + 2,
+                ),
+            )
         _add_recall_jobs(
             result[worker.unit_id],
             worker,
@@ -365,7 +420,7 @@ def generate_day_jobs(
                             role_id=worker.unit_id,
                             kind=JobKind.BUILD_WEAPON,
                             target=site.position,
-                            priority=early_weapon_priority,
+                            priority=worker_weapon_priority,
                             value=-float(path.cost),
                             name=site.weapon_type,
                             reserve_eligible=reserve_eligible,
@@ -483,13 +538,19 @@ def generate_day_jobs(
                 and backpack[world.rules.wall_material]
                 < world.rules.wall_material_cost
             )
+            opening_supply_urgent = (
+                opening_wall_lead
+                and backpack[world.rules.wall_material]
+                < world.rules.wall_material_cost
+            )
             _add_mining_jobs(
                 result[worker.unit_id],
                 worker,
                 observation,
                 world,
                 stone_needed=(
-                    dynamic_stone_supply
+                    opening_wall_lead
+                    or dynamic_stone_supply
                     or (
                         defense_started
                         and bool(missing_wall_sites)
@@ -501,6 +562,12 @@ def generate_day_jobs(
                     )
                 ),
                 priority=(
+                    min(
+                        priorities.recall - 1,
+                        early_weapon_priority + 1,
+                    )
+                    if opening_supply_urgent
+                    else
                     priorities.build_wall
                     + intent.build_plan.critical_wall_priority_boost
                     + 1

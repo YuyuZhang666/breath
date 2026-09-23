@@ -81,6 +81,7 @@ def search_night(
     intent: StrategicIntent = DEFAULT_STRATEGIC_INTENT,
     baseline_decision: Decision | None = None,
     budget: Phase3Budget | None = None,
+    world: WorldGrid | None = None,
 ) -> SearchResult:
     _validate_weights(scenario_weights)
     resolved_budget = config.budget_for(level) if budget is None else budget
@@ -94,7 +95,7 @@ def search_night(
     _check_deadline(clock, effective_deadline)
 
     candidate_started_ns = perf_counter_ns()
-    world = WorldGrid.from_observation(observation)
+    world = WorldGrid.from_observation(observation) if world is None else world
     resolved_assignments = (
         assign_controllers(observation, world)
         if controller_assignments is None

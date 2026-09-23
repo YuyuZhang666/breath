@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from future_war_agent.protocol.models import Observation, Position, UnitState
 
@@ -17,11 +17,32 @@ class WorldGrid:
     structure_cells: frozenset[Position]
     robot_cells: frozenset[Position]
     visible_enemy_role_cells: frozenset[Position]
+    hard_blocked: frozenset[Position]
     soft_friendly: frozenset[Position]
     friendly_roles: tuple[UnitState, ...]
     stations: tuple[UnitState, ...]
     weapons: tuple[UnitState, ...]
     walls: tuple[UnitState, ...]
+    _path_cache: dict[tuple[object, ...], object] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+    _heuristic_cache: dict[
+        frozenset[Position], dict[Position, int]
+    ] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+    _distance_cache: dict[
+        tuple[frozenset[Position], frozenset[Position]],
+        dict[Position, int],
+    ] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
 
     @classmethod
     def from_observation(
@@ -52,18 +73,30 @@ class WorldGrid:
                 key=lambda value: value.unit_id,
             )
         )
+        neutral_cells = frozenset(
+            zone.position for zone in observation.zones
+        )
+        structure_cells = frozenset(cells)
+        robot_cells = frozenset(
+            value.position for value in observation.robots if value.health > 0
+        )
+        visible_enemy_role_cells = frozenset(
+            value.position
+            for value in observation.enemy.units
+            if value.health > 0 and value.role_type in _ROLE_TYPES
+        )
         return cls(
             observation=observation,
             rules=rules,
-            neutral_cells=frozenset(zone.position for zone in observation.zones),
-            structure_cells=frozenset(cells),
-            robot_cells=frozenset(
-                value.position for value in observation.robots if value.health > 0
-            ),
-            visible_enemy_role_cells=frozenset(
-                value.position
-                for value in observation.enemy.units
-                if value.health > 0 and value.role_type in _ROLE_TYPES
+            neutral_cells=neutral_cells,
+            structure_cells=structure_cells,
+            robot_cells=robot_cells,
+            visible_enemy_role_cells=visible_enemy_role_cells,
+            hard_blocked=frozenset().union(
+                neutral_cells,
+                structure_cells,
+                robot_cells,
+                visible_enemy_role_cells,
             ),
             soft_friendly=frozenset(value.position for value in friendly_roles),
             friendly_roles=friendly_roles,
@@ -97,15 +130,6 @@ class WorldGrid:
                     key=lambda value: value.unit_id,
                 )
             ),
-        )
-
-    @property
-    def hard_blocked(self) -> frozenset[Position]:
-        return frozenset().union(
-            self.neutral_cells,
-            self.structure_cells,
-            self.robot_cells,
-            self.visible_enemy_role_cells,
         )
 
     def in_bounds(self, position: Position) -> bool:

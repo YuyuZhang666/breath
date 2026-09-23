@@ -72,6 +72,11 @@ class TurnTelemetry:
     effective_gold_reserve: int = 0
     task_candidate_count: int = 0
     task_sop_hit: bool = False
+    task_first_answer_latency_rounds: int = -1
+    task_first_to_best_latency_rounds: int = 0
+    task_finalized_count: int = 0
+    task_success_count: int = 0
+    task_final_pass_rate: float = 0.0
     treasure_candidate_count: int = 0
     treasure_attempted: bool = False
     treasure_result: int = 0
@@ -230,6 +235,11 @@ class _ActiveTurn:
     effective_gold_reserve: int = 0
     task_candidate_count: int = 0
     task_sop_hit: bool = False
+    task_first_answer_latency_rounds: int = -1
+    task_first_to_best_latency_rounds: int = 0
+    task_finalized_count: int = 0
+    task_success_count: int = 0
+    task_final_pass_rate: float = 0.0
     treasure_candidate_count: int = 0
     treasure_attempted: bool = False
     treasure_result: int = 0
@@ -477,6 +487,15 @@ class TelemetryRecorder:
             effective_gold_reserve=active.effective_gold_reserve,
             task_candidate_count=active.task_candidate_count,
             task_sop_hit=active.task_sop_hit,
+            task_first_answer_latency_rounds=(
+                active.task_first_answer_latency_rounds
+            ),
+            task_first_to_best_latency_rounds=(
+                active.task_first_to_best_latency_rounds
+            ),
+            task_finalized_count=active.task_finalized_count,
+            task_success_count=active.task_success_count,
+            task_final_pass_rate=active.task_final_pass_rate,
             treasure_candidate_count=active.treasure_candidate_count,
             treasure_attempted=active.treasure_attempted,
             treasure_result=active.treasure_result,

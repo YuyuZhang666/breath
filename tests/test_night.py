@@ -124,6 +124,33 @@ class NightPolicyTests(unittest.TestCase):
         paired = {(item.role_id, item.weapon_id) for item in assignments}
         self.assertEqual(paired, {(10010, 10020), (10011, 10030)})
 
+    def test_assignment_scoring_optimization_preserves_fixed_snapshot(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(101, 2, 4, 'worker'),
+                unit(102, 10, 4, 'worker'),
+                unit(103, 6, 11, 'pioneer'),
+                unit(200, 7, 7, 'station', level=1),
+                unit(300, 3, 4, 'gatling', level=2, attack_range=8),
+                unit(301, 11, 4, 'railgun', level=1, attack_range=8),
+                unit(302, 7, 11, 'rocket', level=1, attack_range=8),
+            ),
+        )
+
+        assignments = assign_controllers(
+            observed, WorldGrid.from_observation(observed),
+        )
+
+        self.assertEqual(
+            assignments,
+            (
+                ControllerAssignment(101, 300, Position(2, 4), 0),
+                ControllerAssignment(102, 301, Position(10, 4), 0),
+                ControllerAssignment(103, 302, Position(6, 11), 0),
+            ),
+        )
+
     def test_assignment_stand_cells_are_unique(self) -> None:
         observed = observation(
             round_no=71,

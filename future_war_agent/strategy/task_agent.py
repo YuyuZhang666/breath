@@ -1,7 +1,12 @@
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from hashlib import sha256
+import json
+import os
+from pathlib import Path
 import re
+import shlex
+import tempfile
 
 from future_war_agent.decision.actions import Action, ActionKind
 from future_war_agent.decision.decision import Decision
@@ -27,6 +32,9 @@ MAX_SOPS = 16
 MAX_TASK_TYPE_LENGTH = 128
 MAX_ANSWER_CANDIDATES = 16
 MAX_SUBMITTED_ANSWERS = 32
+MAX_COMMAND_STEPS = 4
+MAX_SOP_FILE_BYTES = 131_072
+DEFAULT_COMMAND_PROGRAMS = ('pwd', 'ls', 'find', 'python', 'python3')
 DEFAULT_EXPECTED_SOLVE_ROUNDS = 10.0
 TASK_GOLD_POINT_WEIGHT = 0.1
 TASK_TRAVEL_COST_PER_ROUND = 0.25
@@ -200,6 +208,12 @@ class TaskAgentState:
     abandon_until_round: int | None = None
     completed_task_fingerprint: str = ''
     sops: tuple[TaskSop, ...] = ()
+    first_answer_round: int | None = None
+    best_answer_round: int | None = None
+    first_answer_latency_rounds: int | None = None
+    first_to_best_latency_rounds: int = 0
+    finalized_task_count: int = 0
+    successful_task_count: int = 0
     official_news: str = ''
     folk_legends: str = ''
 
@@ -228,6 +242,20 @@ class TaskAgentState:
             raise ValueError('answer candidate capacity exceeded')
         if len(self.submitted_answer_fingerprints) > MAX_SUBMITTED_ANSWERS:
             raise ValueError('submitted answer capacity exceeded')
+        if min(
+            self.first_to_best_latency_rounds,
+            self.finalized_task_count,
+            self.successful_task_count,
+        ) < 0:
+            raise ValueError('task metrics cannot be negative')
+        if self.successful_task_count > self.finalized_task_count:
+            raise ValueError('successful task count exceeds finalized count')
+
+    @property
+    def final_pass_rate(self) -> float:
+        if self.finalized_task_count == 0:
+            return 0.0
+        return self.successful_task_count / self.finalized_task_count
 
 
 EMPTY_TASK_STATE = TaskAgentState()
@@ -256,6 +284,61 @@ class _TaskCandidate:
         )
 
 
+class TaskSopStore:
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+
+    def load(self) -> tuple[TaskSop, ...]:
+        try:
+            if self.path.is_symlink() or not self.path.is_file():
+                return ()
+            if self.path.stat().st_size > MAX_SOP_FILE_BYTES:
+                return ()
+            payload = json.loads(self.path.read_text(encoding='utf-8'))
+            rows = payload.get('sops', ()) if isinstance(payload, dict) else ()
+            if not isinstance(rows, list):
+                return ()
+            loaded = []
+            for row in rows[:MAX_SOPS]:
+                try:
+                    loaded.append(_sop_from_mapping(row))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+            return tuple(loaded)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return ()
+
+    def save(self, sops: tuple[TaskSop, ...]) -> bool:
+        payload = {
+            'version': 1,
+            'sops': [_sop_mapping(sop) for sop in sops[:MAX_SOPS]],
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, separators=(',', ':'),
+        ).encode('utf-8')
+        if len(encoded) > MAX_SOP_FILE_BYTES:
+            return False
+        return self._atomic_write(encoded)
+
+    def _atomic_write(self, encoded: bytes) -> bool:
+        temporary: Path | None = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if self.path.is_symlink():
+                return False
+            temporary = _write_sop_temp(self.path, encoded)
+            os.replace(temporary, self.path)
+            return True
+        except OSError:
+            return False
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
 class TaskAgent:
     def __init__(
         self,
@@ -263,6 +346,9 @@ class TaskAgent:
         execute_commands: tuple[str, ...] = (),
         abandon_policy: TaskAbandonPolicy | None = None,
         prompt_retry_rounds: int = 2,
+        sop_store: TaskSopStore | None = None,
+        commands_enabled: bool = False,
+        allowed_command_programs: tuple[str, ...] = DEFAULT_COMMAND_PROGRAMS,
     ) -> None:
         normalized = tuple(command.strip() for command in execute_commands)
         if any(
@@ -272,14 +358,26 @@ class TaskAgent:
             for command in normalized
         ):
             raise ValueError('execute commands must be bounded and nonblank')
+        if len(normalized) > MAX_COMMAND_STEPS:
+            raise ValueError('execute command step capacity exceeded')
+        if any(_unsafe_command(command) for command in normalized):
+            raise ValueError('execute commands must not contain shell operators')
         self._execute_commands = normalized
+        self._commands_enabled = commands_enabled
+        self._allowed_command_programs = frozenset(allowed_command_programs)
+        if any(
+            not program or not re.fullmatch(r'[A-Za-z0-9_.-]+', program)
+            for program in self._allowed_command_programs
+        ):
+            raise ValueError('allowed command programs must be simple names')
         self._abandon_policy = (
             abandon_policy if abandon_policy is not None else TaskAbandonPolicy()
         )
         if prompt_retry_rounds < 1:
             raise ValueError('prompt_retry_rounds must be positive')
         self._prompt_retry_rounds = prompt_retry_rounds
-        self._learned_sops: tuple[TaskSop, ...] = ()
+        self._sop_store = sop_store
+        self._learned_sops = sop_store.load() if sop_store is not None else ()
 
     def reconcile(
         self,
@@ -291,6 +389,7 @@ class TaskAgent:
             state,
             sops=_merge_sops(state.sops, self._learned_sops),
         )
+        before_feedback_sops = state.sops
         state = _reconcile_feedback(observation, state)
         state = _reconcile_command_result(observation, state)
         state = replace(
@@ -305,6 +404,8 @@ class TaskAgent:
             ),
         )
         self._learned_sops = state.sops
+        if self._sop_store is not None and state.sops != before_feedback_sops:
+            self._sop_store.save(state.sops)
         return state
 
     def apply(
@@ -321,6 +422,8 @@ class TaskAgent:
         if pioneer is None:
             return TaskAgentResult(base_decision, state)
         if _has_emergency_item_action(base_decision, pioneer.unit_id):
+            return TaskAgentResult(base_decision, state)
+        if _has_night_fire_action(observation, base_decision, pioneer.unit_id):
             return TaskAgentResult(base_decision, state)
         if _has_twilight_recall(observation, base_decision, pioneer):
             return TaskAgentResult(base_decision, state)
@@ -417,6 +520,10 @@ class TaskAgent:
             selected_task_position=selected.task.position,
             selected_task_value=_task_abandon_value(selected),
             timeout_rounds=selected.task.timeout_rounds,
+            first_answer_round=None,
+            best_answer_round=None,
+            first_answer_latency_rounds=None,
+            first_to_best_latency_rounds=0,
         )
         if pioneer.position.chebyshev_distance(selected.task.position) <= 1:
             deadline_round = (
@@ -484,6 +591,40 @@ class TaskAgent:
             }
             else ''
         )
+        command_mode_enabled = (
+            self._commands_enabled
+            or intent.feature_flags.enable_task_execute_commands
+        )
+        response_command = (
+            _validated_llm_command(
+                response_answer,
+                self._allowed_command_programs,
+            )
+            if command_mode_enabled
+            and response_answer.upper().startswith('EXEC:')
+            and state.pending_command_round is None
+            and state.command_step < MAX_COMMAND_STEPS
+            else ''
+        )
+        if response_command:
+            commands = {
+                actor_id: action
+                for actor_id, action in base_decision.commands.items()
+                if actor_id != pioneer.unit_id
+                and action.controller_id != pioneer.unit_id
+            }
+            return TaskAgentResult(
+                Decision(commands=commands, execute_command=response_command),
+                replace(
+                    state,
+                    command_step=state.command_step + 1,
+                    pending_command_round=observation.time.round_no,
+                    pending_prompt_fingerprint='',
+                    pending_prompt_round=None,
+                ),
+            )
+        if response_answer.upper().startswith('EXEC:'):
+            response_answer = ''
         candidates = state.candidates
         if state.best_answer and not candidates:
             candidates = _upsert_candidate(
@@ -553,6 +694,10 @@ class TaskAgent:
                     if value != answer_candidate.fingerprint
                 ),
             )[:MAX_SUBMITTED_ANSWERS]
+            first_answer_round = (
+                state.first_answer_round or observation.time.round_no
+            )
+            accepted_round = state.accepted_round or first_answer_round
             next_state = replace(
                 state,
                 active_task_type=task_type,
@@ -566,6 +711,16 @@ class TaskAgent:
                 pending_task_fingerprint=fingerprint,
                 candidates=candidates,
                 submitted_answer_fingerprints=submitted,
+                first_answer_round=first_answer_round,
+                best_answer_round=observation.time.round_no,
+                first_answer_latency_rounds=(
+                    state.first_answer_latency_rounds
+                    if state.first_answer_latency_rounds is not None
+                    else max(0, first_answer_round - accepted_round)
+                ),
+                first_to_best_latency_rounds=max(
+                    0, observation.time.round_no - first_answer_round,
+                ),
             )
             return TaskAgentResult(decision, next_state)
 
@@ -589,11 +744,18 @@ class TaskAgent:
             task_text,
             command_result=state.last_command_result,
             sop=parameter_sop,
+            allow_commands=(
+                command_mode_enabled
+                and state.command_step < MAX_COMMAND_STEPS
+            ),
         )
         execute_command = ''
         next_state = state
         if (
-            intent.feature_flags.enable_task_execute_commands
+            (
+                self._commands_enabled
+                or intent.feature_flags.enable_task_execute_commands
+            )
             and (parameter_sop is None or state.prompt_attempts > 0)
             and state.pending_command_round is None
             and state.command_step < len(self._execute_commands)
@@ -650,6 +812,20 @@ def _has_emergency_item_action(
 ) -> bool:
     action = decision.commands.get(pioneer_id)
     return action is not None and action.kind is ActionKind.USE
+
+
+def _has_night_fire_action(
+    observation: Observation,
+    decision: Decision,
+    pioneer_id: int,
+) -> bool:
+    if observation.time.phase is not Phase.NIGHT:
+        return False
+    return any(
+        action.kind is ActionKind.ATTACK
+        and (actor_id == pioneer_id or action.controller_id == pioneer_id)
+        for actor_id, action in decision.commands.items()
+    )
 
 
 def _has_twilight_recall(
@@ -933,12 +1109,22 @@ def _reconcile_feedback(
         return replace(
             _clear_task_lifecycle(state),
             sops=sops,
+            finalized_task_count=state.finalized_task_count + 1,
+            successful_task_count=state.successful_task_count + 1,
             completed_task_fingerprint=(
                 _fingerprint(task_text) if task_text else ''
             ),
         )
+    if has_immediate_result and task_was_closed:
+        return replace(
+            _clear_task_lifecycle(state),
+            finalized_task_count=state.finalized_task_count + 1,
+        )
     candidates = state.candidates
-    if has_immediate_result:
+    if has_immediate_result and (
+        not observation.last_action_results[pioneer_id]
+        or answer_was_rejected
+    ):
         pending_fingerprint = _fingerprint(state.pending_answer)
         candidates = tuple(
             replace(candidate, local_validation=CommandResultKind.ERROR)
@@ -1052,6 +1238,93 @@ def _merge_sops(
 
 def _bounded(value: str, limit: int) -> str:
     return value.replace('\x00', '').strip()[:limit]
+
+
+def _unsafe_command(command: str) -> bool:
+    return any(character in command for character in '\r\n;|&`$><')
+
+
+def _validated_llm_command(
+    response: str,
+    allowed_programs: frozenset[str],
+) -> str:
+    command = response[5:].strip() if response.upper().startswith('EXEC:') else ''
+    if not command or len(command) > MAX_COMMAND_LENGTH or _unsafe_command(command):
+        return ''
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return ''
+    if not tokens or len(tokens) > 12 or tokens[0] not in allowed_programs:
+        return ''
+    program, arguments = tokens[0], tokens[1:]
+    if program == 'pwd':
+        return command if not arguments else ''
+    if program in {'python', 'python3'}:
+        if not arguments or arguments[0].startswith('-'):
+            return ''
+        if not arguments[0].endswith('.py') or not _safe_relative(arguments[0]):
+            return ''
+    if program in {'ls', 'find'} and any(
+        (program == 'find' and _unsafe_find_argument(argument))
+        or (not argument.startswith('-') and not _safe_relative(argument))
+        for argument in arguments
+    ):
+        return ''
+    return command
+
+
+def _safe_relative(value: str) -> bool:
+    path = Path(value)
+    return not path.is_absolute() and '..' not in path.parts
+
+
+def _unsafe_find_argument(value: str) -> bool:
+    forbidden = (
+        '-delete', '-exec', '-execdir', '-ok', '-okdir',
+        '-fprint', '-fprintf', '-fls',
+    )
+    return any(value == item or value.startswith(item + '=') for item in forbidden)
+
+
+def _sop_from_mapping(value: object) -> TaskSop:
+    if not isinstance(value, dict):
+        raise TypeError('task SOP row must be an object')
+    return TaskSop(
+        task_type=str(value.get('task_type', '')),
+        answer=str(value.get('answer', '')),
+        task_fingerprint=str(value.get('task_fingerprint', '')),
+        task_template=str(value.get('task_template', '')),
+        sample_task=str(value.get('sample_task', '')),
+        command_steps=min(MAX_COMMAND_STEPS, max(0, int(value.get('command_steps', 0)))),
+        success_count=max(1, int(value.get('success_count', 1))),
+        solve_rounds_ewma=max(0.001, float(value.get('solve_rounds_ewma', 1.0))),
+    )
+
+
+def _sop_mapping(sop: TaskSop) -> dict[str, object]:
+    return {
+        'task_type': sop.task_type,
+        'answer': sop.answer,
+        'task_fingerprint': sop.task_fingerprint,
+        'task_template': sop.task_template,
+        'sample_task': sop.sample_task,
+        'command_steps': min(MAX_COMMAND_STEPS, sop.command_steps),
+        'success_count': sop.success_count,
+        'solve_rounds_ewma': sop.solve_rounds_ewma,
+    }
+
+
+def _write_sop_temp(target: Path, encoded: bytes) -> Path:
+    with tempfile.NamedTemporaryFile(
+        mode='wb', prefix=f'.{target.name}.', suffix='.tmp',
+        dir=target.parent, delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(encoded)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return temporary
 
 
 def _bounded_command_result(value: str) -> str:
@@ -1187,6 +1460,7 @@ def _build_prompt(
     *,
     command_result: str = '',
     sop: TaskSop | None = None,
+    allow_commands: bool = False,
 ) -> str:
     sandbox_context = (
         f'\nSandbox result:\n{command_result}' if command_result else ''
@@ -1199,9 +1473,16 @@ def _build_prompt(
         if sop is not None
         else ''
     )
+    response_rule = (
+        'Return either the final answer only, or one safe sandbox request as '
+        '`EXEC: <command>` when file inspection or computation is needed.\n'
+        if allow_commands
+        else 'Return only the final answer, with no explanation, markdown, '
+        'or shell commands.\n'
+    )
     prompt = (
-        'Solve the game task below. Return only the final answer, with no '
-        'explanation, markdown, or shell commands.\n'
+        'Solve the game task below. '
+        f'{response_rule}'
         f'Task type: {task_type}\n'
         f'Task: {task_text}'
         f'{sop_context}'

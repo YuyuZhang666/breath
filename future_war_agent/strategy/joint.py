@@ -227,16 +227,27 @@ def candidates_for_jobs(
                     _move_candidates(world, role, job, interaction=True)
                 )
         elif job.kind is JobKind.USE_ITEM and job.name is not None:
-            generated.append(
-                TacticalCandidate.personal_action(
-                    role.unit_id,
-                    role.position,
-                    Action.use(job.name),
-                    job.kind,
-                    job.priority,
-                    utility=job.value,
+            if (
+                not job.targeted
+                or role.position.chebyshev_distance(job.target) <= 1
+            ):
+                generated.append(
+                    TacticalCandidate.personal_action(
+                        role.unit_id,
+                        role.position,
+                        Action.use(
+                            job.name,
+                            job.target if job.targeted else None,
+                        ),
+                        job.kind,
+                        job.priority,
+                        utility=job.value,
+                    )
                 )
-            )
+            else:
+                generated.extend(
+                    _move_candidates(world, role, job, interaction=True)
+                )
 
     unique: dict[tuple[int, Action | None], TacticalCandidate] = {}
     for item in generated:
@@ -258,8 +269,52 @@ def candidates_for_jobs(
     if any(item.action is None for item in ranked):
         return tuple(ranked[:limit])
     if len(ranked) >= limit:
-        return tuple(ranked[: limit - 1] + [wait])
+        return tuple(_diversified_work_candidates(
+            ranked,
+            limit - 1,
+        ) + [wait])
     return tuple(ranked + [wait])
+
+
+def _diversified_work_candidates(
+    ranked: list[TacticalCandidate],
+    limit: int,
+) -> list[TacticalCandidate]:
+    if limit <= 0:
+        return []
+    selected: list[TacticalCandidate] = []
+    represented: set[JobKind] = set()
+    for item in ranked:
+        if item.job_kind in represented:
+            continue
+        selected.append(item)
+        represented.add(item.job_kind)
+        if len(selected) >= limit:
+            break
+    if len(selected) < limit:
+        exclusive_keys = {
+            item.exclusive_job_key
+            for item in selected
+            if item.exclusive_job_key is not None
+        }
+        for item in ranked:
+            if item in selected or item.exclusive_job_key is None:
+                continue
+            if item.exclusive_job_key in exclusive_keys:
+                continue
+            selected.append(item)
+            exclusive_keys.add(item.exclusive_job_key)
+            if len(selected) >= limit:
+                break
+    if len(selected) < limit:
+        for item in ranked:
+            if item in selected:
+                continue
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+    selected.sort(key=ranked.index)
+    return selected
 
 
 def is_valid_joint(

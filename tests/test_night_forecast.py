@@ -2,6 +2,7 @@ import unittest
 from dataclasses import replace
 from fractions import Fraction
 
+from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.forecast import (
     ForecastUpdateKind,
     RiskLevel,
@@ -10,10 +11,13 @@ from future_war_agent.strategy.forecast import (
     classify_risk,
     rebase_day_forecast,
     refresh_night_forecast,
+    summarize_forecast_inputs,
 )
+from future_war_agent.strategy.night import ControllerAssignment
 from future_war_agent.strategy.simulation.config import Phase3Config
 from future_war_agent.strategy.simulation.errors import DeadlineExceeded
 from future_war_agent.strategy.simulation.errors import UnsupportedSimulation
+from future_war_agent.strategy.world import WorldGrid
 from tests.strategy_helpers import observation, robot, unit
 
 
@@ -23,9 +27,11 @@ class NightForecastTests(unittest.TestCase):
             build_lightweight_forecast(observation(round_no=71))
 
     def test_full_forecast_honors_expired_deadline(self) -> None:
+        observed = self._quiet_night(71)
         with self.assertRaises(DeadlineExceeded):
             build_night_forecast(
-                self._quiet_night(71),
+                observed,
+                world=WorldGrid.from_observation(observed),
                 clock=lambda: 1.0,
                 deadline=1.0,
             )
@@ -100,6 +106,92 @@ class NightForecastTests(unittest.TestCase):
         self.assertIn(
             'robot_target_team_unconfirmed',
             forecast.uncertainty_reasons,
+        )
+        self.assertIn(
+            'joint_fire_rollout_unsupported',
+            forecast.uncertainty_reasons,
+        )
+
+    def test_lightweight_forecast_credits_bounded_joint_fire(self) -> None:
+        weapon_fields = ('attackPower', 'attackRange', 'level', 'cooldown')
+        armed = observation(
+            round_no=71,
+            our_units=(
+                unit(1, 8, 8, 'worker'),
+                unit(2, 10, 10, 'station', health=500, level=1),
+                unit(
+                    3,
+                    8,
+                    9,
+                    'gatling',
+                    health=100,
+                    attack_power=10,
+                    attack_range=5,
+                    level=1,
+                    provided_fields=weapon_fields,
+                ),
+            ),
+            robots=(robot(9, 6, 10, health=10),),
+        )
+        unarmed = replace(
+            armed,
+            our=replace(armed.our, units=armed.our.units[:2]),
+        )
+        assignments = (
+            ControllerAssignment(1, 3, Position(8, 8), 0),
+        )
+
+        armed_forecast = build_lightweight_forecast(
+            armed,
+            controller_assignments=assignments,
+        )
+        unarmed_forecast = build_lightweight_forecast(unarmed)
+
+        self.assertLess(
+            armed_forecast.predicted_damage_before_dawn,
+            unarmed_forecast.predicted_damage_before_dawn,
+        )
+        self.assertGreater(
+            armed_forecast.survival_margin,
+            unarmed_forecast.survival_margin,
+        )
+        self.assertIn(
+            'bounded_joint_fire_rollout',
+            armed_forecast.uncertainty_reasons,
+        )
+        self.assertFalse(armed_forecast.complete)
+
+    def test_forecast_signature_tracks_weapon_firepower_inputs(self) -> None:
+        weapon_fields = ('attackPower', 'attackRange', 'level', 'cooldown')
+        first = observation(
+            round_no=71,
+            our_units=(
+                unit(1, 8, 8, 'worker'),
+                unit(2, 10, 10, 'station', health=500, level=1),
+                unit(
+                    3,
+                    8,
+                    9,
+                    'gatling',
+                    attack_power=10,
+                    attack_range=4,
+                    level=1,
+                    provided_fields=weapon_fields,
+                ),
+            ),
+        )
+        changed_weapon = replace(first.our.units[2], attack_range=5)
+        second = replace(
+            first,
+            our=replace(
+                first.our,
+                units=(*first.our.units[:2], changed_weapon),
+            ),
+        )
+
+        self.assertNotEqual(
+            summarize_forecast_inputs(first).signature,
+            summarize_forecast_inputs(second).signature,
         )
 
     def test_full_forecast_unsupported_falls_back_to_lightweight(self) -> None:

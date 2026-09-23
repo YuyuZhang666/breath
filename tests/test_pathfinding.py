@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
 
 from future_war_agent.protocol.models import Position, Zone
+from future_war_agent.strategy import pathfinding
 from future_war_agent.strategy.pathfinding import (
     first_step_options,
     path_to_interaction,
@@ -82,6 +84,104 @@ class PathfindingTests(unittest.TestCase):
                 limit=2,
             ),
         )
+
+    def test_first_step_options_match_independent_shortest_path_costs(self) -> None:
+        world = WorldGrid.from_observation(
+            observation(
+                width=20,
+                height=20,
+                zones=tuple(
+                    Zone(Position(5, y), 'stone') for y in range(2, 12)
+                ),
+            )
+        )
+        start = Position(2, 6)
+        goals = (Position(12, 4), Position(12, 9))
+        expected = []
+        for dx, dy in pathfinding._STEPS:
+            neighbor = Position(start.x + dx, start.y + dy)
+            if not world.can_traverse(neighbor):
+                continue
+            remaining = shortest_path(world, neighbor, goals)
+            if remaining is not None:
+                expected.append(
+                    (1 + remaining.cost, neighbor.x, neighbor.y, neighbor)
+                )
+        expected.sort()
+
+        self.assertEqual(
+            first_step_options(world, start, goals, limit=3),
+            tuple(item[3] for item in expected[:3]),
+        )
+
+    def test_first_step_options_use_one_reverse_search_not_eight_astars(self) -> None:
+        world = WorldGrid.from_observation(observation(width=24, height=24))
+
+        with patch.object(
+            pathfinding,
+            'shortest_path',
+            wraps=pathfinding.shortest_path,
+        ) as shortest_spy:
+            options = first_step_options(
+                world,
+                Position(2, 2),
+                (Position(20, 20),),
+                limit=2,
+            )
+
+        self.assertEqual(len(options), 2)
+        shortest_spy.assert_not_called()
+
+    def test_exact_query_cache_is_scoped_to_world_instance(self) -> None:
+        start = Position(1, 2)
+        goals = (Position(4, 2),)
+        open_world = WorldGrid.from_observation(observation())
+        blocked_world = WorldGrid.from_observation(
+            observation(zones=(Zone(Position(2, 1), 'stone'),))
+        )
+
+        first = shortest_path(open_world, start, goals)
+        cached = shortest_path(open_world, start, goals)
+        blocked = shortest_path(blocked_world, start, goals)
+
+        self.assertIs(first, cached)
+        self.assertNotEqual(first.path, blocked.path)
+        self.assertIsNot(open_world._path_cache, blocked_world._path_cache)
+
+    def test_deadline_interrupts_search_without_caching_partial_result(self) -> None:
+        world = WorldGrid.from_observation(observation(width=30, height=30))
+        calls = 0
+
+        def deadline_check() -> None:
+            nonlocal calls
+            calls += 1
+            if calls >= 4:
+                raise TimeoutError('synthetic path deadline')
+
+        with self.assertRaises(TimeoutError):
+            shortest_path(
+                world,
+                Position(1, 1),
+                (Position(28, 28),),
+                deadline_check=deadline_check,
+            )
+
+        self.assertFalse(world._path_cache)
+
+    def test_deadline_is_checked_before_returning_cached_path(self) -> None:
+        world = WorldGrid.from_observation(observation())
+        shortest_path(world, Position(1, 1), (Position(4, 4),))
+
+        def expired() -> None:
+            raise TimeoutError('expired before cache lookup')
+
+        with self.assertRaises(TimeoutError):
+            shortest_path(
+                world,
+                Position(1, 1),
+                (Position(4, 4),),
+                deadline_check=expired,
+            )
 
 
 if __name__ == "__main__":

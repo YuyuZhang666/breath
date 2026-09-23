@@ -1,15 +1,18 @@
 import unittest
 from dataclasses import replace
 from fractions import Fraction
+from unittest.mock import patch
 
 from future_war_agent.decision.decision import Decision
 from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.reconcile import (
+    ScenarioStateCache,
     _reconciliation_loss,
     _weights_from_losses,
     reconcile_scenario_weights,
     uniform_scenario_weights,
 )
+from future_war_agent.strategy.simulation.config import DEFAULT_PHASE3_CONFIG
 from future_war_agent.strategy.session import (
     StrategySession,
     observation_fingerprint,
@@ -23,7 +26,7 @@ from future_war_agent.strategy.simulation.state import (
     SimStructure,
     SimWeapon,
 )
-from tests.strategy_helpers import observation, unit
+from tests.strategy_helpers import observation, robot, unit
 
 
 class StrategyReconcileTests(unittest.TestCase):
@@ -135,6 +138,73 @@ class StrategyReconcileTests(unittest.TestCase):
             reconcile_scenario_weights(previous, observed),
             uniform_scenario_weights(),
         )
+
+    def test_scenario_state_cache_reuses_exact_observation_and_invalidates(self) -> None:
+        cache = ScenarioStateCache(capacity=2)
+        observed = observation(
+            round_no=71,
+            our_units=(unit(1, 5, 5, 'station', health=500),),
+        )
+        changed = replace(
+            observed,
+            our=replace(
+                observed.our,
+                units=(unit(1, 5, 5, 'station', health=499),),
+            ),
+        )
+        state = self._state()
+
+        with patch(
+            'future_war_agent.strategy.reconcile._state_for',
+            return_value=state,
+        ) as build:
+            first, first_hit = cache.resolve(observed, DEFAULT_PHASE3_CONFIG)
+            second, second_hit = cache.resolve(observed, DEFAULT_PHASE3_CONFIG)
+            third, third_hit = cache.resolve(changed, DEFAULT_PHASE3_CONFIG)
+            fourth, fourth_hit = cache.resolve(
+                changed,
+                replace(DEFAULT_PHASE3_CONFIG, gatling_damage=11),
+            )
+
+        self.assertIs(first, second)
+        self.assertIs(third, state)
+        self.assertIs(fourth, state)
+        self.assertFalse(first_hit)
+        self.assertTrue(second_hit)
+        self.assertFalse(third_hit)
+        self.assertFalse(fourth_hit)
+        self.assertEqual(build.call_count, 3)
+
+    def test_cached_reconciliation_is_result_equivalent(self) -> None:
+        previous_observation = observation(
+            round_no=71,
+            our_units=(
+                unit(1, 2, 2, 'worker'),
+                unit(2, 7, 7, 'station', health=500, level=1),
+                unit(3, 4, 4, 'gatling', level=1, attack_range=5),
+            ),
+            robots=(robot(9, 0, 0),),
+        )
+        current = replace(
+            previous_observation,
+            time=previous_observation.time.from_round(72),
+            robots=(robot(9, 1, 1),),
+        )
+        previous = StrategySession(
+            team_id='team', last_round=71,
+            fingerprint=observation_fingerprint(previous_observation),
+            signature=static_signature(previous_observation),
+            observation=previous_observation, decision=Decision(),
+            simulation_action=SimJointAction(), certificate=None,
+            scenario_weights=uniform_scenario_weights(),
+        )
+
+        uncached = reconcile_scenario_weights(previous, current)
+        cached = reconcile_scenario_weights(
+            previous, current, state_cache=ScenarioStateCache(),
+        )
+
+        self.assertEqual(cached, uncached)
 
     @staticmethod
     def _state(*, empty_assets: bool = False) -> SimState:

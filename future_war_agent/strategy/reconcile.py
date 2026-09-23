@@ -1,9 +1,10 @@
 from fractions import Fraction
+from threading import RLock
 
 from future_war_agent.protocol.models import Observation
 
 from .night import assign_controllers
-from .session import StrategySession
+from .session import StrategySession, observation_fingerprint
 from .simulation.config import DEFAULT_PHASE3_CONFIG, Phase3Config
 from .simulation.errors import UnsupportedSimulation
 from .simulation.kernel import step_simulation
@@ -11,6 +12,34 @@ from .simulation.robots import ALL_ROBOT_POLICIES
 from .simulation.search import ScenarioWeights
 from .simulation.state import AssignedStand, SimState, build_sim_state
 from .world import WorldGrid
+
+
+class ScenarioStateCache:
+    def __init__(self, capacity: int = 4) -> None:
+        if capacity < 2:
+            raise ValueError('scenario state cache capacity must be at least two')
+        self._capacity = capacity
+        self._entries: dict[tuple[str, Phase3Config], SimState] = {}
+        self._lock = RLock()
+
+    def resolve(
+        self,
+        observation: Observation,
+        config: Phase3Config,
+        *,
+        world: WorldGrid | None = None,
+    ) -> tuple[SimState, bool]:
+        key = (observation_fingerprint(observation), config)
+        with self._lock:
+            cached = self._entries.get(key)
+            if cached is not None:
+                return cached, True
+        state = _state_for(observation, config, world=world)
+        with self._lock:
+            self._entries[key] = state
+            while len(self._entries) > self._capacity:
+                del self._entries[next(iter(self._entries))]
+        return state, False
 
 
 def uniform_scenario_weights() -> ScenarioWeights:
@@ -27,12 +56,20 @@ def reconcile_scenario_weights(
     current: Observation,
     *,
     config: Phase3Config = DEFAULT_PHASE3_CONFIG,
+    state_cache: ScenarioStateCache | None = None,
+    current_world: WorldGrid | None = None,
 ) -> ScenarioWeights:
     if previous.simulation_action is None:
         return previous.scenario_weights
     try:
-        previous_state = _state_for(previous.observation, config)
-        current_state = _state_for(current, config)
+        if state_cache is None:
+            previous_state = _state_for(previous.observation, config)
+            current_state = _state_for(current, config, world=current_world)
+        else:
+            previous_state, _ = state_cache.resolve(previous.observation, config)
+            current_state, _ = state_cache.resolve(
+                current, config, world=current_world,
+            )
         predictions = tuple(
             step_simulation(
                 previous_state,
@@ -58,8 +95,13 @@ def reconcile_scenario_weights(
     )
 
 
-def _state_for(observation: Observation, config: Phase3Config) -> SimState:
-    world = WorldGrid.from_observation(observation)
+def _state_for(
+    observation: Observation,
+    config: Phase3Config,
+    *,
+    world: WorldGrid | None = None,
+) -> SimState:
+    world = WorldGrid.from_observation(observation) if world is None else world
     assignments = tuple(
         AssignedStand(item.role_id, item.weapon_id, item.stand)
         for item in assign_controllers(observation, world)
