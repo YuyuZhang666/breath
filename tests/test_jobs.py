@@ -311,7 +311,7 @@ class DayJobTests(unittest.TestCase):
 
         self.assertEqual(reserve, 9)
 
-    def test_first_weapon_precedes_walls(self) -> None:
+    def test_early_weapon_priority_does_not_hide_wall_jobs(self) -> None:
         observed = observation(
             our_units=(
                 unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
@@ -323,21 +323,21 @@ class DayJobTests(unittest.TestCase):
         jobs = self.jobs(observed)
 
         self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
-        self.assertNotIn(
-            JobKind.BUILD_WALL,
-            {job.kind for job in jobs[10010]},
+        wall_job = next(
+            job for job in jobs[10010] if job.kind is JobKind.BUILD_WALL
         )
+        self.assertGreater(jobs[10010][0].priority, wall_job.priority)
 
-    def test_opening_wall_deadline_forces_critical_wall_without_weapon(
+    def test_critical_wall_is_available_immediately_without_weapon(
         self,
     ) -> None:
         observed = observation(
-            round_no=10,
+            round_no=1,
             our_units=(
                 unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
                 unit(10013, 5, 5, 'station', level=1),
             ),
-            gold=75,
+            gold=0,
         )
         world = WorldGrid.from_observation(observed)
         layout = build_defensive_layout(world)
@@ -347,7 +347,7 @@ class DayJobTests(unittest.TestCase):
         self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
         self.assertIn(jobs[10010][0].target, layout.critical_wall_sites)
 
-    def test_opening_wall_deadline_prioritizes_stone_over_more_weapons(
+    def test_early_two_tower_target_precedes_stone_collection(
         self,
     ) -> None:
         observed = observation(
@@ -362,10 +362,15 @@ class DayJobTests(unittest.TestCase):
 
         jobs = self.jobs(observed)
 
-        self.assertEqual(jobs[10010][0].kind, JobKind.COLLECT)
-        self.assertEqual(jobs[10010][0].name, 'stone')
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
+        stone_job = next(
+            job
+            for job in jobs[10010]
+            if job.kind is JobKind.COLLECT and job.name == 'stone'
+        )
+        self.assertGreater(jobs[10010][0].priority, stone_job.priority)
 
-    def test_one_off_plan_core_weapon_opens_critical_walls(self) -> None:
+    def test_one_core_weapon_keeps_second_tower_deadline_and_wall_option(self) -> None:
         observed = observation(
             our_units=(
                 unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
@@ -379,8 +384,11 @@ class DayJobTests(unittest.TestCase):
 
         jobs = generate_day_jobs(observed, world, layout)
 
-        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
-        self.assertIn(jobs[10010][0].target, layout.critical_wall_sites)
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
+        wall_job = next(
+            job for job in jobs[10010] if job.kind is JobKind.BUILD_WALL
+        )
+        self.assertIn(wall_job.target, layout.critical_wall_sites)
 
     def test_day_two_rebuilds_critical_walls_even_if_weapons_were_lost(
         self,

@@ -25,7 +25,7 @@ from .safety import (
 
 @dataclass(frozen=True, slots=True)
 class DirectorConfig:
-    evaluation_interval: int = 5
+    evaluation_interval: int = 1
     night_evaluation_interval: int = 1
     score_gold_floor: int = 75
     desperation_station_health: int = 100

@@ -10,7 +10,7 @@ class ComputeGovernorConfig:
     slow_phase3_ms: float = 250.0
     very_slow_phase3_ms: float = 300.0
     consecutive_very_slow_limit: int = 2
-    cooldown_rounds_after_watchdog: int = 10
+    cooldown_rounds_after_watchdog: int = 1
     total_decision_budget_seconds: float = 3.0
     phase3_hard_stop_seconds: float = 0.350
     forecast_watchdog_seconds: float = 0.100
@@ -63,7 +63,6 @@ class ComputeGovernorState:
     watchdog_hits: int = 0
     phase3_disabled_until_round: int = 0
     consecutive_very_slow: int = 0
-    full_disabled_day: int | None = None
     halve_root_round: int = 0
     last_phase3_ms: float = 0.0
     last_scenarios_per_root: int = 1
@@ -181,12 +180,6 @@ class ComputeGovernor:
                 )
 
             effective_level = requested_level
-            if (
-                requested_level is Phase3Level.FULL
-                and state.full_disabled_day == day_no
-            ):
-                effective_level = Phase3Level.LITE
-                reasons.append('full_disabled_for_night')
 
             levels = (
                 (Phase3Level.FULL, Phase3Level.LITE)
@@ -249,7 +242,6 @@ class ComputeGovernor:
 
             root_ewma = state.ewma_root_rollout_ms
             consecutive = state.consecutive_very_slow
-            full_disabled_day = state.full_disabled_day
             halve_round = state.halve_root_round
             last_phase3_ms = state.last_phase3_ms
             last_scenarios = state.last_scenarios_per_root
@@ -278,7 +270,8 @@ class ComputeGovernor:
                         else 0
                     )
                 if consecutive >= self._config.consecutive_very_slow_limit:
-                    full_disabled_day = day_no
+                    consecutive = 0
+                    halve_round = round_no + 1
 
             disabled_until = state.phase3_disabled_until_round
             watchdog_hits = state.watchdog_hits
@@ -298,7 +291,6 @@ class ComputeGovernor:
                 watchdog_hits=watchdog_hits,
                 phase3_disabled_until_round=disabled_until,
                 consecutive_very_slow=consecutive,
-                full_disabled_day=full_disabled_day,
                 halve_root_round=halve_round,
                 last_phase3_ms=last_phase3_ms,
                 last_scenarios_per_root=last_scenarios,

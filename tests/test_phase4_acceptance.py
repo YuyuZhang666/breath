@@ -41,7 +41,7 @@ def phase4_observation(
 
 
 class Phase4AcceptanceTests(unittest.TestCase):
-    def test_engine_moves_from_economy_to_score_after_hold_period(self) -> None:
+    def test_engine_moves_from_economy_to_score_without_hold_delay(self) -> None:
         engine = StrategyEngine()
 
         engine.plan(phase4_observation(1, defended=False))
@@ -52,7 +52,7 @@ class Phase4AcceptanceTests(unittest.TestCase):
 
         self.assertEqual(first.intent.profile, StrategyProfile.ECONOMY)
         self.assertEqual(settled.intent.profile, StrategyProfile.SCORE)
-        self.assertEqual(settled.director_state.since_round, 5)
+        self.assertEqual(settled.director_state.since_round, 2)
 
     def test_station_damage_overrides_score_hold_in_real_engine(self) -> None:
         engine = StrategyEngine()

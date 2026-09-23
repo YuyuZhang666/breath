@@ -161,7 +161,7 @@ class ComputeGovernorTests(unittest.TestCase):
         self.assertEqual(plan.attempts[0].budget.root_candidates, 4)
         self.assertNotIn('slow_previous_turn', plan.reasons)
 
-    def test_two_over_300_ms_disable_full_for_current_night(self) -> None:
+    def test_two_over_300_ms_only_throttle_the_next_round(self) -> None:
         for round_no in (70, 71):
             self.observe(
                 round_no=round_no,
@@ -174,11 +174,8 @@ class ComputeGovernorTests(unittest.TestCase):
         same_night = self.plan(round_no=72, day_no=1)
         next_night = self.plan(round_no=132, day_no=2)
 
-        self.assertIs(same_night.effective_level, Phase3Level.LITE)
-        self.assertEqual(
-            tuple(item.level for item in same_night.attempts),
-            (Phase3Level.LITE,),
-        )
+        self.assertIs(same_night.effective_level, Phase3Level.FULL)
+        self.assertIn('slow_previous_turn', same_night.reasons)
         self.assertIs(next_night.effective_level, Phase3Level.FULL)
 
     def test_exact_300_ms_does_not_disable_full(self) -> None:
@@ -209,17 +206,15 @@ class ComputeGovernorTests(unittest.TestCase):
 
         self.assertIs(plan.effective_level, Phase3Level.FULL)
 
-    def test_watchdog_disables_exactly_ten_following_rounds(self) -> None:
+    def test_watchdog_disables_only_the_next_round(self) -> None:
         self.observe(round_no=70, watchdog=True)
 
-        for round_no in (71, 75, 80):
-            with self.subTest(round_no=round_no):
-                self.assertIs(
-                    self.plan(round_no=round_no).effective_level,
-                    Phase3Level.NONE,
-                )
         self.assertIs(
-            self.plan(round_no=81).effective_level,
+            self.plan(round_no=71).effective_level,
+            Phase3Level.NONE,
+        )
+        self.assertIs(
+            self.plan(round_no=72).effective_level,
             Phase3Level.FULL,
         )
 

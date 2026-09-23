@@ -37,12 +37,14 @@ class BuildPlan:
     wall_site_limit: int | None = None
     build_weapons: bool = True
     build_walls: bool = True
-    minimum_weapons_before_walls: int = 1
-    opening_wall_force_round: int = 10
-    opening_stone_batch_target: int = 6
-    opening_gate_close_round: int = 60
+    minimum_weapons_before_walls: int = 0
+    opening_wall_force_round: int = 1
+    opening_stone_batch_target: int = 5
+    opening_gate_close_round: int = 1
     opening_critical_wall_count: int = 9
-    opening_wall_support_count: int = 3
+    opening_early_weapon_target: int = 2
+    opening_early_weapon_deadline_round: int = 15
+    opening_early_weapon_priority_boost: int = 50
     critical_wall_priority_boost: int = 75
     threat_wall_priority_boost: int = 30
     rebuild_wall_priority_boost: int = 60
@@ -66,8 +68,16 @@ class BuildPlan:
             raise ValueError('opening_gate_close_round must be in day bounds')
         if self.opening_critical_wall_count < 0:
             raise ValueError('opening_critical_wall_count cannot be negative')
-        if self.opening_wall_support_count < 0:
-            raise ValueError('opening_wall_support_count cannot be negative')
+        if self.opening_early_weapon_target < 0:
+            raise ValueError('opening_early_weapon_target cannot be negative')
+        if not 1 <= self.opening_early_weapon_deadline_round <= 70:
+            raise ValueError(
+                'opening_early_weapon_deadline_round must be in day bounds'
+            )
+        if self.opening_early_weapon_priority_boost < 0:
+            raise ValueError(
+                'opening_early_weapon_priority_boost cannot be negative'
+            )
         if self.critical_wall_priority_boost < 0:
             raise ValueError('critical_wall_priority_boost cannot be negative')
         if self.threat_wall_priority_boost < 0:
@@ -185,7 +195,7 @@ def intent_for_profile(
             ),
             feature_flags=flags,
             gold_reserve=100,
-            minimum_hold_rounds=3,
+            minimum_hold_rounds=0,
             allow_tasks=False,
             transition_reason=reason,
         )
@@ -198,7 +208,7 @@ def intent_for_profile(
             ),
             feature_flags=flags,
             gold_reserve=25,
-            minimum_hold_rounds=4,
+            minimum_hold_rounds=0,
             allow_tasks=True,
             transition_reason=reason,
         )
@@ -211,7 +221,7 @@ def intent_for_profile(
             ),
             feature_flags=flags,
             gold_reserve=50,
-            minimum_hold_rounds=5,
+            minimum_hold_rounds=0,
             allow_tasks=True,
             transition_reason=reason,
         )
@@ -224,7 +234,7 @@ def intent_for_profile(
             ),
             feature_flags=flags,
             gold_reserve=50,
-            minimum_hold_rounds=5,
+            minimum_hold_rounds=0,
             allow_tasks=True,
             allow_scouting=True,
             allow_pressure=flags.enable_pressure,
@@ -240,7 +250,7 @@ def intent_for_profile(
             ),
             feature_flags=flags,
             gold_reserve=0,
-            minimum_hold_rounds=1,
+            minimum_hold_rounds=0,
             allow_tasks=True,
             allow_scouting=True,
             allow_pressure=flags.enable_pressure,

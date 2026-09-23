@@ -71,11 +71,7 @@ class TacticalCandidate:
             stone_cost=stone_cost,
             reserve_eligible=reserve_eligible,
             utility=utility,
-            exclusive_job_key=(
-                (JobKind.BUILD_WALL, target)
-                if kind is JobKind.BUILD_WALL
-                else None
-            ),
+            exclusive_job_key=(kind, target),
         )
 
     @classmethod
@@ -465,8 +461,8 @@ def _move_candidates(
             progress=1,
             utility=job.value,
             exclusive_job_key=(
-                (JobKind.BUILD_WALL, job.target)
-                if job.kind is JobKind.BUILD_WALL
+                (job.kind, job.target)
+                if job.kind in {JobKind.BUILD_WEAPON, JobKind.BUILD_WALL}
                 else None
             ),
         )

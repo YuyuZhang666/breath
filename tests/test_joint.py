@@ -298,6 +298,45 @@ class JointSolverTests(unittest.TestCase):
         self.assertEqual(first.exclusive_job_key, second.exclusive_job_key)
         self.assertFalse(is_valid_joint(observed, world, (first, second)))
 
+    def test_two_workers_cannot_move_toward_same_weapon_job(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(1, 1, 1, 'worker'),
+                unit(2, 3, 1, 'worker'),
+            ),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        target = Position(2, 4)
+        jobs = {
+            role_id: (
+                Job(
+                    role_id=role_id,
+                    kind=JobKind.BUILD_WEAPON,
+                    target=target,
+                    priority=450,
+                    value=10,
+                    name='gatling',
+                ),
+            )
+            for role_id in (1, 2)
+        }
+        first = candidates_for_jobs(
+            observed,
+            world,
+            world.unit_by_id(1),
+            jobs[1],
+        )[0]
+        second = candidates_for_jobs(
+            observed,
+            world,
+            world.unit_by_id(2),
+            jobs[2],
+        )[0]
+
+        self.assertEqual(first.exclusive_job_key, second.exclusive_job_key)
+        self.assertFalse(is_valid_joint(observed, world, (first, second)))
+
     def test_two_workers_may_collect_same_tail_mine(self) -> None:
         mine = Position(2, 2)
         observed = observation(

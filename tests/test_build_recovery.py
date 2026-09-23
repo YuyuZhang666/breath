@@ -17,7 +17,7 @@ class BuildRecoveryTests(unittest.TestCase):
             commands={10010: Action.build('rocket', self.target)}
         )
 
-    def test_repeated_failure_grows_cooldown_and_enables_reroute(self) -> None:
+    def test_repeated_failure_keeps_one_round_cooldown_and_enables_reroute(self) -> None:
         first = update_build_recovery(
             EMPTY_BUILD_RECOVERY_STATE,
             observation(round_no=2, last_action_results={10010: False}),
@@ -32,7 +32,7 @@ class BuildRecoveryTests(unittest.TestCase):
         self.assertEqual(first.failures[0].consecutive_failures, 1)
         self.assertEqual(first.failures[0].cooldown_until_round, 2)
         self.assertEqual(second.failures[0].consecutive_failures, 2)
-        self.assertEqual(second.failures[0].cooldown_until_round, 4)
+        self.assertEqual(second.failures[0].cooldown_until_round, 3)
         self.assertIn(
             self.target,
             second.reroute_targets('rocket', round_no=3),

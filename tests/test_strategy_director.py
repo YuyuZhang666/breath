@@ -130,7 +130,7 @@ class StrategicDirectorTests(unittest.TestCase):
         self.assertEqual(enabled.intent.profile, StrategyProfile.PRESSURE)
         self.assertTrue(enabled.intent.allow_pressure)
 
-    def test_hold_period_blocks_non_emergency_oscillation(self) -> None:
+    def test_zero_hold_allows_immediate_non_emergency_transition(self) -> None:
         director = StrategicDirector(
             config=DirectorConfig(
                 evaluation_interval=1,
@@ -155,8 +155,8 @@ class StrategicDirectorTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(held.intent.profile, StrategyProfile.SCORE)
-        self.assertEqual(held.state.since_round, 20)
+        self.assertEqual(held.intent.profile, StrategyProfile.ECONOMY)
+        self.assertEqual(held.state.since_round, 21)
 
     def test_station_damage_overrides_hold_period(self) -> None:
         director = StrategicDirector(config=DirectorConfig(evaluation_interval=10))

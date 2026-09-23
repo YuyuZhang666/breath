@@ -7,7 +7,7 @@ from future_war_agent.protocol.models import Observation, Position
 
 BUILD_FAILURE_TTL_ROUNDS = 20
 MAX_BUILD_FAILURE_RECORDS = 32
-MAX_BUILD_FAILURE_COOLDOWN_ROUNDS = 8
+MAX_BUILD_FAILURE_COOLDOWN_ROUNDS = 1
 
 
 @dataclass(frozen=True, slots=True)
