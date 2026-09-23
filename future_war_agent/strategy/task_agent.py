@@ -19,7 +19,7 @@ from future_war_agent.protocol.models import (
 from future_war_agent.protocol.time import Phase
 
 from .pathfinding import PathResult, path_to_interaction
-from .policy import StrategicIntent
+from .policy import StrategyProfile, StrategicIntent
 from .world import WorldGrid
 
 
@@ -731,13 +731,20 @@ class TaskAgent:
             <= state.pending_prompt_round + self._prompt_retry_rounds
         )
         if waiting_for_response:
-            commands = {
-                actor_id: action
-                for actor_id, action in base_decision.commands.items()
-                if actor_id != pioneer.unit_id
-                and action.controller_id != pioneer.unit_id
-            }
-            return TaskAgentResult(Decision(commands=commands), state)
+            # submitAnswer has no position requirement (unlike acceptTask),
+            # so the pioneer may keep executing its phase2 commands while
+            # the LLM answer is pending. Freezing it here cost dozens of
+            # idle rounds per task in real matches. SURVIVE keeps the
+            # freeze: its night safety policy holds the pioneer in place.
+            if intent.profile is StrategyProfile.SURVIVE:
+                commands = {
+                    actor_id: action
+                    for actor_id, action in base_decision.commands.items()
+                    if actor_id != pioneer.unit_id
+                    and action.controller_id != pioneer.unit_id
+                }
+                return TaskAgentResult(Decision(commands=commands), state)
+            return TaskAgentResult(base_decision, state)
 
         prompt = _build_prompt(
             task_type,
@@ -766,12 +773,18 @@ class TaskAgent:
                 command_step=state.command_step + 1,
                 pending_command_round=observation.time.round_no,
             )
-        commands = {
-            actor_id: action
-            for actor_id, action in base_decision.commands.items()
-            if actor_id != pioneer.unit_id
-            and action.controller_id != pioneer.unit_id
-        }
+        if execute_command or intent.profile is StrategyProfile.SURVIVE:
+            # An EXEC command is driving the pioneer server-side this
+            # round, or the SURVIVE night policy holds it in place; keep
+            # it still to avoid conflicting commands.
+            commands = {
+                actor_id: action
+                for actor_id, action in base_decision.commands.items()
+                if actor_id != pioneer.unit_id
+                and action.controller_id != pioneer.unit_id
+            }
+        else:
+            commands = dict(base_decision.commands)
         decision = Decision(
             commands=commands,
             prompt=prompt,

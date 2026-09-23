@@ -525,6 +525,12 @@ def _move_candidates(
     goals = world.interaction_cells(job.target) if interaction else (job.target,)
     if role.position in goals:
         return []
+    # first_step_options returns steps ordered by remaining path cost
+    # (best first). Carrying that rank in `progress` keeps downstream
+    # dedup/ranking on the goal-directed step; otherwise equal-utility
+    # moves fall back to repr(action) ordering, which drifts northwest
+    # until the worker stalls in a map corner.
+    options = first_step_options(world, role.position, goals, limit=4)
     return [
         TacticalCandidate(
             role_id=role.unit_id,
@@ -534,7 +540,7 @@ def _move_candidates(
             start=role.position,
             move_target=target,
             priority=job.priority,
-            progress=1,
+            progress=len(options) - index,
             utility=job.value,
             exclusive_job_key=(
                 (job.kind, job.target)
@@ -542,7 +548,7 @@ def _move_candidates(
                 else None
             ),
         )
-        for target in first_step_options(world, role.position, goals, limit=4)
+        for index, target in enumerate(options)
     ]
 
 

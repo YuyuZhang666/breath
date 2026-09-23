@@ -233,6 +233,52 @@ class TaskAgentTests(unittest.TestCase):
         self.assertTrue(first.decision.prompt)
         self.assertEqual(waiting.decision.prompt, '')
 
+    def test_waiting_for_response_keeps_pioneer_phase2_commands(self) -> None:
+        agent = TaskAgent(prompt_retry_rounds=2)
+        base = Decision(commands={2: Action.move(Position(1, 2))})
+        observed = observation(
+            round_no=2,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            phase_task='Return a concise answer.',
+        )
+        first = agent.apply(
+            observed,
+            Decision(),
+            SCORE_INTENT,
+            previous_state=TaskAgentState(active_task_type='analysis'),
+        )
+        waiting = agent.apply(
+            replace(observed, time=TurnTime.from_round(3)),
+            base,
+            SCORE_INTENT,
+            previous_state=first.state,
+        )
+
+        self.assertEqual(waiting.decision.commands[2].kind, ActionKind.MOVE)
+
+    def test_waiting_for_response_survive_intent_still_holds_pioneer(self) -> None:
+        agent = TaskAgent(prompt_retry_rounds=2)
+        base = Decision(commands={2: Action.move(Position(1, 2))})
+        observed = observation(
+            round_no=2,
+            our_units=(unit(2, 1, 1, 'pioneer'),),
+            phase_task='Return a concise answer.',
+        )
+        first = agent.apply(
+            observed,
+            Decision(),
+            SURVIVE_INTENT,
+            previous_state=TaskAgentState(active_task_type='analysis'),
+        )
+        waiting = agent.apply(
+            replace(observed, time=TurnTime.from_round(3)),
+            base,
+            SURVIVE_INTENT,
+            previous_state=first.state,
+        )
+
+        self.assertNotIn(2, waiting.decision.commands)
+
     def test_llm_response_from_changed_task_is_ignored(self) -> None:
         state = TaskAgentState(
             active_task_type='analysis',
@@ -713,7 +759,7 @@ class TaskAgentTests(unittest.TestCase):
 
         self.assertIn('20 and 22', result.decision.prompt)
         self.assertLessEqual(len(result.decision.prompt), 2048)
-        self.assertEqual(set(result.decision.commands), {1})
+        self.assertEqual(set(result.decision.commands), {1, 2})
         self.assertEqual(result.decision.execute_command, '')
         self.assertEqual(result.state.official_news, 'official')
 
