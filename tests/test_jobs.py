@@ -244,8 +244,8 @@ class DayJobTests(unittest.TestCase):
                     2,
                     2,
                     'worker',
-                    backpack_capacity=7,
-                    backpack=('stone',) * 7,
+                    backpack_capacity=11,
+                    backpack=('stone',) * 11,
                 ),
                 unit(10013, 7, 7, 'station', level=1),
                 unit(10020, 6, 6, 'gatling', level=1),
@@ -273,7 +273,7 @@ class DayJobTests(unittest.TestCase):
                     2,
                     2,
                     'worker',
-                    backpack=('stone',) * 5,
+                    backpack=('stone',) * 9,
                 ),
                 unit(10013, 7, 7, 'station', level=1),
                 unit(10020, 6, 6, 'gatling', level=1),
@@ -309,7 +309,7 @@ class DayJobTests(unittest.TestCase):
             expected_wall_losses=8,
         )
 
-        self.assertEqual(reserve, 8)
+        self.assertEqual(reserve, 9)
 
     def test_first_weapon_precedes_walls(self) -> None:
         observed = observation(
@@ -580,7 +580,9 @@ class DayJobTests(unittest.TestCase):
             unit(10100 + index, site.x, site.y, 'wall')
             for index, site in enumerate(initial_layout.critical_wall_sites)
         )
-        rebuild_target = initial_layout.wall_sites[3]
+        rebuild_target = initial_layout.wall_sites[
+            len(initial_layout.critical_wall_sites)
+        ]
         observed = observation(
             round_no=132,
             our_units=base_units + critical_walls,

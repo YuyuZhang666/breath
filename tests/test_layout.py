@@ -101,7 +101,17 @@ class DefensiveLayoutTests(unittest.TestCase):
 
         self.assertEqual(
             layout.critical_wall_sites,
-            (Position(8, 8), Position(8, 7), Position(8, 6)),
+            (
+                Position(6, 3),
+                Position(7, 3),
+                Position(8, 4),
+                Position(8, 5),
+                Position(8, 6),
+                Position(8, 7),
+                Position(8, 8),
+                Position(7, 8),
+                Position(6, 8),
+            ),
         )
 
     def test_recent_east_attack_reorders_daytime_rebuild_sites(self) -> None:
@@ -116,7 +126,17 @@ class DefensiveLayoutTests(unittest.TestCase):
 
         self.assertEqual(
             layout.critical_wall_sites,
-            (Position(8, 8), Position(8, 7), Position(8, 6)),
+            (
+                Position(6, 3),
+                Position(7, 3),
+                Position(8, 4),
+                Position(8, 5),
+                Position(8, 6),
+                Position(8, 7),
+                Position(8, 8),
+                Position(7, 8),
+                Position(6, 8),
+            ),
         )
 
     def test_daily_anchor_overrides_transient_current_threat_direction(self) -> None:
@@ -134,8 +154,66 @@ class DefensiveLayoutTests(unittest.TestCase):
 
         self.assertEqual(
             layout.critical_wall_sites,
-            (Position(8, 8), Position(8, 7), Position(8, 6)),
+            (
+                Position(6, 3),
+                Position(7, 3),
+                Position(8, 4),
+                Position(8, 5),
+                Position(8, 6),
+                Position(8, 7),
+                Position(8, 8),
+                Position(7, 8),
+                Position(6, 8),
+            ),
         )
+
+    def test_corner_bases_put_five_critical_walls_toward_map_center(
+        self,
+    ) -> None:
+        cases = (
+            (2, 2, 5),
+            (2, 11, 5),
+            (11, 2, 9),
+            (11, 11, 9),
+        )
+        for station_x, station_y, front_x in cases:
+            with self.subTest(station=(station_x, station_y)):
+                world = WorldGrid.from_observation(
+                    observation(
+                        our_units=(
+                            unit(
+                                10013,
+                                station_x,
+                                station_y,
+                                'station',
+                                level=1,
+                            ),
+                        ),
+                    )
+                )
+
+                layout = build_defensive_layout(world)
+
+                self.assertEqual(len(layout.critical_wall_sites), 9)
+                self.assertEqual(
+                    len(set(layout.critical_wall_sites)),
+                    9,
+                )
+                self.assertEqual(
+                    sum(
+                        position.x == front_x
+                        for position in layout.critical_wall_sites
+                    ),
+                    5,
+                )
+                self.assertNotIn(
+                    layout.entrance,
+                    layout.critical_wall_sites,
+                )
+                self.assertTrue(all(
+                    world.is_wall_build_site(position)
+                    for position in layout.critical_wall_sites
+                ))
 
     def test_every_planned_weapon_keeps_a_distinct_controller_site(self) -> None:
         world = WorldGrid.from_observation(

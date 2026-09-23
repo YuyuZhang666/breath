@@ -23,9 +23,10 @@ class StrategyPolicyTests(unittest.TestCase):
         )
         self.assertEqual(DEFAULT_BUILD_PLAN.minimum_weapons_before_walls, 1)
         self.assertEqual(DEFAULT_BUILD_PLAN.opening_wall_force_round, 10)
-        self.assertEqual(DEFAULT_BUILD_PLAN.opening_stone_batch_target, 5)
+        self.assertEqual(DEFAULT_BUILD_PLAN.opening_stone_batch_target, 6)
         self.assertEqual(DEFAULT_BUILD_PLAN.opening_gate_close_round, 60)
-        self.assertEqual(DEFAULT_BUILD_PLAN.opening_critical_wall_count, 3)
+        self.assertEqual(DEFAULT_BUILD_PLAN.opening_critical_wall_count, 9)
+        self.assertEqual(DEFAULT_BUILD_PLAN.opening_wall_support_count, 3)
         self.assertEqual(DEFAULT_STRATEGIC_INTENT.profile, StrategyProfile.ECONOMY)
         self.assertEqual(DEFAULT_STRATEGIC_INTENT.gold_reserve, 0)
         self.assertEqual(DEFAULT_STRATEGIC_INTENT.item_policy.medicine_stock, 0)
@@ -49,6 +50,7 @@ class StrategyPolicyTests(unittest.TestCase):
             lambda: BuildPlan(opening_stone_batch_target=0),
             lambda: BuildPlan(opening_gate_close_round=71),
             lambda: BuildPlan(opening_critical_wall_count=-1),
+            lambda: BuildPlan(opening_wall_support_count=-1),
             lambda: BuildPlan(critical_wall_priority_boost=-1),
             lambda: BuildPlan(threat_wall_priority_boost=-1),
             lambda: BuildPlan(rebuild_wall_priority_boost=-1),

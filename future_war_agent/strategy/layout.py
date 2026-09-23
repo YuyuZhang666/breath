@@ -103,25 +103,20 @@ def build_defensive_layout(
         threat_positions = (
             Position(round(map_center[0]), round(map_center[1])),
         )
-    ordinary_wall_sites = tuple(
-        sorted(
-            (
+    ordinary_wall_sites = (
+        _directional_wall_order(
+            tuple(
                 value
                 for value in ring_two
                 if value != entrance and value not in weapon_positions
             ),
-            key=lambda value: (
-                -_threat_pressure(value, threat_positions, world),
-                min(
-                    value.chebyshev_distance(threat)
-                    for threat in threat_positions
-                ),
-                -atan2(value.y - footprint_center[1], value.x - footprint_center[0]),
-                value.x,
-                value.y,
-            ),
+            threat_positions,
+            footprint_center,
+            world,
         )
-    ) if build_plan.build_walls else ()
+        if build_plan.build_walls
+        else ()
+    )
     if build_plan.wall_site_limit is not None:
         ordinary_limit = max(0, build_plan.wall_site_limit - 1)
         ordinary_wall_sites = ordinary_wall_sites[:ordinary_limit]
@@ -161,6 +156,156 @@ def _threat_pressure(
     return sum(
         max(0, scale - position.chebyshev_distance(threat))
         for threat in threats
+    )
+
+
+def _directional_wall_order(
+    candidates: tuple[Position, ...],
+    threats: tuple[Position, ...],
+    footprint_center: tuple[float, float],
+    world: WorldGrid,
+) -> tuple[Position, ...]:
+    # Prefer a compact U-shaped barrier on the threat-facing side.
+    if not candidates:
+        return ()
+    threat_center = (
+        sum(position.x for position in threats) / len(threats),
+        sum(position.y for position in threats) / len(threats),
+    )
+    delta_x = threat_center[0] - footprint_center[0]
+    delta_y = threat_center[1] - footprint_center[1]
+    if abs(delta_x) >= abs(delta_y):
+        forward = (1 if delta_x >= 0 else -1, 0)
+    else:
+        forward = (0, 1 if delta_y >= 0 else -1)
+    lateral = (-forward[1], forward[0])
+
+    def projections(position: Position) -> tuple[float, float]:
+        relative_x = position.x - footprint_center[0]
+        relative_y = position.y - footprint_center[1]
+        return (
+            relative_x * forward[0] + relative_y * forward[1],
+            relative_x * lateral[0] + relative_y * lateral[1],
+        )
+
+    projected = {position: projections(position) for position in candidates}
+    front_level = max(value[0] for value in projected.values())
+    negative_edge = min(value[1] for value in projected.values())
+    positive_edge = max(value[1] for value in projected.values())
+    threat_lateral = delta_x * lateral[0] + delta_y * lateral[1]
+    front = tuple(
+        sorted(
+            (
+                position
+                for position in candidates
+                if projected[position][0] == front_level
+            ),
+            key=lambda position: (
+                abs(projected[position][1] - threat_lateral),
+                -_threat_pressure(position, threats, world),
+                projected[position][1],
+                position.x,
+                position.y,
+            ),
+        )[:5]
+    )
+    selected = set(front)
+    negative_flank = _nearest_flank(
+        candidates,
+        projected,
+        selected,
+        negative_edge,
+        front_level,
+    )
+    selected.update(negative_flank)
+    positive_flank = _nearest_flank(
+        candidates,
+        projected,
+        selected,
+        positive_edge,
+        front_level,
+    )
+    selected.update(positive_flank)
+
+    directional = (
+        tuple(
+            sorted(
+                negative_flank,
+                key=lambda position: (
+                    projected[position][0],
+                    position.x,
+                    position.y,
+                ),
+            )
+        )
+        + tuple(
+            sorted(
+                front,
+                key=lambda position: (
+                    projected[position][1],
+                    position.x,
+                    position.y,
+                ),
+            )
+        )
+        + tuple(
+            sorted(
+                positive_flank,
+                key=lambda position: (
+                    -projected[position][0],
+                    position.x,
+                    position.y,
+                ),
+            )
+        )
+    )
+    remaining = tuple(
+        sorted(
+            (
+                position
+                for position in candidates
+                if position not in selected
+            ),
+            key=lambda position: (
+                -_threat_pressure(position, threats, world),
+                min(
+                    position.chebyshev_distance(threat)
+                    for threat in threats
+                ),
+                -atan2(
+                    position.y - footprint_center[1],
+                    position.x - footprint_center[0],
+                ),
+                position.x,
+                position.y,
+            ),
+        )
+    )
+    return directional + remaining
+
+
+def _nearest_flank(
+    candidates: tuple[Position, ...],
+    projected: dict[Position, tuple[float, float]],
+    selected: set[Position],
+    lateral_edge: float,
+    front_level: float,
+) -> tuple[Position, ...]:
+    return tuple(
+        sorted(
+            (
+                position
+                for position in candidates
+                if projected[position][1] == lateral_edge
+                and projected[position][0] < front_level
+                and position not in selected
+            ),
+            key=lambda position: (
+                -projected[position][0],
+                position.x,
+                position.y,
+            ),
+        )[:2]
     )
 
 

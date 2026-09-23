@@ -28,6 +28,9 @@ class OpeningPlan:
     stage: OpeningStage = OpeningStage.INACTIVE
     stone_worker_id: int | None = None
     weapon_worker_id: int | None = None
+    wall_support_worker_id: int | None = None
+    wall_support_active: bool = False
+    wall_support_targets: tuple[Position, ...] = ()
     stone_target: int = 0
     weapon_count: int = 0
     wall_count: int = 0
@@ -44,6 +47,11 @@ class OpeningPlan:
     def assignment_for(self, worker_id: int) -> str:
         if worker_id == self.stone_worker_id:
             return self.stage.value
+        if (
+            self.wall_support_active
+            and worker_id == self.wall_support_worker_id
+        ):
+            return 'opening_wall_support'
         if worker_id == self.weapon_worker_id:
             return 'opening_build_weapons'
         return 'ordinary'
@@ -77,6 +85,65 @@ def build_opening_plan(
         observation.our.units,
         intent.build_plan.weapon_loadout,
     )
+    wall_support_worker = (
+        weapon_worker
+        if weapon_worker is not None and weapon_worker != stone_worker
+        else None
+    )
+    support_count = min(
+        intent.build_plan.opening_wall_support_count,
+        len(layout.critical_wall_sites),
+    )
+    wall_support_targets = (
+        layout.critical_wall_sites[-support_count:]
+        if wall_support_worker is not None and support_count > 0
+        else ()
+    )
+    missing_support_targets = tuple(
+        position
+        for position in wall_support_targets
+        if position not in existing_walls
+    )
+    support_has_wall_route = bool(
+        wall_support_worker is not None
+        and any(
+            path_to_interaction(
+                world,
+                wall_support_worker.position,
+                position,
+            ) is not None
+            for position in missing_support_targets
+        )
+    )
+    support_has_stone = bool(
+        wall_support_worker is not None
+        and count_item(
+            wall_support_worker.backpack,
+            world.rules.wall_material,
+        ) >= world.rules.wall_material_cost
+    )
+    support_can_mine = bool(
+        wall_support_worker is not None
+        and wall_support_worker.backpack_capacity > 0
+        and any(
+            path_to_interaction(
+                world,
+                wall_support_worker.position,
+                mine,
+            ) is not None
+            for mine in world.positions_for_zone(world.rules.wall_material)
+        )
+    )
+    support_weapon_floor = min(2, readiness.required_count)
+    wall_support_active = bool(
+        observation.time.day_no == 1
+        and observation.time.phase is Phase.DAY
+        and wall_support_worker is not None
+        and missing_support_targets
+        and support_has_wall_route
+        and (support_has_stone or support_can_mine)
+        and readiness.ready_count >= support_weapon_floor
+    )
     workers_with_stone = sum(
         count_item(worker.backpack, world.rules.wall_material)
         >= world.rules.wall_material_cost
@@ -91,6 +158,13 @@ def build_opening_plan(
     common = dict(
         stone_worker_id=(stone_worker.unit_id if stone_worker is not None else None),
         weapon_worker_id=(weapon_worker.unit_id if weapon_worker is not None else None),
+        wall_support_worker_id=(
+            wall_support_worker.unit_id
+            if wall_support_worker is not None
+            else None
+        ),
+        wall_support_active=wall_support_active,
+        wall_support_targets=wall_support_targets,
         weapon_count=readiness.ready_count,
         wall_count=wall_count,
         workers_with_stone=workers_with_stone,
@@ -140,6 +214,14 @@ def build_opening_plan(
         for position in layout.critical_wall_sites
         if position not in existing_walls
     )
+    primary_missing_critical = tuple(
+        position
+        for position in missing_critical
+        if (
+            not wall_support_active
+            or position not in wall_support_targets
+        )
+    )
     stone_count = count_item(
         stone_worker.backpack,
         world.rules.wall_material,
@@ -147,13 +229,16 @@ def build_opening_plan(
     stone_target = min(
         intent.build_plan.opening_stone_batch_target,
         max(0, stone_worker.backpack_capacity),
+        len(primary_missing_critical) * world.rules.wall_material_cost,
     )
     mine_eta, return_eta = _stone_route_eta(
         world,
         stone_worker,
-        missing_critical,
+        primary_missing_critical,
     )
-    construction_eta = len(missing_critical) * world.rules.wall_material_cost
+    construction_eta = (
+        len(primary_missing_critical) * world.rules.wall_material_cost
+    )
     common.update(
         stone_target=stone_target,
         mine_eta=mine_eta,
@@ -161,7 +246,7 @@ def build_opening_plan(
         construction_eta=construction_eta,
     )
 
-    if not missing_critical:
+    if not primary_missing_critical:
         return OpeningPlan(
             active=True,
             stage=OpeningStage.RETURN_TO_BASE,
@@ -192,19 +277,22 @@ def build_opening_plan(
         <= remaining_daylight
     )
     if (
-        missing_critical
+        primary_missing_critical
         and not construction_started
         and not batch_ready
         and can_finish_supply
     ):
         stage = OpeningStage.STONE_SUPPLY
-    elif missing_critical and stone_count >= world.rules.wall_material_cost:
+    elif (
+        primary_missing_critical
+        and stone_count >= world.rules.wall_material_cost
+    ):
         stage = (
             OpeningStage.BUILD_WALLS
             if defense_started
             else OpeningStage.RETURN_TO_BASE
         )
-    elif missing_critical and can_finish_supply:
+    elif primary_missing_critical and can_finish_supply:
         stage = OpeningStage.STONE_SUPPLY
     else:
         stage = OpeningStage.RECALL

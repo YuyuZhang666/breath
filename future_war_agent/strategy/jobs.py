@@ -237,17 +237,22 @@ def generate_day_jobs(
         count_item(worker.backpack, world.rules.wall_material)
         for worker in workers
     )
+    wall_path_costs_by_worker: dict[int, dict[Position, int]] = {}
+    for worker in workers:
+        path_costs: dict[Position, int] = {}
+        for position in eligible_wall_sites:
+            if (
+                position == layout.entrance
+                and not world.is_inside_defense(worker.position)
+            ):
+                continue
+            path = path_to_interaction(world, worker.position, position)
+            if path is not None:
+                path_costs[position] = path.cost
+        wall_path_costs_by_worker[worker.unit_id] = path_costs
     reachable_wall_sites_by_worker = {
-        worker.unit_id: tuple(
-            position
-            for position in eligible_wall_sites
-            if path_to_interaction(world, worker.position, position) is not None
-            and (
-                position != layout.entrance
-                or world.is_inside_defense(worker.position)
-            )
-        )
-        for worker in workers
+        worker_id: tuple(path_costs)
+        for worker_id, path_costs in wall_path_costs_by_worker.items()
     }
     actionable_wall_sites = {
         position
@@ -264,6 +269,21 @@ def generate_day_jobs(
         opening_wall_forced
         and missing_critical_count > 0
         and not has_actionable_stone_worker
+    )
+    wall_support_targets = frozenset(opening.wall_support_targets)
+    missing_support_targets = wall_support_targets.intersection(
+        missing_wall_sites
+    )
+    support_path_costs = wall_path_costs_by_worker.get(
+        opening.wall_support_worker_id,
+        {},
+    )
+    support_can_contribute = bool(
+        opening.wall_support_active
+        and any(
+            position in support_path_costs
+            for position in missing_support_targets
+        )
     )
 
     for role in roles:
@@ -303,7 +323,14 @@ def generate_day_jobs(
         opening_weapon_worker = (
             not opening.active
             or opening.weapon_worker_id is None
-            or worker.unit_id == opening.weapon_worker_id
+            or (
+                worker.unit_id == opening.weapon_worker_id
+                and not (
+                    opening.wall_support_active
+                    and support_can_contribute
+                    and worker.unit_id == opening.wall_support_worker_id
+                )
+            )
         )
         for site in missing_weapon_sites if opening_weapon_worker else ():
             reserve_eligible = (
@@ -332,10 +359,48 @@ def generate_day_jobs(
                     )
 
         backpack = Counter(worker.backpack)
-        opening_wall_worker = (
+        opening_primary_wall_worker = (
             not opening.active
             or opening.stone_worker_id is None
             or worker.unit_id == opening.stone_worker_id
+        )
+        opening_support_wall_worker = (
+            opening.wall_support_active
+            and support_can_contribute
+            and worker.unit_id == opening.wall_support_worker_id
+        )
+        opening_wall_worker = (
+            opening_primary_wall_worker or opening_support_wall_worker
+        )
+        worker_wall_sites = reachable_wall_sites_by_worker[worker.unit_id]
+        if (
+            opening.active
+            and opening.wall_support_active
+            and support_can_contribute
+            and opening.wall_support_worker_id is not None
+        ):
+            if opening_support_wall_worker:
+                worker_wall_sites = tuple(
+                    position
+                    for position in worker_wall_sites
+                    if position in wall_support_targets
+                )
+            elif opening_primary_wall_worker:
+                worker_wall_sites = tuple(
+                    position
+                    for position in worker_wall_sites
+                    if position not in wall_support_targets
+                )
+        worker_wall_sites = tuple(
+            sorted(
+                worker_wall_sites,
+                key=lambda position: (
+                    position not in rebuild_wall_sites,
+                    position not in layout.critical_wall_sites,
+                    wall_path_costs_by_worker[worker.unit_id][position],
+                    wall_rank_by_position[position],
+                ),
+            )
         )
         if (
             defense_started
@@ -344,13 +409,14 @@ def generate_day_jobs(
             >= world.rules.wall_material_cost
         ):
             critical_sites = set(layout.critical_wall_sites)
-            for wall_rank, position in enumerate(
-                reachable_wall_sites_by_worker[worker.unit_id][
-                    : intent.build_plan.max_wall_job_candidates
-                ]
-            ):
-                path = path_to_interaction(world, worker.position, position)
-                if path is not None:
+            for position in worker_wall_sites[
+                : intent.build_plan.max_wall_job_candidates
+            ]:
+                path_cost = wall_path_costs_by_worker[
+                    worker.unit_id
+                ].get(position)
+                if path_cost is not None:
+                    wall_rank = wall_rank_by_position[position]
                     priority = priorities.build_wall
                     if position in critical_sites:
                         priority += intent.build_plan.critical_wall_priority_boost
@@ -373,7 +439,7 @@ def generate_day_jobs(
                             kind=JobKind.BUILD_WALL,
                             target=position,
                             priority=priority,
-                            value=-float(path.cost) - wall_rank / 1000,
+                            value=-float(path_cost) - wall_rank / 1000,
                             name="wall",
                             quantity=world.rules.wall_material_cost,
                         )
@@ -440,25 +506,45 @@ def generate_day_jobs(
                 and opening.stage is OpeningStage.STONE_SUPPLY
                 and worker.unit_id == opening.stone_worker_id
             )
+            support_stone_target = min(
+                len(missing_support_targets)
+                * world.rules.wall_material_cost,
+                max(0, worker.backpack_capacity),
+            )
+            opening_support_supply = (
+                opening.wall_support_active
+                and support_can_contribute
+                and worker.unit_id == opening.wall_support_worker_id
+                and backpack[world.rules.wall_material]
+                < support_stone_target
+            )
             _add_mining_jobs(
                 result[worker.unit_id],
                 worker,
                 observation,
                 world,
-                stone_needed=(opening_stone_supply or (
-                    defense_started
-                    and bool(missing_wall_sites)
-                    and worker_reaches_wall
-                    and (
-                        current_stone < stone_reserve
-                        or not has_actionable_stone_worker
+                stone_needed=(
+                    opening_stone_supply
+                    or opening_support_supply
+                    or (
+                        defense_started
+                        and bool(missing_wall_sites)
+                        and worker_reaches_wall
+                        and (
+                            current_stone < stone_reserve
+                            or not has_actionable_stone_worker
+                        )
                     )
-                )),
+                ),
                 priority=(
                     priorities.build_wall
                     + intent.build_plan.critical_wall_priority_boost
                     + 1
-                    if urgent_opening_stone or opening_stone_supply
+                    if (
+                        urgent_opening_stone
+                        or opening_stone_supply
+                        or opening_support_supply
+                    )
                     else priorities.collect
                 ),
                 market_view=market_view,

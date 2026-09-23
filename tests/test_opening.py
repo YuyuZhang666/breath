@@ -85,6 +85,199 @@ class OpeningDefenseTests(unittest.TestCase):
             'build',
         )
 
+    def test_second_worker_collects_own_stone_after_two_weapons(self) -> None:
+        base = observation(
+            our_units=(unit(10013, 5, 5, 'station', level=1),),
+        )
+        layout = build_defensive_layout(WorldGrid.from_observation(base))
+        weapons = tuple(
+            unit(
+                20000 + index,
+                site.position.x,
+                site.position.y,
+                site.weapon_type,
+                level=1,
+            )
+            for index, site in enumerate(layout.weapon_sites[:2])
+        )
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 4, 'worker', backpack=('stone',) * 6),
+                unit(10012, 2, 5, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+                *weapons,
+            ),
+            zones=(Zone(Position(3, 5), 'stone'),),
+            gold=25,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+
+        opening = build_opening_plan(
+            observed,
+            world,
+            layout,
+            DEFAULT_STRATEGIC_INTENT,
+        )
+        jobs = generate_day_jobs(observed, world, layout)
+
+        self.assertTrue(opening.wall_support_active)
+        self.assertEqual(opening.wall_support_worker_id, 10012)
+        self.assertEqual(len(opening.wall_support_targets), 3)
+        self.assertEqual(
+            opening.assignment_for(10012),
+            'opening_wall_support',
+        )
+        self.assertEqual(jobs[10012][0].kind, JobKind.COLLECT)
+        self.assertEqual(jobs[10012][0].name, 'stone')
+
+    def test_two_wall_workers_receive_disjoint_wall_chains(self) -> None:
+        base = observation(
+            our_units=(unit(10013, 5, 5, 'station', level=1),),
+        )
+        initial_world = WorldGrid.from_observation(base)
+        initial_layout = build_defensive_layout(initial_world)
+        support_target = initial_layout.critical_wall_sites[-1]
+        support_stand = initial_world.interaction_cells(support_target)[0]
+        weapons = tuple(
+            unit(
+                20000 + index,
+                site.position.x,
+                site.position.y,
+                site.weapon_type,
+                level=1,
+            )
+            for index, site in enumerate(initial_layout.weapon_sites[:2])
+        )
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 4, 'worker', backpack=('stone',) * 6),
+                unit(
+                    10012,
+                    support_stand.x,
+                    support_stand.y,
+                    'worker',
+                    backpack=('stone',) * 3,
+                ),
+                unit(10013, 5, 5, 'station', level=1),
+                *weapons,
+            ),
+            gold=25,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+        opening = build_opening_plan(
+            observed,
+            world,
+            layout,
+            DEFAULT_STRATEGIC_INTENT,
+        )
+
+        jobs = generate_day_jobs(observed, world, layout)
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertNotIn(
+            jobs[10010][0].target,
+            opening.wall_support_targets,
+        )
+        self.assertEqual(jobs[10012][0].kind, JobKind.BUILD_WALL)
+        self.assertIn(
+            jobs[10012][0].target,
+            opening.wall_support_targets,
+        )
+        self.assertNotEqual(
+            jobs[10010][0].target,
+            jobs[10012][0].target,
+        )
+
+    def test_support_without_stone_source_resumes_third_weapon(self) -> None:
+        base = observation(
+            our_units=(unit(10013, 5, 5, 'station', level=1),),
+        )
+        layout = build_defensive_layout(WorldGrid.from_observation(base))
+        weapons = tuple(
+            unit(
+                20000 + index,
+                site.position.x,
+                site.position.y,
+                site.weapon_type,
+                level=1,
+            )
+            for index, site in enumerate(layout.weapon_sites[:2])
+        )
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 4, 'worker', backpack=('stone',) * 6),
+                unit(10012, 2, 5, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+                *weapons,
+            ),
+            gold=25,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+        opening = build_opening_plan(
+            observed,
+            world,
+            layout,
+            DEFAULT_STRATEGIC_INTENT,
+        )
+
+        jobs = generate_day_jobs(observed, world, layout)
+
+        self.assertFalse(opening.wall_support_active)
+        self.assertEqual(jobs[10012][0].kind, JobKind.BUILD_WEAPON)
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+        self.assertEqual(opening.stone_target, 6)
+
+    def test_three_walls_do_not_complete_nine_wall_opening(self) -> None:
+        base = observation(
+            our_units=(unit(10013, 5, 5, 'station', level=1),),
+        )
+        layout = build_defensive_layout(WorldGrid.from_observation(base))
+        weapons = tuple(
+            unit(
+                20000 + index,
+                site.position.x,
+                site.position.y,
+                site.weapon_type,
+                level=1,
+            )
+            for index, site in enumerate(layout.weapon_sites)
+        )
+        walls = tuple(
+            unit(
+                30000 + index,
+                position.x,
+                position.y,
+                'wall',
+                level=1,
+            )
+            for index, position in enumerate(
+                layout.critical_wall_sites[:3]
+            )
+        )
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 5, 'worker'),
+                unit(10013, 5, 5, 'station', level=1),
+                *weapons,
+                *walls,
+            ),
+        )
+        world = WorldGrid.from_observation(observed)
+
+        opening = build_opening_plan(
+            observed,
+            world,
+            build_defensive_layout(world),
+            DEFAULT_STRATEGIC_INTENT,
+        )
+
+        self.assertTrue(opening.active)
+        self.assertNotEqual(opening.stage, OpeningStage.COMPLETE)
+        self.assertEqual(opening.wall_count, 3)
+
     def test_opening_hard_recall_outranks_mining(self) -> None:
         observed = observation(
             round_no=66,
