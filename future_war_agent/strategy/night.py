@@ -346,16 +346,27 @@ def assign_controllers(
                             != item.weapon_id
                             for item in ordered
                         )
-                        operator_risk = sum(
-                            _operator_risk(observation, item.stand)
-                            for item in ordered
+                        final_positions = {
+                            role.unit_id: role.position for role in roles
+                        }
+                        final_positions.update(
+                            (item.role_id, item.stand) for item in ordered
+                        )
+                        operator_risks = tuple(
+                            _operator_risk(observation, position)
+                            for position in final_positions.values()
+                        )
+                        unsafe_controller_count = sum(
+                            risk >= 3 for risk in operator_risks
                         )
                         score: tuple[object, ...] = (
+                            unsafe_controller_count,
                             -ready_now,
+                            max(operator_risks, default=0),
+                            sum(operator_risks),
                             -attack_value,
                             switch_count,
                             sum(item.distance for item in ordered),
-                            operator_risk,
                             tuple(
                                 (
                                     item.role_id,

@@ -436,7 +436,7 @@ class TaskAgentTests(unittest.TestCase):
             ActionKind.ACCEPT_TASK,
         )
 
-    def test_success_feedback_does_not_resubmit_if_phase_task_lingers(self) -> None:
+    def test_success_ack_does_not_learn_if_phase_task_lingers(self) -> None:
         task_text = 'Return the sum of 20 and 22.'
         state = TaskAgentState(
             active_task_type='math',
@@ -462,7 +462,37 @@ class TaskAgentTests(unittest.TestCase):
         )
 
         self.assertNotIn(2, result.decision.commands)
-        self.assertTrue(result.state.completed_task_fingerprint)
+        self.assertEqual(result.state.completed_task_fingerprint, '')
+        self.assertEqual(result.state.sops, ())
+        self.assertTrue(result.decision.prompt)
+
+    def test_learned_sop_survives_external_state_reset(self) -> None:
+        agent = TaskAgent()
+        task_text = 'Return the sum of 20 and 22.'
+        pending = TaskAgentState(
+            active_task_type='math',
+            pending_task_type='math',
+            pending_answer='42',
+            pending_pioneer_id=2,
+            pending_round=2,
+            pending_task_text=task_text,
+            pending_task_fingerprint=sha256(
+                task_text.encode('utf-8')
+            ).hexdigest(),
+        )
+        learned = agent.reconcile(
+            observation(
+                round_no=3,
+                our_units=(unit(2, 1, 1, 'pioneer'),),
+                last_action_results={2: True},
+            ),
+            pending,
+        )
+
+        restored = agent.reconcile(observation(round_no=4))
+
+        self.assertEqual(learned.sops[0].answer, '42')
+        self.assertEqual(restored.sops[0].answer, '42')
 
     def test_task_abandon_policy_is_margin_guarded(self) -> None:
         policy = TaskAbandonPolicy(

@@ -1,6 +1,4 @@
 from dataclasses import dataclass
-from math import atan2
-
 from future_war_agent.protocol.models import Position
 
 from .policy import DEFAULT_BUILD_PLAN, BuildPlan
@@ -75,21 +73,28 @@ def build_defensive_layout(
         for position, weapon_type in zip(selected, weapon_loadout)
     )
 
-    entrance = (
-        max(
-            ring_two,
-            key=lambda value: (
-                _center_distance(value, map_center),
-                -value.x,
-                -value.y,
-            ),
-        )
-        if ring_two
-        else None
-    )
     footprint_center = (
         sum(value.x for value in footprint) / len(footprint),
         sum(value.y for value in footprint) / len(footprint),
+    )
+    rear_x = (
+        min((value.x for value in ring_two), default=None)
+        if footprint_center[0] <= map_center[0]
+        else max((value.x for value in ring_two), default=None)
+    )
+    rear_candidates = tuple(
+        value for value in ring_two if value.x == rear_x
+    )
+    entrance = (
+        max(
+            rear_candidates,
+            key=lambda value: (
+                _center_distance(value, map_center),
+                -value.y,
+            ),
+        )
+        if rear_candidates
+        else None
     )
     weapon_positions = frozenset(site.position for site in weapon_sites)
     current_threats = tuple(
@@ -118,25 +123,17 @@ def build_defensive_layout(
         else ()
     )
     if build_plan.wall_site_limit is not None:
-        ordinary_limit = max(0, build_plan.wall_site_limit - 1)
-        ordinary_wall_sites = ordinary_wall_sites[:ordinary_limit]
+        ordinary_wall_sites = ordinary_wall_sites[:build_plan.wall_site_limit]
+    # The map-edge face is a permanent access lane.  Keeping it out of the
+    # plan prevents late-day infill from undoing the three-sided layout.
     wall_sites = ordinary_wall_sites
-    if (
-        build_plan.build_walls
-        and entrance is not None
-        and (
-            build_plan.wall_site_limit is None
-            or build_plan.wall_site_limit > 0
-        )
-    ):
-        wall_sites = wall_sites + (entrance,)
     critical_wall_sites = ordinary_wall_sites[
         : build_plan.opening_critical_wall_count
     ]
     controller_sites = _reserve_controller_sites(
         world,
         weapon_sites,
-        wall_sites,
+        wall_sites + ((entrance,) if entrance is not None else ()),
     )
     return DefensiveLayout(
         weapon_sites=weapon_sites,
@@ -165,20 +162,18 @@ def _directional_wall_order(
     footprint_center: tuple[float, float],
     world: WorldGrid,
 ) -> tuple[Position, ...]:
-    # Prefer a compact U-shaped barrier on the threat-facing side.
+    # Build a stable U-shaped barrier facing the map centre.  Transient robot
+    # positions may reorder cells within those three faces, but must never
+    # rotate the structure and accidentally spend stone on the rear face.
     if not candidates:
         return ()
     threat_center = (
         sum(position.x for position in threats) / len(threats),
         sum(position.y for position in threats) / len(threats),
     )
-    delta_x = threat_center[0] - footprint_center[0]
-    delta_y = threat_center[1] - footprint_center[1]
-    if abs(delta_x) >= abs(delta_y):
-        forward = (1 if delta_x >= 0 else -1, 0)
-    else:
-        forward = (0, 1 if delta_y >= 0 else -1)
-    lateral = (-forward[1], forward[0])
+    map_center_x = (world.observation.width - 1) / 2
+    forward = (1 if map_center_x >= footprint_center[0] else -1, 0)
+    lateral = (0, 1)
 
     def projections(position: Position) -> tuple[float, float]:
         relative_x = position.x - footprint_center[0]
@@ -190,9 +185,14 @@ def _directional_wall_order(
 
     projected = {position: projections(position) for position in candidates}
     front_level = max(value[0] for value in projected.values())
+    rear_level = min(value[0] for value in projected.values())
     negative_edge = min(value[1] for value in projected.values())
     positive_edge = max(value[1] for value in projected.values())
-    threat_lateral = delta_x * lateral[0] + delta_y * lateral[1]
+    threat_lateral = (
+        threat_center[0] - footprint_center[0]
+    ) * lateral[0] + (
+        threat_center[1] - footprint_center[1]
+    ) * lateral[1]
     front = tuple(
         sorted(
             (
@@ -207,7 +207,7 @@ def _directional_wall_order(
                 position.x,
                 position.y,
             ),
-        )[:5]
+        )[:6]
     )
     selected = set(front)
     negative_flank = _nearest_flank(
@@ -216,6 +216,7 @@ def _directional_wall_order(
         selected,
         negative_edge,
         front_level,
+        rear_level,
     )
     selected.update(negative_flank)
     positive_flank = _nearest_flank(
@@ -224,6 +225,7 @@ def _directional_wall_order(
         selected,
         positive_edge,
         front_level,
+        rear_level,
     )
     selected.update(positive_flank)
 
@@ -265,6 +267,7 @@ def _directional_wall_order(
                 position
                 for position in candidates
                 if position not in selected
+                and projected[position][0] > rear_level
             ),
             key=lambda position: (
                 -_threat_pressure(position, threats, world),
@@ -272,10 +275,8 @@ def _directional_wall_order(
                     position.chebyshev_distance(threat)
                     for threat in threats
                 ),
-                -atan2(
-                    position.y - footprint_center[1],
-                    position.x - footprint_center[0],
-                ),
+                -projected[position][0],
+                projected[position][1],
                 position.x,
                 position.y,
             ),
@@ -290,6 +291,7 @@ def _nearest_flank(
     selected: set[Position],
     lateral_edge: float,
     front_level: float,
+    rear_level: float,
 ) -> tuple[Position, ...]:
     return tuple(
         sorted(
@@ -298,6 +300,7 @@ def _nearest_flank(
                 for position in candidates
                 if projected[position][1] == lateral_edge
                 and projected[position][0] < front_level
+                and projected[position][0] > rear_level
                 and position not in selected
             ),
             key=lambda position: (
@@ -305,7 +308,7 @@ def _nearest_flank(
                 position.x,
                 position.y,
             ),
-        )[:2]
+        )[:3]
     )
 
 

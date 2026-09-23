@@ -25,7 +25,7 @@ class StrategyPolicyTests(unittest.TestCase):
         self.assertEqual(DEFAULT_BUILD_PLAN.opening_wall_force_round, 1)
         self.assertEqual(DEFAULT_BUILD_PLAN.opening_stone_batch_target, 5)
         self.assertEqual(DEFAULT_BUILD_PLAN.opening_gate_close_round, 1)
-        self.assertEqual(DEFAULT_BUILD_PLAN.opening_critical_wall_count, 9)
+        self.assertEqual(DEFAULT_BUILD_PLAN.opening_critical_wall_count, 12)
         self.assertEqual(DEFAULT_BUILD_PLAN.opening_early_weapon_target, 2)
         self.assertEqual(DEFAULT_BUILD_PLAN.opening_early_weapon_deadline_round, 15)
         self.assertEqual(DEFAULT_BUILD_PLAN.opening_early_weapon_priority_boost, 50)

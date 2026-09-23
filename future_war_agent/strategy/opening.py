@@ -81,7 +81,11 @@ def build_opening_plan(
         _inside_defense(world, worker.position) for worker in workers
     )
     controllers_ready = _ready_controller_count(world)
-    gate_closed = layout.entrance is None or layout.entrance in existing_walls
+    gate_closed = (
+        layout.entrance is None
+        or layout.entrance not in layout.wall_sites
+        or layout.entrance in existing_walls
+    )
 
     common = dict(
         weapon_count=readiness.ready_count,

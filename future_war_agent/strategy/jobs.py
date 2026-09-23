@@ -1104,15 +1104,15 @@ def calculate_stone_reserve(
     if not intent.build_plan.build_walls or not layout.wall_sites:
         return 0
     existing_wall_positions = {wall.position for wall in world.walls}
-    missing_critical_count = sum(
+    missing_wall_count = sum(
         position not in existing_wall_positions
-        for position in layout.critical_wall_sites
+        for position in layout.wall_sites
     )
     material_cost = world.rules.wall_material_cost
     return max(
         intent.build_plan.minimum_wall_stock,
         max(0, expected_wall_losses) * material_cost,
-        missing_critical_count * material_cost,
+        missing_wall_count * material_cost,
     )
 
 

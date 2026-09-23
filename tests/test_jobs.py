@@ -244,8 +244,8 @@ class DayJobTests(unittest.TestCase):
                     2,
                     2,
                     'worker',
-                    backpack_capacity=11,
-                    backpack=('stone',) * 11,
+                    backpack_capacity=20,
+                    backpack=('stone',) * 20,
                 ),
                 unit(10013, 7, 7, 'station', level=1),
                 unit(10020, 6, 6, 'gatling', level=1),
@@ -261,7 +261,7 @@ class DayJobTests(unittest.TestCase):
             for job in jobs[10010]
             if job.kind is JobKind.SELL and job.name == 'stone'
         )
-        self.assertEqual(sale.quantity, 2)
+        self.assertEqual(sale.quantity, 6)
 
     def test_sufficient_stone_stock_does_not_force_more_stone_mining(
         self,
@@ -273,7 +273,7 @@ class DayJobTests(unittest.TestCase):
                     2,
                     2,
                     'worker',
-                    backpack=('stone',) * 9,
+                    backpack=('stone',) * 14,
                 ),
                 unit(10013, 7, 7, 'station', level=1),
                 unit(10020, 6, 6, 'gatling', level=1),
@@ -309,7 +309,7 @@ class DayJobTests(unittest.TestCase):
             expected_wall_losses=8,
         )
 
-        self.assertEqual(reserve, 9)
+        self.assertEqual(reserve, 14)
 
     def test_early_weapon_priority_does_not_hide_wall_jobs(self) -> None:
         observed = observation(
@@ -574,6 +574,41 @@ class DayJobTests(unittest.TestCase):
 
         self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WEAPON)
 
+    def test_after_twelve_walls_workers_continue_three_side_infill(self) -> None:
+        base = observation(
+            our_units=(
+                unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            gold=0,
+        )
+        layout = build_defensive_layout(WorldGrid.from_observation(base))
+        walls = tuple(
+            unit(10100 + index, site.x, site.y, 'wall')
+            for index, site in enumerate(layout.critical_wall_sites)
+        )
+        weapons = tuple(
+            unit(
+                10200 + index,
+                site.position.x,
+                site.position.y,
+                site.weapon_type,
+                level=1,
+            )
+            for index, site in enumerate(layout.weapon_sites)
+        )
+        observed = observation(
+            our_units=base.our.units + walls + weapons,
+            gold=0,
+        )
+
+        jobs = self.jobs(observed)
+
+        wall_job = next(
+            job for job in jobs[10010] if job.kind is JobKind.BUILD_WALL
+        )
+        self.assertIn(wall_job.target, layout.wall_sites[12:])
+
     def test_destroyed_wall_rebuild_outranks_remaining_core_weapons(self) -> None:
         base_units = (
             unit(10010, 2, 5, 'worker', backpack=('stone',) * 5),
@@ -657,7 +692,7 @@ class DayJobTests(unittest.TestCase):
         self.assertEqual(rebuilds[0].target, attack_lane_gap)
         self.assertGreater(rebuilds[0].priority, rebuilds[1].priority)
 
-    def test_temporary_gate_closes_after_roles_return_at_twilight(self) -> None:
+    def test_rear_access_lane_is_not_closed_at_twilight(self) -> None:
         base = observation(
             round_no=60,
             our_units=(unit(10013, 5, 5, 'station', level=1),),
@@ -666,23 +701,17 @@ class DayJobTests(unittest.TestCase):
         layout = build_defensive_layout(base_world)
         gate = layout.entrance
         self.assertIsNotNone(gate)
-        stand = next(
-            cell
-            for cell in base_world.interaction_cells(gate)
-            if base_world.is_inside_defense(cell)
-        )
         walls = tuple(
             unit(10100 + index, site.x, site.y, 'wall')
             for index, site in enumerate(layout.wall_sites)
-            if site != gate
         )
         observed = observation(
             round_no=60,
             our_units=(
                 unit(
                     10010,
-                    stand.x,
-                    stand.y,
+                    5,
+                    5,
                     'worker',
                     backpack=('stone',),
                 ),
@@ -697,8 +726,10 @@ class DayJobTests(unittest.TestCase):
             build_defensive_layout(world),
         )
 
-        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
-        self.assertEqual(jobs[10010][0].target, gate)
+        self.assertTrue(all(
+            job.kind is not JobKind.BUILD_WALL or job.target != gate
+            for job in jobs[10010]
+        ))
 
     def test_price_per_distance_selects_mineral_after_defense(self) -> None:
         observed = observation(

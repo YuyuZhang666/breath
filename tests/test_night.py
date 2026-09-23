@@ -168,6 +168,50 @@ class NightPolicyTests(unittest.TestCase):
             {(10010, 10030), (10011, 10020)},
         )
 
+    def test_assignment_moves_endangered_role_before_safe_role(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 1, 1, 'worker'),
+                unit(10011, 7, 7, 'pioneer'),
+                unit(10020, 8, 8, 'gatling', level=1, attack_range=4),
+            ),
+            robots=(robot(30001, 2, 1),),
+        )
+
+        assignments = assign_controllers(
+            observed,
+            WorldGrid.from_observation(observed),
+        )
+
+        self.assertEqual(assignments[0].role_id, 10010)
+        self.assertGreaterEqual(
+            assignments[0].stand.chebyshev_distance(Position(2, 1)),
+            4,
+        )
+
+    def test_assignment_chooses_safe_stand_over_shorter_dangerous_stand(
+        self,
+    ) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(10010, 4, 1, 'worker'),
+                unit(10020, 6, 1, 'gatling', level=1, attack_range=4),
+            ),
+            robots=(robot(30001, 3, 1),),
+        )
+
+        assignments = assign_controllers(
+            observed,
+            WorldGrid.from_observation(observed),
+        )
+
+        self.assertGreaterEqual(
+            assignments[0].stand.chebyshev_distance(Position(3, 1)),
+            4,
+        )
+
     def test_role_moves_toward_assigned_weapon(self) -> None:
         observed = observation(
             round_no=71,

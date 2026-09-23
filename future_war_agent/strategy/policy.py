@@ -41,7 +41,7 @@ class BuildPlan:
     opening_wall_force_round: int = 1
     opening_stone_batch_target: int = 5
     opening_gate_close_round: int = 1
-    opening_critical_wall_count: int = 9
+    opening_critical_wall_count: int = 12
     opening_early_weapon_target: int = 2
     opening_early_weapon_deadline_round: int = 15
     opening_early_weapon_priority_boost: int = 50

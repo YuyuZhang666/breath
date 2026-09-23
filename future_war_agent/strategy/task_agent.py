@@ -279,6 +279,7 @@ class TaskAgent:
         if prompt_retry_rounds < 1:
             raise ValueError('prompt_retry_rounds must be positive')
         self._prompt_retry_rounds = prompt_retry_rounds
+        self._learned_sops: tuple[TaskSop, ...] = ()
 
     def reconcile(
         self,
@@ -286,9 +287,13 @@ class TaskAgent:
         previous_state: TaskAgentState | None = None,
     ) -> TaskAgentState:
         state = previous_state if previous_state is not None else EMPTY_TASK_STATE
+        state = replace(
+            state,
+            sops=_merge_sops(state.sops, self._learned_sops),
+        )
         state = _reconcile_feedback(observation, state)
         state = _reconcile_command_result(observation, state)
-        return replace(
+        state = replace(
             state,
             official_news=_bounded(
                 observation.world_news.official_news,
@@ -299,6 +304,8 @@ class TaskAgent:
                 MAX_NEWS_LENGTH,
             ),
         )
+        self._learned_sops = state.sops
+        return state
 
     def apply(
         self,
@@ -471,7 +478,10 @@ class TaskAgent:
         )
         response_answer = (
             _bounded(observation.llm_response, MAX_ANSWER_LENGTH)
-            if state.pending_prompt_fingerprint == fingerprint
+            if fingerprint in {
+                state.pending_prompt_fingerprint,
+                state.last_prompt_fingerprint,
+            }
             else ''
         )
         candidates = state.candidates
@@ -842,10 +852,23 @@ def _reconcile_feedback(
     answer_was_rejected = any(
         error.error_code == 2 for error in observation.errors
     )
+    active_task_fingerprint = (
+        _fingerprint(observation.phase_task.strip())
+        if observation.phase_task.strip()
+        else ''
+    )
+    task_was_closed = (
+        not active_task_fingerprint
+        or (
+            bool(state.pending_task_fingerprint)
+            and active_task_fingerprint != state.pending_task_fingerprint
+        )
+    )
     if (
         has_immediate_result
         and observation.last_action_results[pioneer_id]
         and not answer_was_rejected
+        and task_was_closed
     ):
         task_text = state.pending_task_text
         task_template = _task_template(task_text) if task_text else ''
@@ -931,6 +954,8 @@ def _reconcile_feedback(
         pending_round=None,
         pending_task_text='',
         pending_task_fingerprint='',
+        pending_prompt_fingerprint='',
+        pending_prompt_round=None,
         candidates=candidates,
     )
 
@@ -1005,6 +1030,24 @@ def _clear_task_lifecycle(state: TaskAgentState) -> TaskAgentState:
         abandon_until_round=None,
         completed_task_fingerprint='',
     )
+
+
+def _merge_sops(
+    primary: tuple[TaskSop, ...],
+    secondary: tuple[TaskSop, ...],
+) -> tuple[TaskSop, ...]:
+    merged: list[TaskSop] = []
+    identities: set[tuple[str, str]] = set()
+    for sop in primary + secondary:
+        identity = (
+            sop.task_type,
+            sop.task_template or sop.task_fingerprint,
+        )
+        if identity in identities:
+            continue
+        identities.add(identity)
+        merged.append(sop)
+    return tuple(merged[:MAX_SOPS])
 
 
 def _bounded(value: str, limit: int) -> str:
