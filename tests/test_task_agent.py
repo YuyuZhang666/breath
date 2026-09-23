@@ -589,7 +589,7 @@ class TaskAgentTests(unittest.TestCase):
         self.assertEqual(result.state.active_task_type, 'math')
         self.assertEqual(result.state.accepted_round, 1)
 
-    def test_survival_intent_interrupts_task_overlay(self) -> None:
+    def test_survival_intent_still_accepts_task_overlay(self) -> None:
         base = Decision(commands={2: Action.move(Position(1, 2))})
         observed = observation(
             our_units=(unit(2, 1, 1, 'pioneer'),),
@@ -598,7 +598,9 @@ class TaskAgentTests(unittest.TestCase):
 
         result = TaskAgent().apply(observed, base, SURVIVE_INTENT)
 
-        self.assertEqual(result.decision, base)
+        self.assertEqual(
+            result.decision.commands[2].kind, ActionKind.ACCEPT_TASK
+        )
 
     def test_survival_intent_does_not_move_pioneer_out_of_active_task(self) -> None:
         base = Decision(commands={2: Action.move(Position(1, 2))})

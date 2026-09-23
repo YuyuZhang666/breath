@@ -197,7 +197,7 @@ def intent_for_profile(
             feature_flags=flags,
             gold_reserve=100,
             minimum_hold_rounds=0,
-            allow_tasks=False,
+            allow_tasks=True,
             transition_reason=reason,
         )
     if profile is StrategyProfile.ECONOMY:

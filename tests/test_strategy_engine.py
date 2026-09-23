@@ -212,7 +212,9 @@ class StrategyEngineTests(unittest.TestCase):
         ) as build_world:
             engine.plan(self.night)
 
-        self.assertEqual(build_world.call_count, 1)
+        # One grid for the planning pipeline itself; with task participation
+        # enabled in every profile, task selection may build its own on top.
+        self.assertEqual(build_world.call_count, 2)
 
     def test_phase2_receives_daily_anchor_and_historical_wall_sites(self) -> None:
         captured: list[tuple[tuple[Position, ...], frozenset[Position]]] = []
