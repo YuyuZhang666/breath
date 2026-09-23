@@ -123,6 +123,15 @@ class TacticalCandidate:
 AttackValidator = Callable[[UnitState, UnitState, Action], bool]
 Joint = tuple[TacticalCandidate, ...]
 
+SIDESTEP_PRIORITY = 50
+
+_NEIGHBOR_STEPS = tuple(
+    (dx, dy)
+    for dx in (-1, 0, 1)
+    for dy in (-1, 0, 1)
+    if (dx, dy) != (0, 0)
+)
+
 
 def candidates_for_jobs(
     observation: Observation,
@@ -130,7 +139,7 @@ def candidates_for_jobs(
     role: UnitState,
     jobs: tuple[Job, ...],
     *,
-    limit: int = 4,
+    limit: int = 6,
 ) -> tuple[TacticalCandidate, ...]:
     generated: list[TacticalCandidate] = []
     for job in jobs:
@@ -249,9 +258,19 @@ def candidates_for_jobs(
                     _move_candidates(world, role, job, interaction=True)
                 )
 
-    unique: dict[tuple[int, Action | None], TacticalCandidate] = {}
+    if (
+        observation.time.phase is Phase.DAY
+        and not any(item.action is not None for item in generated)
+        and not any(item.completes_job for item in generated)
+    ):
+        generated.extend(_sidestep_candidates(world, role))
+
+    unique: dict[tuple[int, Action | None, tuple[object, ...] | None], TacticalCandidate] = {}
     for item in generated:
-        unique.setdefault((item.command_actor_id, item.action), item)
+        unique.setdefault(
+            (item.command_actor_id, item.action, item.exclusive_job_key),
+            item,
+        )
     ranked = sorted(
         unique.values(),
         key=lambda item: (
@@ -523,7 +542,39 @@ def _move_candidates(
                 else None
             ),
         )
-        for target in first_step_options(world, role.position, goals, limit=2)
+        for target in first_step_options(world, role.position, goals, limit=4)
+    ]
+
+
+def _sidestep_candidates(
+    world: WorldGrid,
+    role: UnitState,
+) -> list[TacticalCandidate]:
+    station_distance = world.station_distance(role.position)
+    ranked: list[tuple[int, int, int, Position]] = []
+    for dx, dy in _NEIGHBOR_STEPS:
+        neighbor = Position(role.position.x + dx, role.position.y + dy)
+        if not world.can_traverse(neighbor) or neighbor in world.soft_friendly:
+            continue
+        neighbor_distance = world.station_distance(neighbor)
+        if station_distance is not None and (
+            neighbor_distance is None or neighbor_distance > station_distance
+        ):
+            continue
+        ranked.append((neighbor.x, neighbor.y, 0, neighbor))
+    ranked.sort()
+    return [
+        TacticalCandidate(
+            role_id=role.unit_id,
+            command_actor_id=role.unit_id,
+            action=Action.move(neighbor),
+            job_kind=JobKind.PREPOSITION,
+            start=role.position,
+            move_target=neighbor,
+            priority=SIDESTEP_PRIORITY,
+            utility=-1.0,
+        )
+        for _, _, _, neighbor in ranked[:2]
     ]
 
 

@@ -365,6 +365,80 @@ class StrategicItemTests(unittest.TestCase):
         self.assertNotIn(2, rejected.commands)
         self.assertIn(2, accepted.commands)
 
+    def test_station_upgrade_triggers_without_high_risk_profile(self):
+        shop = (ShopItem('StationUpgradeVoucher1', 100),)
+        observed, world, layout = self._defended(
+            station_health=900, shop=shop
+        )
+        intent = StrategicIntent(
+            profile=StrategyProfile.ECONOMY,
+            build_plan=BuildPlan(wall_site_limit=12),
+            feature_flags=RuleFeatureFlags(enable_upgrades=True),
+            gold_reserve=100,
+        )
+
+        jobs = generate_strategic_item_jobs(observed, world, layout, intent)
+
+        purchases = [
+            job for values in jobs.values() for job in values
+            if job.kind.value == 'buy'
+        ]
+        self.assertEqual(len(purchases), 1)
+        self.assertEqual(purchases[0].name, 'StationUpgradeVoucher1')
+
+    def test_night_repair_uses_idle_role_on_damaged_critical_wall(self):
+        reference, _, reference_layout = self._defended(
+            round_no=71,
+            worker_backpack=('WallFixer',),
+            damaged_wall=True,
+        )
+        reference_world = WorldGrid.from_observation(reference)
+        site = reference_layout.critical_wall_sites[0]
+        holder_position = next(
+            position
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            if (dx, dy) != (0, 0)
+            for position in (Position(site.x + dx, site.y + dy),)
+            if reference_world.station_distance(position) == 1
+            and reference_world.can_traverse(position)
+        )
+        observed, _, layout = self._defended(
+            round_no=71,
+            worker_backpack=('WallFixer',),
+            damaged_wall=True,
+            worker_position=(holder_position.x, holder_position.y),
+        )
+
+        result = apply_emergency_combat_items(
+            observed,
+            Decision(),
+            StrategicIntent(
+                feature_flags=RuleFeatureFlags(enable_repairs=True),
+            ),
+        )
+
+        self.assertEqual(result.commands[2].name, 'WallFixer')
+        self.assertEqual(result.commands[2].target_positions, (site,))
+
+    def test_night_repair_skips_full_health_walls(self):
+        observed, _, _ = self._defended(
+            round_no=71,
+            worker_backpack=('WallFixer',),
+        )
+        baseline = Decision()
+
+        self.assertEqual(
+            apply_emergency_combat_items(
+                observed,
+                baseline,
+                StrategicIntent(
+                    feature_flags=RuleFeatureFlags(enable_repairs=True),
+                ),
+            ),
+            baseline,
+        )
+
 
 if __name__ == '__main__':
     unittest.main()

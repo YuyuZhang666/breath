@@ -12,7 +12,7 @@ from future_war_agent.protocol.time import Phase
 from .defense import core_weapon_readiness
 from .items import has_item
 from .jobs import Job, JobKind
-from .layout import DefensiveLayout
+from .layout import DefensiveLayout, build_defensive_layout
 from .pathfinding import path_to_interaction
 from .policy import StrategicIntent, StrategyProfile
 from .rules import station_footprint
@@ -158,7 +158,9 @@ def apply_emergency_combat_items(
     if observation.time.phase is not Phase.NIGHT:
         return baseline
     flags = intent.feature_flags
-    if not flags.enable_stun and not flags.enable_bomb:
+    if not (
+        flags.enable_stun or flags.enable_bomb or flags.enable_repairs
+    ):
         return baseline
 
     station = next(
@@ -178,9 +180,6 @@ def apply_emergency_combat_items(
         and _targets_us(robot, observation.our.team_type)
         and _can_hit_station(robot, station)
     )
-    if not threats:
-        return baseline
-
     used_roles = {
         actor_id
         for actor_id, action in baseline.commands.items()
@@ -204,19 +203,43 @@ def apply_emergency_combat_items(
     candidates: list[tuple[int, int, int, str, Position, UnitState]] = []
     stun_name = intent.item_policy.stun_name or DIZZY_WEAPON
     bomb_name = intent.item_policy.bomb_name or BOMB
+    repair_name = intent.item_policy.repair_name or WALL_FIXER
+    repair_target, repair_missing = (
+        _best_night_repair_target(observation, intent)
+        if flags.enable_repairs
+        and any(has_item(role.backpack, repair_name) for role in roles)
+        else (None, 0)
+    )
     for role in roles:
-        if flags.enable_stun and has_item(role.backpack, stun_name):
-            target, prevented = _best_stun_target(observation, threats)
-            if target is not None and prevented > 0:
-                candidates.append(
-                    (prevented * 5, prevented, -role.unit_id, stun_name, target, role)
+        if threats:
+            if flags.enable_stun and has_item(role.backpack, stun_name):
+                target, prevented = _best_stun_target(observation, threats)
+                if target is not None and prevented > 0:
+                    candidates.append(
+                        (prevented * 5, prevented, -role.unit_id, stun_name, target, role)
+                    )
+            if flags.enable_bomb and has_item(role.backpack, bomb_name):
+                target, prevented, kills = _best_bomb_target(observation, threats)
+                if target is not None and prevented > 0 and kills > 0:
+                    candidates.append(
+                        (prevented, kills, -role.unit_id, bomb_name, target, role)
+                    )
+        if (
+            repair_target is not None
+            and repair_missing > 0
+            and has_item(role.backpack, repair_name)
+            and role.position.chebyshev_distance(repair_target) <= 1
+        ):
+            candidates.append(
+                (
+                    repair_missing,
+                    repair_missing,
+                    -role.unit_id,
+                    repair_name,
+                    repair_target,
+                    role,
                 )
-        if flags.enable_bomb and has_item(role.backpack, bomb_name):
-            target, prevented, kills = _best_bomb_target(observation, threats)
-            if target is not None and prevented > 0 and kills > 0:
-                candidates.append(
-                    (prevented, kills, -role.unit_id, bomb_name, target, role)
-                )
+            )
     if not candidates:
         return baseline
 
@@ -264,13 +287,13 @@ def _select_day_goal(
     high_risk: bool,
 ) -> _ItemGoal | None:
     flags = intent.feature_flags
-    if not high_risk:
-        return None
     station = world.our_station()
     if flags.enable_upgrades and station is not None:
         goal = _upgrade_goal(station, STATION_UPGRADES, 0.75, 344, 10_000.0)
         if goal is not None:
             return goal
+    if not high_risk:
+        return None
     if flags.enable_upgrades:
         damaged_weapons = tuple(
             goal
@@ -390,6 +413,25 @@ def _can_hit_station(robot: RobotState, station: UnitState) -> bool:
 
 def _covered(center: Position, robot: RobotState) -> bool:
     return center.chebyshev_distance(robot.position) <= 1
+
+
+def _best_night_repair_target(
+    observation: Observation,
+    intent: StrategicIntent,
+) -> tuple[Position | None, int]:
+    world = WorldGrid.from_observation(observation)
+    layout = build_defensive_layout(world, intent.build_plan)
+    critical = set(layout.critical_wall_sites)
+    damaged = tuple(
+        wall
+        for wall in world.walls
+        if wall.position in critical
+        and wall.health < _max_health(wall) * 0.50
+    )
+    if not damaged:
+        return None, 0
+    wall = min(damaged, key=lambda unit: (unit.health, unit.unit_id))
+    return wall.position, _max_health(wall) - wall.health
 
 
 def _best_stun_target(

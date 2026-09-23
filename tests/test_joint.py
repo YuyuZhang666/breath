@@ -536,6 +536,67 @@ class JointSolverTests(unittest.TestCase):
 
         self.assertTrue(is_valid_joint(observed, world, (use,)))
 
+    def test_move_job_offers_multiple_first_steps(self) -> None:
+        observed = observation(
+            our_units=(unit(10010, 1, 1, "worker"),),
+        )
+        world = WorldGrid.from_observation(observed)
+        jobs = (
+            Job(10010, JobKind.BUILD_WALL, Position(8, 8), 350, 0, "wall"),
+        )
+
+        choices = candidates_for_jobs(
+            observed,
+            world,
+            world.unit_by_id(10010),
+            jobs,
+        )
+
+        moves = [item for item in choices if item.move_target is not None]
+        self.assertGreaterEqual(len(moves), 3)
+
+    def test_idle_day_worker_gets_sidestep_candidates(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 8, 8, "worker"),
+                unit(10013, 10, 10, "station", level=1),
+            ),
+        )
+        world = WorldGrid.from_observation(observed)
+
+        choices = candidates_for_jobs(
+            observed,
+            world,
+            world.unit_by_id(10010),
+            (),
+        )
+
+        sidesteps = [item for item in choices if item.action is not None]
+        self.assertTrue(sidesteps)
+        base_distance = world.station_distance(Position(8, 8))
+        for item in sidesteps:
+            self.assertIsNotNone(item.move_target)
+            self.assertLessEqual(
+                world.station_distance(item.move_target),
+                base_distance,
+            )
+
+    def test_night_idle_worker_waits_without_sidestep(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(unit(10010, 8, 8, "worker"),),
+        )
+        world = WorldGrid.from_observation(observed)
+
+        choices = candidates_for_jobs(
+            observed,
+            world,
+            world.unit_by_id(10010),
+            (),
+        )
+
+        self.assertFalse(any(item.action is not None for item in choices))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -357,6 +357,10 @@ def generate_day_jobs(
                 )
             )
 
+    worker_wall_ownership = {
+        worker.unit_id: index % max(1, len(workers))
+        for index, worker in enumerate(workers)
+    }
     for worker in workers:
         opening_assignment = opening.assignment_for(worker.unit_id)
         opening_wall_lead = (
@@ -470,13 +474,22 @@ def generate_day_jobs(
                         and not temporary_gate_waiting
                     ):
                         priority = max(priority, priorities.recall - 1)
+                    owns_site = (
+                        wall_rank_by_position[position]
+                        % max(1, len(workers))
+                        == worker_wall_ownership[worker.unit_id]
+                    )
                     result[worker.unit_id].append(
                         Job(
                             role_id=worker.unit_id,
                             kind=JobKind.BUILD_WALL,
                             target=position,
                             priority=priority,
-                            value=-float(path_cost) - wall_rank / 1000,
+                            value=(
+                                -float(path_cost)
+                                - wall_rank / 1000
+                                + (2.0 if owns_site else 0.0)
+                            ),
                             name="wall",
                             quantity=world.rules.wall_material_cost,
                         )

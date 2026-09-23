@@ -95,7 +95,7 @@ def handle_payload(
             round_in_phase=observation.time.round_in_phase,
         )
         if request_budget.compute_exhausted():
-            _record_deadline_fallback(telemetry, decision)
+            _record_deadline_fallback(telemetry)
             return fallback_payload
         planner_kwargs: dict[str, object] = {}
         if _accepts_keyword(planner, 'request_budget'):
@@ -136,6 +136,7 @@ def handle_payload(
                 observation,
                 validated,
                 tuple(telemetry.current('opening_worker_log', ())),
+                planned=decision,
             ),
             validated_weapon_action_log=_validated_weapon_action_log(
                 observation,
@@ -291,10 +292,15 @@ def _decision_override_log(
     return tuple(entries)
 
 
+_MOBILE_ROLE_TYPES = frozenset({'worker', 'pioneer'})
+
+
 def _opening_final_action_log(
     observation: Observation,
     decision: Decision,
     assignment_log: tuple[str, ...] = (),
+    *,
+    planned: Decision | None = None,
 ) -> tuple[str, ...]:
     assignments = {
         entry.split(':', 1)[0]: entry
@@ -303,19 +309,28 @@ def _opening_final_action_log(
     }
     entries: list[str] = []
     for role in sorted(observation.our.units, key=lambda item: item.unit_id):
-        if role.role_type != 'worker':
+        if role.role_type not in _MOBILE_ROLE_TYPES:
             continue
         action = decision.commands.get(role.unit_id)
         stone = sum(item.casefold() == 'stone' for item in role.backpack)
         assignment = assignments.get(f'id={role.unit_id}', '')
         assignment_context = assignment or 'unavailable'
-        wait_decision = (
-            'no_wait=validated_legal_action'
-            if action is not None
-            else 'wait_reason=no_legal_nonconflicting_action'
-        )
+        if action is not None:
+            wait_decision = 'no_wait=validated_legal_action'
+        else:
+            planned_action = (
+                planned.commands.get(role.unit_id)
+                if planned is not None
+                else None
+            )
+            wait_decision = (
+                'wait_reason=dropped_by_validation'
+                if planned_action is not None
+                else 'wait_reason=no_planned_job_or_joint_wait'
+            )
         entries.append(
-            f'id={role.unit_id}:pos={role.position.x},{role.position.y}:'
+            f'id={role.unit_id}:type={role.role_type}:'
+            f'pos={role.position.x},{role.position.y}:hp={role.health}:'
             f'stone={stone}:final={_optional_action_summary(action)}:'
             f'last_result={observation.last_action_results.get(role.unit_id)}:'
             f'{wait_decision}:'

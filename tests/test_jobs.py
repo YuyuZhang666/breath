@@ -937,5 +937,42 @@ class DayJobTests(unittest.TestCase):
         )
 
 
+    def test_wall_sites_are_partitioned_between_workers(self) -> None:
+        observed = observation(
+            round_no=131,
+            our_units=(
+                unit(10010, 3, 3, 'worker', backpack=('stone',) * 4),
+                unit(10012, 3, 3, 'worker', backpack=('stone',) * 4),
+                unit(10013, 5, 5, 'station', level=1),
+            ),
+            gold=75,
+        )
+        world = WorldGrid.from_observation(observed)
+        layout = build_defensive_layout(world)
+
+        jobs = generate_day_jobs(observed, world, layout)
+
+        jobs_by_worker = {
+            role_id: {
+                job.target: job
+                for job in worker_jobs
+                if job.kind is JobKind.BUILD_WALL
+            }
+            for role_id, worker_jobs in jobs.items()
+        }
+        shared = (
+            set(jobs_by_worker[10010]) & set(jobs_by_worker[10012])
+        )
+        self.assertTrue(shared)
+        for target in shared:
+            rank = layout.wall_sites.index(target)
+            owner_id = 10010 if rank % 2 == 0 else 10012
+            other_id = 10012 if owner_id == 10010 else 10010
+            self.assertGreater(
+                jobs_by_worker[owner_id][target].value,
+                jobs_by_worker[other_id][target].value,
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
