@@ -78,6 +78,34 @@ class JointSolverTests(unittest.TestCase):
         )
         self.assertTrue(is_valid_joint(self.observed, self.world, joint))
 
+    def test_recall_wait_at_goal_beats_move_to_other_goal(self) -> None:
+        wait_at_goal = TacticalCandidate(
+            role_id=10010,
+            command_actor_id=10010,
+            action=None,
+            job_kind=JobKind.RECALL,
+            start=Position(1, 1),
+            priority=501,
+            completes_job=True,
+            progress=1,
+            utility=0.0,
+        )
+        move_to_other_goal = candidate(
+            10010,
+            Position(1, 1),
+            Position(2, 2),
+            priority=501,
+            utility=-1.0,
+        )
+
+        decision = solve_joint(
+            self.observed,
+            self.world,
+            {10010: (wait_at_goal, move_to_other_goal)},
+        )
+
+        self.assertNotIn(10010, decision.commands)
+
     def test_rejects_duplicate_build_and_gold_overspend(self) -> None:
         build_one = TacticalCandidate.build(
             10010,

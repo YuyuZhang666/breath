@@ -1062,6 +1062,7 @@ class StrategyEngine:
             emergency_medicine=_requires_emergency_medicine(observation, intent),
             governor_emergency=governor_emergency,
             prior_watchdog=compute_usage.watchdog_hit,
+            forecast_available=night_forecast is not None,
         )
         phase3_eligible = phase3_skip_reason == 'none'
         self._telemetry.set(phase3_skip_reason=phase3_skip_reason)
@@ -1678,6 +1679,7 @@ def _phase3_skip_reason(
     emergency_medicine: bool,
     governor_emergency: bool,
     prior_watchdog: bool,
+    forecast_available: bool = False,
 ) -> str:
     if own_station_status == 'destroyed':
         return 'own_station_destroyed'
@@ -1695,7 +1697,10 @@ def _phase3_skip_reason(
         return 'emergency_medicine'
     if governor_emergency:
         return 'emergency_reserve'
-    if prior_watchdog:
+    # A forecast watchdog hit with a cached forecast still leaves phase3
+    # runnable with stale risk data; blocking it here disabled phase3 for
+    # entire nights on the (much slower) contest server.
+    if prior_watchdog and not forecast_available:
         return 'prior_watchdog'
     return 'none'
 

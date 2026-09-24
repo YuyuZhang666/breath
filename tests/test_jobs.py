@@ -209,6 +209,67 @@ class DayJobTests(unittest.TestCase):
         mining = next(job for job in jobs[10010] if job.kind is JobKind.COLLECT)
         self.assertEqual(mining.name, "stone")
 
+    def test_empty_stone_pipeline_boosts_stone_mining_priority(self) -> None:
+        observed = observation(
+            our_units=(
+                unit(10010, 2, 2, "worker"),
+                unit(10013, 7, 7, "station", level=1),
+                unit(10020, 6, 6, "gatling", level=1),
+                unit(10030, 7, 6, "railgun", level=1),
+                unit(10040, 8, 6, "rocket", level=1),
+            ),
+            zones=(
+                Zone(Position(3, 2), "stone"),
+                Zone(Position(2, 3), "iron"),
+            ),
+            vendor_shop=(ShopItem("stone", 1), ShopItem("iron", 5)),
+        )
+
+        jobs = self.jobs(observed)
+
+        collect = [job for job in jobs[10010] if job.kind is JobKind.COLLECT]
+        stone = next(job for job in collect if job.name == "stone")
+        iron = next(job for job in collect if job.name == "iron")
+        self.assertGreater(stone.priority, iron.priority)
+
+    def test_partial_batch_keeps_collecting_above_wall_build(self) -> None:
+        observed = observation(
+            round_no=20,
+            our_units=(
+                unit(10010, 2, 2, "worker", backpack=("stone",)),
+                unit(10013, 7, 7, "station", level=1),
+                unit(10020, 6, 6, "gatling", level=1),
+                unit(10030, 7, 6, "railgun", level=1),
+                unit(10040, 8, 6, "rocket", level=1),
+            ),
+            zones=(Zone(Position(3, 2), "stone"),),
+            vendor_shop=(ShopItem("stone", 1),),
+        )
+
+        jobs = self.jobs(observed)
+
+        collect = next(job for job in jobs[10010] if job.kind is JobKind.COLLECT)
+        wall = next(job for job in jobs[10010] if job.kind is JobKind.BUILD_WALL)
+        self.assertGreater(collect.priority, wall.priority)
+
+    def test_late_day_with_stone_builds_wall_instead_of_batching(self) -> None:
+        observed = observation(
+            round_no=64,
+            our_units=(
+                unit(10010, 4, 3, "worker", backpack=("stone",)),
+                unit(10013, 7, 7, "station", level=1),
+                unit(10020, 6, 6, "gatling", level=1),
+                unit(10030, 7, 6, "railgun", level=1),
+                unit(10040, 8, 6, "rocket", level=1),
+            ),
+            zones=(Zone(Position(3, 2), "stone"),),
+            vendor_shop=(ShopItem("stone", 1),),
+        )
+
+        jobs = self.jobs(observed)
+
+        self.assertEqual(jobs[10010][0].kind, JobKind.BUILD_WALL)
+
     def test_reserved_stone_is_not_sold_when_backpack_is_full(self) -> None:
         observed = observation(
             our_units=(

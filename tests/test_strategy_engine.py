@@ -17,7 +17,7 @@ from future_war_agent.protocol.time import TurnTime
 from future_war_agent.strategy.build_recovery import BuildRecoveryState
 from future_war_agent.strategy.compute import ComputeGovernor, ComputeGovernorConfig
 from future_war_agent.strategy.build_recovery import BuildRecoveryState
-from future_war_agent.strategy.engine import StrategyEngine
+from future_war_agent.strategy.engine import SessionContinuity, StrategyEngine
 from future_war_agent.strategy.director import StrategicDirector
 from future_war_agent.strategy.forecast import (
     RiskLevel,
@@ -1106,6 +1106,28 @@ class StrategyEngineTests(unittest.TestCase):
             f"p99={fresh_p99 * 1000:.2f}ms; "
             f"cached median={median(cached_samples) * 1000:.3f}ms "
             f"p99={cached_p99 * 1000:.3f}ms"
+        )
+
+    def test_prior_watchdog_with_cached_forecast_keeps_phase3_eligible(self) -> None:
+        from future_war_agent.strategy.engine import _phase3_skip_reason
+
+        base = {
+            'observation': self.night,
+            'own_station_status': 'alive',
+            'director_failed': False,
+            'previous': object(),
+            'continuity': SessionContinuity.CONSECUTIVE,
+            'emergency_medicine': False,
+            'governor_emergency': False,
+        }
+
+        self.assertEqual(
+            _phase3_skip_reason(prior_watchdog=True, forecast_available=True, **base),
+            'none',
+        )
+        self.assertEqual(
+            _phase3_skip_reason(prior_watchdog=True, forecast_available=False, **base),
+            'prior_watchdog',
         )
 
 

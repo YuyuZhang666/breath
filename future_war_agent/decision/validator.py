@@ -146,6 +146,37 @@ def _targets_are_in_bounds(observation: Observation, action: Action) -> bool:
     )
 
 
+_STRUCTURE_ROLES = frozenset(
+    {"station", "wall", "gatling", "railgun", "rocket"}
+)
+
+
+def _static_blocked_positions(observation: Observation) -> frozenset[Position]:
+    # Structures, mines and shops never move, so a move onto one of these
+    # cells is guaranteed to fail server-side; dropping it here keeps the
+    # failure visible in validation telemetry instead of wasting a round.
+    blocked: set[Position] = {
+        unit.position
+        for team in (observation.our.units, observation.enemy.units)
+        for unit in team
+        if unit.health > 0 and unit.role_type in _STRUCTURE_ROLES
+    }
+    blocked.update(zone.position for zone in observation.zones)
+    return frozenset(blocked)
+
+
+def _is_valid_move(
+    observation: Observation,
+    unit: UnitState,
+    action: Action,
+    static_blocked: frozenset[Position],
+) -> bool:
+    target = action.target_positions[0]
+    if unit.position.chebyshev_distance(target) != 1:
+        return False
+    return target not in static_blocked
+
+
 def _is_valid_personal_action(
     observation: Observation,
     unit: UnitState,
@@ -355,11 +386,19 @@ def validate_decision(observation: Observation, decision: Decision) -> Decision:
 
     retained: dict[int, Action] = {}
     attack_candidates: list[tuple[int, Action]] = []
+    static_blocked = _static_blocked_positions(observation)
 
     remaining_gold = observation.our.gold
     for unit_id, action in sorted(candidates, key=lambda value: value[0]):
         if action.kind is ActionKind.ATTACK:
             attack_candidates.append((unit_id, action))
+            continue
+        if action.kind is ActionKind.MOVE and not _is_valid_move(
+            observation,
+            living_units[unit_id],
+            action,
+            static_blocked,
+        ):
             continue
         if _is_valid_personal_action(
             observation,

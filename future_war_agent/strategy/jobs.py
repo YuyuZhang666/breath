@@ -474,6 +474,12 @@ def generate_day_jobs(
                         and not temporary_gate_waiting
                     ):
                         priority = max(priority, priorities.recall - 1)
+                    if worker.position.chebyshev_distance(position) == 1:
+                        # A build already in reach costs one round and no
+                        # walking, so it must not lose to twilight recall:
+                        # leaving the last carried stone unbuilt wasted a
+                        # whole wall at day 1 close.
+                        priority = max(priority, priorities.recall + 1)
                     owns_site = (
                         wall_rank_by_position[position]
                         % max(1, len(workers))
@@ -546,15 +552,71 @@ def generate_day_jobs(
                 and worker_reaches_wall
                 and backpack[world.rules.wall_material] < dynamic_stone_target
             )
-            dynamic_stone_urgent = (
-                dynamic_stone_supply
-                and backpack[world.rules.wall_material]
-                < world.rules.wall_material_cost
-            )
             opening_supply_urgent = (
                 opening_wall_lead
                 and backpack[world.rules.wall_material]
                 < world.rules.wall_material_cost
+            )
+            # Batching stone only pays off when the worker still has time to
+            # finish the batch, walk back and lay walls before twilight;
+            # otherwise it must spend its held stone immediately.
+            rounds_left = 71 - observation.time.round_in_phase
+            nearest_stone_cost = min(
+                (
+                    path.cost
+                    for zone in observation.zones
+                    if zone.neutral_type == world.rules.wall_material
+                    for path in (
+                        path_to_interaction(world, worker.position, zone.position),
+                    )
+                    if path is not None
+                ),
+                default=0,
+            )
+            wall_return_cost = min(
+                wall_path_costs_by_worker[worker.unit_id].values(),
+                default=0,
+            )
+            batch_shortfall = (
+                dynamic_stone_target
+                - backpack[world.rules.wall_material]
+            )
+            batch_time_ok = (
+                rounds_left - world.rules.twilight_safety_margin
+                > batch_shortfall  # collect rounds
+                + batch_shortfall  # build rounds for the collected stone
+                + nearest_stone_cost
+                + wall_return_cost
+            )
+            # A single stone in someone's backpack must not count as a ready
+            # pipeline: with that bar both workers held 1 stone each, the
+            # batch gate closed for both, and they fell back to single-stone
+            # round trips all day. One full per-worker batch in hand is the
+            # point where spare worker time is better spent on weapons.
+            stone_batch_secured = current_stone >= wall_quota_per_worker
+            batch_collect = (
+                dynamic_stone_supply
+                and batch_time_ok
+                and not early_weapon_urgent
+                and not stone_batch_secured
+                and backpack[world.rules.wall_material]
+                >= world.rules.wall_material_cost
+            )
+            fetch_time_ok = (
+                rounds_left - world.rules.twilight_safety_margin
+                > nearest_stone_cost + wall_return_cost + 2
+            )
+            fetch_urgent = (
+                dynamic_stone_supply
+                and fetch_time_ok
+                and not early_weapon_urgent
+                and not stone_batch_secured
+                and backpack[world.rules.wall_material]
+                < world.rules.wall_material_cost
+            )
+            stone_fetch_boost = (
+                (dynamic_stone_supply or defense_material_needed)
+                and not early_weapon_urgent
             )
             _add_mining_jobs(
                 result[worker.unit_id],
@@ -586,10 +648,12 @@ def generate_day_jobs(
                     + 1
                     if (
                         urgent_opening_stone
-                        or (dynamic_stone_urgent and not early_weapon_urgent)
+                        or fetch_urgent
+                        or batch_collect
                     )
                     else priorities.collect
                 ),
+                stone_priority_boost=stone_fetch_boost,
                 market_view=market_view,
             )
 
@@ -1158,13 +1222,24 @@ def _add_mining_jobs(
     stone_needed: bool,
     priority: int,
     market_view: MarketView | None = None,
+    stone_priority_boost: bool = False,
 ) -> None:
     prices = {item.name: item.price for item in observation.vendor_shop}
+    rounds_left = 71 - observation.time.round_in_phase
     for zone in observation.zones:
         if zone.neutral_type not in {"stone", "iron", "copper"}:
             continue
         path = path_to_interaction(world, worker.position, zone.position)
         if path is None:
+            continue
+        # A mine whose round trip cannot finish before twilight is a trap:
+        # on day 1 a respawned stone mine once cost a worker ~28 rounds for
+        # two stones, gutting the wall build budget. The guard also covers
+        # the walk back toward the defense perimeter after collecting.
+        if (
+            2 * path.cost + 2 + 2 * world.rules.twilight_safety_margin
+            > rounds_left
+        ):
             continue
         score = prices.get(zone.neutral_type, 0) / (path.cost + 1)
         if market_view is not None:
@@ -1173,19 +1248,34 @@ def _add_mining_jobs(
                 score *= 1.15
             elif direction is PriceDirection.DOWN:
                 score *= 0.85
-        if stone_needed and zone.neutral_type == world.rules.wall_material:
+        is_wall_material = zone.neutral_type == world.rules.wall_material
+        if stone_needed and is_wall_material:
             score += 1_000_000
         jobs.append(
             Job(
                 role_id=worker.unit_id,
                 kind=JobKind.COLLECT,
                 target=zone.position,
-                priority=priority,
+                # The joint solver ranks candidate priority above immediate
+                # job completion, while the 1e6 score boost lives in utility
+                # (ranked below completion). Without a priority bump a worker
+                # standing next to an iron mine grabbed iron all day instead
+                # of fetching stone for missing critical walls. The bump only
+                # applies while the stone pipeline is genuinely empty.
+                priority=priority
+                + (
+                    _STONE_PRIORITY_BOOST
+                    if stone_priority_boost and is_wall_material
+                    else 0
+                ),
                 value=float(score),
                 name=zone.neutral_type,
                 quantity=1,
             )
         )
+
+
+_STONE_PRIORITY_BOOST = 2
 
 
 def calculate_stone_reserve(

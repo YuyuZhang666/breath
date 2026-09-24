@@ -342,19 +342,16 @@ class MockGame:
                             f"sell id={rid} {name}x{actual} gold={self.gold}"
                         )
             elif kind == "buy":
+                # 任务书: buy 仅在武器商店可用; 小贩只收购矿石, 不出售.
                 prices = {
                     item["name"]: item["price"]
-                    for item in TEMPLATE["vendorShopList"]
+                    for item in TEMPLATE["weaponShopList"]
                 }
-                if chebyshev(pos, WEAPON_SHOP_POS) == 1:
-                    for item in TEMPLATE["weaponShopList"]:
-                        prices[item["name"]] = item["price"]
                 name = cmd.get("name")
                 quantity = cmd.get("num") or 1
                 if (
                     name in prices
                     and chebyshev(pos, WEAPON_SHOP_POS) == 1
-                    or (name in {"stone", "iron", "copper"} and chebyshev(pos, VENDOR_POS) == 1)
                 ):
                     cost = prices[name] * quantity
                     if self.gold >= cost:

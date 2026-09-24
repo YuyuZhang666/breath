@@ -13,7 +13,7 @@ class ComputeGovernorConfig:
     cooldown_rounds_after_watchdog: int = 1
     total_decision_budget_seconds: float = 3.0
     phase3_hard_stop_seconds: float = 0.350
-    forecast_watchdog_seconds: float = 0.100
+    forecast_watchdog_seconds: float = 0.500
     forecast_full_watchdog_seconds: float = 0.750
     night_full_forecast_enabled: bool = False
     emergency_reserve_seconds: float = 0.500
