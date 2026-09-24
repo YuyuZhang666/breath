@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Mapping
 
@@ -40,6 +40,7 @@ class _ItemGoal:
     priority: int
     value: float
     purchase_only: bool = False
+    reserve_exempt: bool = False
 
 
 def generate_strategic_item_jobs(
@@ -55,26 +56,45 @@ def generate_strategic_item_jobs(
     Item jobs are deliberately unavailable until all configured core weapons and
     critical walls exist. Their priorities remain below wall construction and
     twilight recall, so later fill/rebuild work also wins naturally.
+
+    The station upgrade voucher is the one exception: it restores full health
+    and raises the station HP ceiling, which is the best survival value per
+    gold in the manual, so a damaged station or a second day buys it even
+    while walls are still unfinished and without waiting on gold reserves.
     """
     roles = tuple(world.friendly_roles)
     empty = {role.unit_id: () for role in roles}
     if observation.time.phase is not Phase.DAY or not roles:
         return MappingProxyType(empty)
-    if not _core_defense_complete(observation, world, layout, intent):
+    goal = _station_upgrade_goal(observation, world, intent)
+    if goal is None and not _core_defense_complete(
+        observation, world, layout, intent,
+    ):
         return MappingProxyType(empty)
-
-    high_risk = _high_risk_window(intent, expected_wall_losses)
-    goal = _select_day_goal(world, layout, intent, high_risk)
+    if goal is None:
+        high_risk = _high_risk_window(intent, expected_wall_losses)
+        goal = _select_day_goal(world, layout, intent, high_risk)
     if goal is None:
         return MappingProxyType(empty)
+    return MappingProxyType(_jobs_for_goal(observation, world, intent, goal))
 
+
+def _jobs_for_goal(
+    observation: Observation,
+    world: WorldGrid,
+    intent: StrategicIntent,
+    goal: _ItemGoal,
+) -> dict[int, tuple[Job, ...]]:
+    roles = tuple(world.friendly_roles)
     holders = tuple(
         role for role in roles if has_item(role.backpack, goal.item_name)
     )
-    jobs: dict[int, tuple[Job, ...]] = dict(empty)
+    jobs: dict[int, tuple[Job, ...]] = {
+        role.unit_id: () for role in roles
+    }
     if holders:
         if goal.purchase_only:
-            return MappingProxyType(jobs)
+            return jobs
         holder = min(
             holders,
             key=lambda role: (
@@ -94,15 +114,21 @@ def generate_strategic_item_jobs(
                     targeted=True,
                 ),
             )
-        return MappingProxyType(jobs)
+        return jobs
 
     price = _shop_price(observation, goal.item_name)
-    spendable = max(0, observation.our.gold - intent.gold_reserve)
+    spendable = (
+        observation.our.gold
+        if goal.reserve_exempt
+        else max(0, observation.our.gold - intent.gold_reserve)
+    )
     if price is None or price > spendable:
-        return MappingProxyType(jobs)
+        return jobs
 
     shops = world.positions_for_zone('weaponShop')
-    buyers = tuple(role for role in roles if role.role_type == 'worker')
+    buyers = tuple(
+        role for role in roles if role.role_type in {'worker', 'pioneer'}
+    )
     choices: list[tuple[int, int, UnitState, Position]] = []
     for buyer in buyers:
         if len(buyer.backpack) >= buyer.backpack_capacity:
@@ -112,7 +138,7 @@ def generate_strategic_item_jobs(
             if path is not None:
                 choices.append((path.cost, buyer.unit_id, buyer, shop))
     if not choices:
-        return MappingProxyType(jobs)
+        return jobs
     _, _, buyer, shop = min(choices)
     jobs[buyer.unit_id] = (
         Job(
@@ -125,7 +151,7 @@ def generate_strategic_item_jobs(
             quantity=1,
         ),
     )
-    return MappingProxyType(jobs)
+    return jobs
 
 
 def merge_strategic_item_jobs(
@@ -280,6 +306,27 @@ def _high_risk_window(
     )
 
 
+def _station_upgrade_goal(
+    observation: Observation,
+    world: WorldGrid,
+    intent: StrategicIntent,
+) -> _ItemGoal | None:
+    if not intent.feature_flags.enable_upgrades:
+        return None
+    station = world.our_station()
+    if station is None:
+        return None
+    damaged = _upgrade_goal(station, STATION_UPGRADES, 0.75, 344, 10_000.0)
+    if damaged is not None:
+        return replace(damaged, reserve_exempt=True)
+    if observation.time.day_no < 2:
+        return None
+    proactive = _upgrade_goal(station, STATION_UPGRADES, 1.01, 344, 10_000.0)
+    if proactive is not None:
+        return replace(proactive, reserve_exempt=True)
+    return None
+
+
 def _select_day_goal(
     world: WorldGrid,
     layout: DefensiveLayout,
@@ -288,10 +335,6 @@ def _select_day_goal(
 ) -> _ItemGoal | None:
     flags = intent.feature_flags
     station = world.our_station()
-    if flags.enable_upgrades and station is not None:
-        goal = _upgrade_goal(station, STATION_UPGRADES, 0.75, 344, 10_000.0)
-        if goal is not None:
-            return goal
     if not high_risk:
         return None
     if flags.enable_upgrades:

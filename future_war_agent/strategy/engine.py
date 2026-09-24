@@ -1078,7 +1078,11 @@ class StrategyEngine:
             if (
                 requested_level is Phase3Level.FULL
                 and night_forecast is not None
-                and night_forecast.update_kind is ForecastUpdateKind.LIGHTWEIGHT
+                and night_forecast.update_kind
+                in (
+                    ForecastUpdateKind.LIGHTWEIGHT,
+                    ForecastUpdateKind.ANALYTIC,
+                )
             ):
                 requested_level = Phase3Level.LITE
             self._telemetry.set(phase3_level=requested_level.value)

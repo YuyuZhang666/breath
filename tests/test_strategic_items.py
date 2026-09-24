@@ -95,7 +95,7 @@ class StrategicItemTests(unittest.TestCase):
         observed = observation(
             round_no=55,
             our_units=(
-                unit(1, 5, 5, 'station', health=500, level=1),
+                unit(1, 5, 5, 'station', health=1500, level=1),
                 unit(2, 2, 2, 'worker'),
             ),
             gold=300,
@@ -111,6 +111,58 @@ class StrategicItemTests(unittest.TestCase):
         )
 
         self.assertTrue(all(not role_jobs for role_jobs in jobs.values()))
+
+    def test_damaged_station_upgrades_before_core_defense(self):
+        observed = observation(
+            round_no=55,
+            our_units=(
+                unit(1, 5, 5, 'station', health=500, level=1),
+                unit(2, 2, 2, 'worker'),
+            ),
+            gold=300,
+            weapon_shop=(ShopItem('StationUpgradeVoucher1', 100),),
+            zones=(Zone(Position(1, 1), 'weaponShop'),),
+        )
+        world = WorldGrid.from_observation(observed)
+        intent = StrategicIntent(
+            feature_flags=RuleFeatureFlags(enable_upgrades=True),
+            gold_reserve=250,
+        )
+
+        jobs = generate_strategic_item_jobs(
+            observed, world, build_defensive_layout(world), intent
+        )
+
+        purchases = [
+            job for role_jobs in jobs.values() for job in role_jobs
+            if job.kind.value == 'buy'
+        ]
+        self.assertEqual(len(purchases), 1)
+        self.assertEqual(purchases[0].name, 'StationUpgradeVoucher1')
+
+    def test_day_two_proactive_station_upgrade_ignores_reserve(self):
+        shop = (ShopItem('StationUpgradeVoucher1', 100),)
+        observed, world, layout = self._defended(
+            round_no=131,
+            station_health=1500,
+            shop=shop,
+            gold=199,
+        )
+        intent = StrategicIntent(
+            profile=StrategyProfile.SURVIVE,
+            build_plan=BuildPlan(wall_site_limit=12),
+            feature_flags=RuleFeatureFlags(enable_upgrades=True),
+            gold_reserve=100,
+        )
+
+        jobs = generate_strategic_item_jobs(observed, world, layout, intent)
+
+        purchases = [
+            job for role_jobs in jobs.values() for job in role_jobs
+            if job.kind.value == 'buy'
+        ]
+        self.assertEqual(len(purchases), 1)
+        self.assertEqual(purchases[0].name, 'StationUpgradeVoucher1')
 
     def test_station_upgrade_purchase_respects_dynamic_gold_reserve(self):
         shop = (ShopItem('StationUpgradeVoucher1', 100),)
@@ -132,7 +184,7 @@ class StrategicItemTests(unittest.TestCase):
         self.assertEqual(purchases[0].name, 'StationUpgradeVoucher1')
 
         poor, poor_world, poor_layout = self._defended(
-            gold=199, shop=shop
+            gold=99, shop=shop
         )
         poor_jobs = generate_strategic_item_jobs(
             poor, poor_world, poor_layout, intent

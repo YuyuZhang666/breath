@@ -19,6 +19,7 @@ class WorldGrid:
     visible_enemy_role_cells: frozenset[Position]
     hard_blocked: frozenset[Position]
     soft_friendly: frozenset[Position]
+    station_cells: frozenset[Position]
     friendly_roles: tuple[UnitState, ...]
     stations: tuple[UnitState, ...]
     weapons: tuple[UnitState, ...]
@@ -39,6 +40,11 @@ class WorldGrid:
         tuple[frozenset[Position], frozenset[Position]],
         dict[Position, int],
     ] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+    _interaction_cache: dict[Position, tuple[Position, ...]] = field(
         default_factory=dict,
         compare=False,
         repr=False,
@@ -73,6 +79,22 @@ class WorldGrid:
                 key=lambda value: value.unit_id,
             )
         )
+        own_stations = tuple(
+            sorted(
+                (
+                    value
+                    for value in observation.our.units
+                    if value.health > 0 and value.role_type == "station"
+                ),
+                key=lambda value: value.unit_id,
+            )
+        )
+        station_cells = frozenset().union(
+            *(
+                station_footprint(station.position, rules)
+                for station in own_stations
+            )
+        ) if own_stations else frozenset()
         neutral_cells = frozenset(
             zone.position for zone in observation.zones
         )
@@ -99,17 +121,9 @@ class WorldGrid:
                 visible_enemy_role_cells,
             ),
             soft_friendly=frozenset(value.position for value in friendly_roles),
+            station_cells=station_cells,
             friendly_roles=friendly_roles,
-            stations=tuple(
-                sorted(
-                    (
-                        value
-                        for value in observation.our.units
-                        if value.health > 0 and value.role_type == "station"
-                    ),
-                    key=lambda value: value.unit_id,
-                )
-            ),
+            stations=own_stations,
             weapons=tuple(
                 sorted(
                     (
@@ -160,18 +174,23 @@ class WorldGrid:
         )
 
     def interaction_cells(self, target: Position) -> tuple[Position, ...]:
+        cached = self._interaction_cache.get(target)
+        if cached is not None:
+            return cached
         cells = (
             Position(target.x + dx, target.y + dy)
             for dx in (-1, 0, 1)
             for dy in (-1, 0, 1)
             if dx != 0 or dy != 0
         )
-        return tuple(
+        resolved = tuple(
             sorted(
                 (cell for cell in cells if self.can_traverse(cell)),
                 key=lambda position: (position.x, position.y),
             )
         )
+        self._interaction_cache[target] = resolved
+        return resolved
 
     def our_station(self) -> UnitState | None:
         return self.stations[0] if self.stations else None
@@ -179,24 +198,14 @@ class WorldGrid:
     def is_geographic_land(self, position: Position) -> bool:
         if not self.in_bounds(position) or position in self.neutral_cells:
             return False
-        station_cells = (
-            frozenset().union(
-                *(
-                    station_footprint(station.position, self.rules)
-                    for station in self.stations
-                )
-            )
-            if self.stations
-            else frozenset()
-        )
-        return position not in station_cells
+        return position not in self.station_cells
 
     def station_distance(self, position: Position) -> int | None:
-        station = self.our_station()
-        if station is None:
+        if not self.station_cells:
             return None
-        footprint = station_footprint(station.position, self.rules)
-        return min(position.chebyshev_distance(cell) for cell in footprint)
+        return min(
+            position.chebyshev_distance(cell) for cell in self.station_cells
+        )
 
     def is_weapon_build_site(self, position: Position) -> bool:
         return self.is_geographic_land(position) and self.station_distance(position) == 1

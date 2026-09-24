@@ -28,6 +28,7 @@ from .world import WorldGrid
 _PERSONAL_ROLES = frozenset({'worker', 'pioneer'})
 _EMERGENCY_WEAPON_LIMIT = 3
 _EMERGENCY_ROBOT_LIMIT = 64
+_MAX_STAND_CHOICES_PER_PAIR = 2
 
 
 class _EmergencyDeadlineExpired(Exception):
@@ -329,7 +330,26 @@ def assign_controllers(
                     options = options_by_pair[(role.unit_id, weapon.unit_id)]
                     if not options:
                         break
-                    pair_options.append(options)
+                    # Risk strictly dominates distance in the scoring tuple,
+                    # so only the safest stands can ever be optimal; the
+                    # second choice suffices to resolve stand collisions
+                    # between two weapons whose interaction cells overlap.
+                    # The in-place stand is always kept because ready_now
+                    # outranks risk in the score.
+                    ranked = sorted(
+                        options,
+                        key=lambda item: (
+                            risk_by_role_position[(role.unit_id, item.stand)],
+                            item.distance,
+                            item.stand.x,
+                            item.stand.y,
+                        ),
+                    )
+                    kept = list(ranked[:_MAX_STAND_CHOICES_PER_PAIR])
+                    for item in options:
+                        if item.stand == role.position and item not in kept:
+                            kept.append(item)
+                    pair_options.append(tuple(kept))
                 else:
                     selected_role_ids = {
                         role.unit_id for role in selected_roles
@@ -363,18 +383,23 @@ def assign_controllers(
                         )
                     ):
                         continue
+                    weapon_by_id = {
+                        weapon.unit_id: weapon for weapon in selected_weapons
+                    }
+                    role_position_by_id = {
+                        role.unit_id: role.position for role in selected_roles
+                    }
+                    unselected_risks = tuple(
+                        risk_by_role_position[(role.unit_id, role.position)]
+                        for role in roles
+                        if role.unit_id not in selected_role_ids
+                    )
                     for possible in product(*pair_options):
                         if len({item.stand for item in possible}) != size:
                             continue
                         ordered = tuple(
                             sorted(possible, key=lambda value: value.role_id)
                         )
-                        weapon_by_id = {
-                            weapon.unit_id: weapon for weapon in selected_weapons
-                        }
-                        role_position_by_id = {
-                            role.unit_id: role.position for role in selected_roles
-                        }
                         ready_now = sum(
                             item.stand == role_position_by_id[item.role_id]
                             and weapon_by_id[item.weapon_id].cooldown == 0
@@ -391,15 +416,11 @@ def assign_controllers(
                             != item.weapon_id
                             for item in ordered
                         )
-                        final_positions = {
-                            role.unit_id: role.position for role in roles
-                        }
-                        final_positions.update(
-                            (item.role_id, item.stand) for item in ordered
-                        )
-                        operator_risks = tuple(
-                            risk_by_role_position[(role_id, position)]
-                            for role_id, position in final_positions.items()
+                        operator_risks = unselected_risks + tuple(
+                            risk_by_role_position[
+                                (item.role_id, item.stand)
+                            ]
+                            for item in ordered
                         )
                         unsafe_controller_count = sum(
                             risk >= 3 for risk in operator_risks

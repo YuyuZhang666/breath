@@ -41,6 +41,7 @@ class ForecastUpdateKind(StrEnum):
     FULL = 'full'
     INCREMENTAL = 'incremental'
     LIGHTWEIGHT = 'lightweight'
+    ANALYTIC = 'analytic'
     REBASED_DAY = 'rebased_day'
 
 
@@ -118,6 +119,8 @@ def refresh_night_forecast(
                 previous_forecast is not None
                 and previous_forecast.model_version == MODEL_VERSION
                 and previous_forecast.day_no == observation.time.day_no
+                and previous_forecast.update_kind
+                is not ForecastUpdateKind.ANALYTIC
             ):
                 incremental = update_forecast_incrementally(
                     observation,
@@ -134,12 +137,19 @@ def refresh_night_forecast(
                     deadline=deadline,
                 )
             except DeadlineExceeded:
-                if incremental is None:
-                    raise
+                if incremental is not None:
+                    return ForecastRefresh(
+                        forecast=incremental,
+                        recomputed=False,
+                        reason=f'{reason}; lightweight forecast deadline expired',
+                    )
                 return ForecastRefresh(
-                    forecast=incremental,
-                    recomputed=False,
-                    reason=f'{reason}; lightweight forecast deadline expired',
+                    forecast=build_analytic_forecast(observation),
+                    recomputed=True,
+                    reason=(
+                        f'{reason}; lightweight forecast deadline expired;'
+                        ' analytic fallback'
+                    ),
                 )
             if incremental is not None:
                 lightweight = _more_conservative_forecast(
@@ -173,6 +183,15 @@ def refresh_night_forecast(
                 forecast=forecast,
                 recomputed=True,
                 reason=f'{reason}; full forecast unsupported: {exc}',
+            )
+        except DeadlineExceeded:
+            return ForecastRefresh(
+                forecast=build_analytic_forecast(observation),
+                recomputed=True,
+                reason=(
+                    f'{reason}; full forecast deadline expired;'
+                    ' analytic fallback'
+                ),
             )
         return ForecastRefresh(
             forecast=forecast,
@@ -576,6 +595,106 @@ def build_lightweight_forecast(
     )
 
 
+def build_analytic_forecast(observation: Observation) -> NightForecast:
+    '''Deadline-proof arithmetic fallback mirroring the lightweight model.
+
+    A night without any forecast keeps phase 3 skipped (prior_watchdog) for
+    the whole night, which is how the second night was lost on the contest
+    server: the lightweight forecast missed its watchdog deadline every
+    round, so no forecast ever existed. This estimate does no simulation
+    and never consults a clock, so it cannot miss a deadline; a later
+    round retries the lightweight path.
+    '''
+    if observation.time.phase is not Phase.NIGHT:
+        raise ValueError('NightForecast requires a night observation')
+    station = _living_unit(observation, 'station')
+    if station is None:
+        raise UnsupportedSimulation(
+            'analytic forecast requires a living station'
+        )
+    station_hp = station.health
+    station_cells = station_footprint(station.position)
+    remaining_turns = max(
+        0,
+        NIGHT_ROUNDS - observation.time.round_in_phase + 1,
+    )
+    incoming_damage = 0
+    next_damage = 0
+    critical_robots: list[tuple[int, int]] = []
+    for robot in observation.robots:
+        if (
+            robot.health <= 0
+            or not _is_possible_threat(robot, observation.our.team_type)
+        ):
+            continue
+        spec = ROBOT_SPECS.get(robot.role_type)
+        attack_power = (
+            spec.attack_power
+            if spec is not None
+            else max(item.attack_power for item in ROBOT_SPECS.values())
+        )
+        attack_range = (
+            spec.attack_range
+            if spec is not None
+            else max(item.attack_range for item in ROBOT_SPECS.values())
+        )
+        distance = min(
+            robot.position.chebyshev_distance(cell)
+            for cell in station_cells
+        )
+        turns_to_attack = max(0, distance - attack_range)
+        if robot.abnormal_state.casefold() == 'dizzy':
+            turns_to_attack += 1
+        attack_turns = max(0, remaining_turns - turns_to_attack)
+        contribution = attack_power * attack_turns
+        incoming_damage += contribution
+        if turns_to_attack == 0:
+            next_damage += attack_power
+        if contribution > 0:
+            critical_robots.append((contribution, robot.robot_id))
+    effective_defense = station_hp
+    survival_margin = effective_defense - incoming_damage
+    risk_ratio = Fraction(incoming_damage, max(1, effective_defense))
+    lethal_round = (
+        observation.time.round_no + 1
+        if station_hp <= 0 or next_damage >= station_hp
+        else None
+    )
+    critical_robots.sort(key=lambda item: (-item[0], item[1]))
+    input_summary = summarize_forecast_inputs(observation)
+    return NightForecast(
+        expected_station_hp_at_dawn=max(0, station_hp - incoming_damage),
+        predicted_damage_before_dawn=incoming_damage,
+        effective_defense_hp=effective_defense,
+        future_firepower=0,
+        survival_margin=survival_margin,
+        risk_ratio=risk_ratio,
+        risk_level=classify_risk(
+            risk_ratio,
+            survival_margin,
+            lethal_round,
+            observation.time.round_no,
+            complete=False,
+        ),
+        expected_wall_losses=0,
+        expected_weapon_losses=0,
+        expected_role_losses=0,
+        lethal_round=lethal_round,
+        critical_robot_ids=tuple(item[1] for item in critical_robots[:8]),
+        critical_wall_ids=(),
+        generated_round=observation.time.round_no,
+        updated_round=observation.time.round_no,
+        day_no=observation.time.day_no,
+        model_version=MODEL_VERSION,
+        update_kind=ForecastUpdateKind.ANALYTIC,
+        complete=False,
+        uncertainty_reasons=('analytic_deadline_fallback',),
+        observed_station_hp=station_hp,
+        expected_next_station_hp=max(0, station_hp - next_damage),
+        input_signature=input_summary.signature,
+    )
+
+
 def _more_conservative_forecast(
     incremental: NightForecast,
     lightweight: NightForecast,
@@ -892,6 +1011,8 @@ def forecast_recompute_reason(
         return 'night forecast missing'
     if previous_forecast.model_version != MODEL_VERSION:
         return 'forecast model changed'
+    if previous_forecast.update_kind is ForecastUpdateKind.ANALYTIC:
+        return 'analytic forecast awaiting simulation retry'
     if previous_forecast.day_no != observation.time.day_no:
         return 'first forecast of night'
     if previous_observation is None or previous_observation.time.phase is not Phase.NIGHT:

@@ -6,9 +6,11 @@ from future_war_agent.protocol.models import Position
 from future_war_agent.strategy.forecast import (
     ForecastUpdateKind,
     RiskLevel,
+    build_analytic_forecast,
     build_lightweight_forecast,
     build_night_forecast,
     classify_risk,
+    forecast_recompute_reason,
     rebase_day_forecast,
     refresh_night_forecast,
     summarize_forecast_inputs,
@@ -283,6 +285,76 @@ class NightForecastTests(unittest.TestCase):
             ForecastUpdateKind.INCREMENTAL,
         )
         self.assertIn('deadline expired', refreshed.reason)
+
+    def test_lightweight_deadline_without_cache_returns_analytic(self) -> None:
+        observed = self._quiet_night(71)
+
+        refreshed = refresh_night_forecast(
+            observed,
+            allow_full=False,
+            clock=lambda: 1.0,
+            deadline=1.0,
+        )
+
+        self.assertTrue(refreshed.recomputed)
+        self.assertIs(
+            refreshed.forecast.update_kind,
+            ForecastUpdateKind.ANALYTIC,
+        )
+        self.assertIn('analytic fallback', refreshed.reason)
+        self.assertEqual(refreshed.forecast.observed_station_hp, 500)
+
+    def test_full_deadline_returns_analytic(self) -> None:
+        observed = self._quiet_night(71)
+
+        refreshed = refresh_night_forecast(
+            observed,
+            allow_full=True,
+            clock=lambda: 1.0,
+            deadline=1.0,
+        )
+
+        self.assertTrue(refreshed.recomputed)
+        self.assertIs(
+            refreshed.forecast.update_kind,
+            ForecastUpdateKind.ANALYTIC,
+        )
+        self.assertIn('analytic fallback', refreshed.reason)
+
+    def test_analytic_forecast_forces_recompute_next_round(self) -> None:
+        first = self._quiet_night(71)
+        second = self._quiet_night(72)
+        analytic = build_analytic_forecast(first)
+
+        reason = forecast_recompute_reason(
+            second,
+            previous_observation=first,
+            previous_forecast=analytic,
+            previous_decision=None,
+        )
+
+        self.assertEqual(reason, 'analytic forecast awaiting simulation retry')
+
+    def test_analytic_forecast_reports_conservative_risk(self) -> None:
+        observed = observation(
+            round_no=71,
+            our_units=(
+                unit(1, 1, 1, 'worker'),
+                unit(2, 10, 10, 'station', health=100, level=1),
+            ),
+            robots=(robot(9, 0, 0, role_type='bossRobot'),),
+        )
+
+        forecast = build_analytic_forecast(observed)
+
+        self.assertIs(forecast.update_kind, ForecastUpdateKind.ANALYTIC)
+        self.assertFalse(forecast.complete)
+        self.assertLess(forecast.survival_margin, 0)
+        self.assertIs(forecast.risk_level, RiskLevel.CRITICAL)
+        self.assertIn(
+            'analytic_deadline_fallback',
+            forecast.uncertainty_reasons,
+        )
 
     def test_risk_threshold_boundaries_are_exact(self) -> None:
         self.assertIs(

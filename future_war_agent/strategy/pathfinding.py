@@ -16,6 +16,16 @@ _STEPS = tuple(
     if (dx, dy) != (0, 0)
 )
 
+# WorldGrid is rebuilt every round, so the per-instance distance cache dies
+# with it; day maps stay geometrically identical for many consecutive rounds
+# (walls appear a few times per day, robots only at night), so a small
+# module-level cache keyed on the blocked set removes nearly every BFS.
+_REVERSE_CACHE_CAPACITY = 64
+_REVERSE_CACHE: dict[
+    tuple[frozenset[Position], frozenset[Position], int, int],
+    dict[Position, int],
+] = {}
+
 
 @dataclass(frozen=True, slots=True)
 class PathResult:
@@ -49,6 +59,20 @@ def shortest_path(
     )
     if cache_key in world._path_cache:
         return world._path_cache[cache_key]  # type: ignore[return-value]
+
+    if not additional_blocked and start not in world.hard_blocked:
+        shared_key = (
+            valid_goals,
+            world.hard_blocked,
+            world.observation.width,
+            world.observation.height,
+        )
+        if shared_key in _REVERSE_CACHE:
+            result = _path_from_reverse_distances(
+                world, start, valid_goals, deadline_check,
+            )
+            world._path_cache[cache_key] = result
+            return result
 
     heuristic_cache = world._heuristic_cache.setdefault(valid_goals, {})
 
@@ -201,6 +225,45 @@ def _heuristic(
     return distance
 
 
+def _path_from_reverse_distances(
+    world: WorldGrid,
+    start: Position,
+    valid_goals: frozenset[Position],
+    deadline_check: Callable[[], None] | None,
+) -> PathResult | None:
+    """Answer a goal query from the shared reverse-distance field.
+
+    On the unweighted grid the BFS distance to the goal set equals the A*
+    cost, and descending strictly-decreasing distances yields a shortest
+    path, so the cached field replaces a per-query A* search. Neighbour
+    ties resolve by (x, y) to match first_step_options ordering.
+    """
+    distances = _reverse_distances(
+        world, valid_goals, frozenset(), deadline_check,
+    )
+    remaining = distances.get(start)
+    if remaining is None:
+        return None
+    path = [start]
+    current = start
+    while remaining > 0:
+        _check_deadline(deadline_check)
+        best: Position | None = None
+        for dx, dy in _STEPS:
+            neighbor = Position(current.x + dx, current.y + dy)
+            if distances.get(neighbor) == remaining - 1 and (
+                best is None or (neighbor.x, neighbor.y)
+                < (best.x, best.y)
+            ):
+                best = neighbor
+        if best is None:
+            return None
+        path.append(best)
+        current = best
+        remaining -= 1
+    return PathResult(path=tuple(path), cost=len(path) - 1)
+
+
 def _reverse_distances(
     world: WorldGrid,
     goals: frozenset[Position],
@@ -213,24 +276,67 @@ def _reverse_distances(
         return cached
 
     blocked = world.hard_blocked | additional_blocked
-    distances = {goal: 0 for goal in goals}
-    queue = deque(sorted(goals, key=lambda item: (item.x, item.y)))
+    shared_key = (
+        goals,
+        blocked,
+        world.observation.width,
+        world.observation.height,
+    )
+    shared = _REVERSE_CACHE.get(shared_key)
+    if shared is None:
+        shared = _bfs_reverse_distances(world, goals, blocked, deadline_check)
+        _REVERSE_CACHE[shared_key] = shared
+        while len(_REVERSE_CACHE) > _REVERSE_CACHE_CAPACITY:
+            del _REVERSE_CACHE[next(iter(_REVERSE_CACHE))]
+    world._distance_cache[cache_key] = shared
+    return shared
+
+
+def _bfs_reverse_distances(
+    world: WorldGrid,
+    goals: frozenset[Position],
+    blocked: frozenset[Position],
+    deadline_check: Callable[[], None] | None,
+) -> dict[Position, int]:
+    # Integer keys (x * height + y) avoid millions of Position hashes in
+    # the hot loop; out-of-bounds blocked positions are dropped because the
+    # per-neighbour bounds check already rejects them.
+    width = world.observation.width
+    height = world.observation.height
+
+    def cell_key(position: Position) -> int:
+        return position.x * height + position.y
+
+    blocked_keys = frozenset(
+        cell_key(position)
+        for position in blocked
+        if 0 <= position.x < width and 0 <= position.y < height
+    )
+    distances: dict[int, int] = {}
+    queue: deque[int] = deque()
+    for goal in goals:
+        key = cell_key(goal)
+        if key not in distances:
+            distances[key] = 0
+            queue.append(key)
     while queue:
         _check_deadline(deadline_check)
         current = queue.popleft()
         next_cost = distances[current] + 1
+        x, y = divmod(current, height)
         for dx, dy in _STEPS:
-            neighbor = Position(current.x + dx, current.y + dy)
-            if (
-                neighbor in distances
-                or neighbor in blocked
-                or not world.in_bounds(neighbor)
-            ):
-                continue
-            distances[neighbor] = next_cost
-            queue.append(neighbor)
-    world._distance_cache[cache_key] = distances
-    return distances
+            nx = x + dx
+            ny = y + dy
+            if 0 <= nx < width and 0 <= ny < height:
+                neighbor = nx * height + ny
+                if neighbor in distances or neighbor in blocked_keys:
+                    continue
+                distances[neighbor] = next_cost
+                queue.append(neighbor)
+    return {
+        Position(key // height, key % height): distance
+        for key, distance in distances.items()
+    }
 
 
 def _check_deadline(
